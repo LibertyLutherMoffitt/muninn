@@ -1,0 +1,38 @@
+# Nix
+result
+result-*
+
+# direnv
+.direnv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.venv/
+
+# Kotlin / Gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+*.class
+*.jar
+*.dex
+.kotlin/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~

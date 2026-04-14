@@ -62,17 +62,22 @@ and connects; the other accepts. Works regardless of platform combination
 socket where the local BT MAC address is higher is dropped. Both sides apply this rule
 deterministically, leaving exactly one connection.
 
+### Reconnection
+
+BT connections drop often (range, interference, phone sleep). On socket error or EOF, both
+sides return to the listen+connect state. A new connection triggers a fresh E2EE handshake.
+Static keys mean every handshake produces the same shared secret, so this is cheap.
+
+**Resend unacked messages:** each side tracks which sent messages have received an ACK. On
+reconnect, any message without an ACK is resent. The receiver deduplicates by `msg_id` —
+if a message with a known `msg_id` arrives again, it is silently dropped and an ACK is sent
+back. This gives reliable delivery across disconnects with no extra protocol complexity.
+
 ---
 
 ## Encryption — E2EE
 
-Both clients use **libsodium** via language-specific bindings. Primitives are identical on
-both sides, guaranteeing full interoperability.
-
-| Side    | Library          | Underlying lib |
-|---------|------------------|----------------|
-| Linux   | PyNaCl           | libsodium      |
-| Android | lazysodium-android | libsodium    |
+Both clients use **libsodium** via platform-specific bindings (listed in Clients section).
 
 ### Key Exchange & Encryption Flow
 
@@ -93,19 +98,9 @@ both parties can verbally compare a short key fingerprint.
 
 ### Nonces
 
-XSalsa20 is a stream cipher. Encrypting two messages with the same key and same nonce
-leaks plaintext (two-time pad attack — attacker XORs ciphertexts to get XOR of plaintexts).
-Key complexity does not prevent this; it is a property of stream ciphers independent of
-key strength.
-
-**Scheme:** generate 24 cryptographically random bytes per message, prepend to ciphertext.
-Recipient reads first 24 bytes as nonce, remainder as ciphertext.
-
-```
-[ 24 bytes: random nonce ][ N bytes: Box ciphertext ]
-```
-
-Collision probability is negligible at chat scale (~2^96 nonce space).
+24 random bytes generated per message, prepended to ciphertext. Recipient reads first
+24 bytes as nonce, remainder as ciphertext. Collision probability negligible at chat
+scale (~2^96 nonce space).
 
 ---
 
@@ -173,66 +168,53 @@ responsibility for delivery completion.
 
 ---
 
-## Architecture
+## Wire Format
 
-### Shared (per client, not shared code)
-
-Each client independently implements the same protocol:
-
-- **Protocol layer** — framing, pubkey exchange handshake, message serialization
-- **Crypto layer** — libsodium Box encrypt/decrypt
-- **BT layer** — RFCOMM connect/listen/read/write
-- **UI layer** — platform-specific (GTK/Qt/CLI on Linux, Compose on Android)
-
-No shared codebase. Protocol spec is the contract between clients.
-
-### Wire Format
-
-All frames:
+All frames share a universal header:
 ```
-[ 1 byte: type ][ payload... ]
+[ 1 byte: type ][ 2 bytes: payload_length ][ N bytes: payload ]
 ```
 
-Type byte values — TBD (finalized at Step 2).
+**Byte order:** big-endian (network order) for all multi-byte integers.  
+**Text encoding:** UTF-8 for all plaintext message content.  
+Maximum payload size: 65,535 bytes (uint16).
 
-Message frames carry:
+The receiver loop is type-agnostic: read 1 byte (type), read 2 bytes (length), read N bytes
+(payload), then dispatch by type.
+
+### Type Bytes
+
+| Type | Value | Encrypted |
+|------|-------|-----------|
+| Handshake | `0x01` | No (pre-key-exchange) |
+| Message   | `0x02` | Yes |
+| ACK       | `0x03` | Yes |
+
+Message frame payload:
 ```
-[ 1 byte: type ]
 [ 16 bytes: group_id ]
-[ 16 bytes: msg_id ]
+[ 16 bytes: msg_id (UUID v4) ]
 [ 6 bytes: sender_id (BT MAC of originating device) ]
 [ 6 bytes: final_dest (BT MAC of intended recipient) ]
-[ 4 bytes: payload_length ]
+[ 4 bytes: timestamp (uint32 unix seconds) ]
 [ 24 bytes: nonce ][ N bytes: Box ciphertext ]
 ```
 
-ACK frames carry:
+ACK frame payload:
 ```
-[ 1 byte: type ]
 [ 16 bytes: msg_id ]
 [ 6 bytes: from (BT MAC of acknowledging device) ]
 ```
 
-Handshake frames use a different type byte and their own payload structure (TBD).
-
----
-
-## Connectivity Model
-
+Handshake frame payload:
 ```
-Android phone  ──── RFCOMM ────  Linux laptop
-     │
-     │  (Wearable Data Layer — phase 3)
-     │
-  WearOS watch
+[ 32 bytes: X25519 public key ]
 ```
 
-```
-Group relay example:
-  Device A ──── RFCOMM ──── Device B ──── RFCOMM ──── Device C
-```
-
-No server. No relay infrastructure. All traffic stays on local BT links between devices.
+Handshake frames are sent in plaintext (before shared secret exists). After both sides
+exchange pubkeys and derive the shared secret, all subsequent frames (message, ACK) have
+their payloads Box-encrypted before framing. The universal header (type + length) is
+always plaintext.
 
 ---
 
@@ -257,35 +239,29 @@ everything built on top.
 - Raw bytes flow both directions
 - No crypto, no framing, no protocol
 
-**Step 2 — Wire framing**
-- Type byte + length prefix + payload
-- Basic frame parsing on both clients
-- Type byte values finalized at this step
-
-**Step 3 — E2EE handshake**
-- X25519 pubkey exchange on connect
-- All subsequent frames: Box encrypted with random nonce prepended
+**Step 2 — Wire framing + E2EE handshake**
+- Universal frame header: `[type][length][payload]`
+- Handshake frame: exchange X25519 pubkeys on connect
+- All post-handshake frames: Box encrypted with random nonce prepended
 - Verify decrypt works cross-platform (Linux ↔ Android)
 
-**Step 4 — 1:1 messaging**
-- Send/receive encrypted text end-to-end
+**Step 3 — 1:1 messaging**
+- Send/receive encrypted text messages
+- ACK per message — sender tracks unacked messages
+- Auto-reconnect on disconnect — fresh handshake, resend unacked messages
+- Receiver deduplicates by msg_id
 - CLI functional on Linux
 - This is a complete, shippable thing — two people, encrypted chat, no internet
 
-**Step 5 — Groups**
-- Add group_id, msg_id, sender_id, final_dest to frame
+**Step 4 — Groups**
+- group_id, sender_id, final_dest become meaningful (ignored in 1:1)
 - All conversations become groups (1:1 = group of 2)
 - Group formation + member pubkey distribution
 
-**Step 6 — Delivery ACK**
-- ACK frame type
-- Sender tracks delivery state per message per recipient
-- End-to-end receipt (ACK from final recipient, not relay)
-
-**Step 7 — Gossip / relay**
-- Persistent relay for non-directly-connected members
-- Delivery state sync between connected peers (monotonic: delivered > pending)
-- Any device holding an undelivered message retries when recipient becomes reachable
+**Step 5 — Group relay + delivery**
+- Relay for non-directly-connected members
+- End-to-end ACK routing through relay path
+- Delivery gossip — any device holding undelivered message retries when recipient reachable
 
 ---
 

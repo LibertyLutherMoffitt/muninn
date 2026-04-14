@@ -1,0 +1,5 @@
+# pybluez is a C extension with incomplete type stubs.
+# BluetoothSocket methods (listen, bind, connect, close, etc.) exist
+# at runtime but are invisible to static analysis.
+[rules]
+unresolved-attribute = "ignore"
