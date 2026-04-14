@@ -187,8 +187,8 @@ The receiver loop is type-agnostic: read 1 byte (type), read 2 bytes (length), r
 | Type | Value | Encrypted |
 |------|-------|-----------|
 | Handshake | `0x01` | No (pre-key-exchange) |
-| Message   | `0x02` | Yes |
-| ACK       | `0x03` | Yes |
+| Message   | `0x02` | Partially (metadata plaintext, message text encrypted) |
+| ACK       | `0x03` | No (contains only msg_id + sender MAC) |
 
 Message frame payload:
 ```
