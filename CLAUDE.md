@@ -8,7 +8,7 @@ nix build .#muninn-linux
 ./result/bin/muninn --help
 ```
 
-Commits must be made from within `nix develop` — pre-commit hooks require tools from the flake.
+Pre-commit hooks run automatically via prek, which enters the nix dev shell itself — commits work from anywhere.
 
 ## Intentional Decisions (don't "fix" these)
 
