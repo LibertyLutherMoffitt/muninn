@@ -2,7 +2,7 @@
 
 ## Overview
 
-A pair of native clients enabling encrypted peer-to-peer text communication over Bluetooth
+Native clients enabling encrypted peer-to-peer text communication over Bluetooth
 Classic (RFCOMM), requiring no internet, cellular, or Wi-Fi infrastructure. Designed for
 use in offline environments such as airplane cabins. Legal for personal use in USA, Taiwan,
 and permitted on commercial flights per FAA guidelines.
@@ -29,7 +29,7 @@ and permitted on commercial flights per FAA guidelines.
 **Crypto:** lazysodium-android (libsodium binding)  
 **UI:** Jetpack Compose
 
-### 3. WearOS Client — Kotlin (future / phase 3)
+### 3. WearOS Client — Kotlin (future)
 
 **Architecture:** Thin client via Wearable Data Layer API — watch relays messages through
 paired Android phone, which handles all BT communication.  
@@ -47,7 +47,8 @@ to poor BT stack reliability and aggressive power management on WearOS.
 **Why not BLE:** RFCOMM is more stable for this use case. Linux GATT server (BLE peripheral
 role) via BlueZ is painful and poorly documented. RFCOMM is well-supported on both
 platforms with no manufacturer fragmentation issues.  
-**Range:** ~10–30m (more than sufficient for in-cabin use)  
+**Range:** ~10–30m open-air (Class 2). In-cabin through seats and bodies: realistically
+~3–8 rows. Sufficient for nearby travel companions; not expected to span a full aircraft.  
 **Pairing:** Standard OS-level Bluetooth pairing required once before first use.
 
 ### Connection Initiation
@@ -109,6 +110,9 @@ Collision probability is negligible at chat scale (~2^96 nonce space).
 ---
 
 ## Conversations (Groups & DMs)
+
+> **Scope note:** 1:1 messaging (Steps 1–4) is the initial implementation target. Everything
+> in this section is Steps 5–7.
 
 Every conversation is a **group**. A 1:1 DM is a group of 2. There is no separate DM
 protocol — this eliminates a code path and keeps the implementation uniform.
@@ -189,16 +193,24 @@ All frames:
 [ 1 byte: type ][ payload... ]
 ```
 
-Type byte values — TBD (to be defined when handshake sequence is finalized).
+Type byte values — TBD (finalized at Step 2).
 
-Message/ACK frames carry:
+Message frames carry:
 ```
 [ 1 byte: type ]
 [ 16 bytes: group_id ]
 [ 16 bytes: msg_id ]
+[ 6 bytes: sender_id (BT MAC of originating device) ]
 [ 6 bytes: final_dest (BT MAC of intended recipient) ]
 [ 4 bytes: payload_length ]
 [ 24 bytes: nonce ][ N bytes: Box ciphertext ]
+```
+
+ACK frames carry:
+```
+[ 1 byte: type ]
+[ 16 bytes: msg_id ]
+[ 6 bytes: from (BT MAC of acknowledging device) ]
 ```
 
 Handshake frames use a different type byte and their own payload structure (TBD).
@@ -248,7 +260,7 @@ everything built on top.
 **Step 2 — Wire framing**
 - Type byte + length prefix + payload
 - Basic frame parsing on both clients
-- Type byte values defined here
+- Type byte values finalized at this step
 
 **Step 3 — E2EE handshake**
 - X25519 pubkey exchange on connect
@@ -293,7 +305,7 @@ everything built on top.
 - **Pairing UX** — users must pair devices in OS settings before first use (one-time)
 - **Linux pybluez2 install** — may require `libbluetooth-dev` system package
 - **Android background** — RFCOMM socket killed by aggressive OEM power management;
-  foreground service required (phase 1)
+  foreground service required (Step 1)
 - **WearOS standalone BT** — deprioritized; tethered model is reliable, standalone is not
 - **Group key distribution** — all members need all pubkeys before messaging; distribution
   through intermediaries adds complexity at group formation time
