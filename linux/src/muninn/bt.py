@@ -8,8 +8,15 @@ SERVICE_NAME = "Muninn"
 
 
 def get_local_mac() -> str:
-    with open("/sys/class/bluetooth/hci0/address") as f:
-        return f.read().strip().upper()
+    result = subprocess.run(
+        ["bluetoothctl", "show"],
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        if "Controller" in line:
+            return line.split()[1].upper()
+    raise RuntimeError("No Bluetooth adapter found")
 
 
 def create_server() -> bluetooth.BluetoothSocket:

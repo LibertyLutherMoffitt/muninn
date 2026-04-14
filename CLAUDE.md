@@ -4,9 +4,10 @@
 
 ```bash
 nix develop          # enter dev shell (installs prek hook automatically)
-nix build .#muninn-linux
-./result/bin/muninn --help
+nix run .#muninn-linux -- --help
 ```
+
+Use `nix run` not `nix build` — avoids creating `result/` symlink in repo root.
 
 Pre-commit hooks run automatically via prek, which enters the nix dev shell itself — commits work from anywhere.
 
