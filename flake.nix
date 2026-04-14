@@ -63,8 +63,13 @@
           ];
 
           shellHook = ''
-            if [ ! -f .git/hooks/pre-commit ] || ! grep -q prek .git/hooks/pre-commit 2>/dev/null; then
-              prek install --overwrite
+            if [ ! -f .git/hooks/pre-commit ] || ! grep -q 'nix develop' .git/hooks/pre-commit 2>/dev/null; then
+              mkdir -p .git/hooks
+              cat > .git/hooks/pre-commit << 'HOOK'
+            #!/usr/bin/env bash
+            exec nix develop --command prek run --hook-stage pre-commit
+            HOOK
+              chmod +x .git/hooks/pre-commit
             fi
           '';
         };
