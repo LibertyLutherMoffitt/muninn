@@ -1,5 +1,6 @@
 import argparse
 import queue
+import select
 import sys
 import threading
 import time
@@ -102,7 +103,12 @@ def chat(sock, box, local_mac, peer_addr, unacked, seen):
         raise ConnectionError("Disconnected")
 
 
-def pick_from_list(items: list[tuple[str, str]], auto_select: bool = False) -> str:
+def pick_from_list(
+    items: list[tuple[str, str]],
+    auto_select: bool = False,
+    abort: threading.Event | None = None,
+) -> str | None:
+    """Prompt user to pick a device. Returns None if abort fires first."""
     if auto_select and len(items) == 1:
         addr, name = items[0]
         print(f"Found: {name} ({addr})")
@@ -113,13 +119,28 @@ def pick_from_list(items: list[tuple[str, str]], auto_select: bool = False) -> s
         print(f"  {i}) {name} ({addr})")
 
     while True:
+        if abort is not None and abort.is_set():
+            return None
+        print("Pick device: ", end="", flush=True)
+        if abort is not None:
+            # Poll stdin so we can check abort between keystrokes
+            ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+            if not ready:
+                continue
+            line = sys.stdin.readline().strip()
+        else:
+            try:
+                line = input()
+            except EOFError:
+                continue
         try:
-            choice = int(input("Pick device: "))
+            choice = int(line)
             if 1 <= choice <= len(items):
                 return items[choice - 1][0]
-        except (ValueError, EOFError):
+        except ValueError:
             pass
-        print(f"Enter 1-{len(items)}")
+        if abort is None or not abort.is_set():
+            print(f"Enter 1-{len(items)}")
 
 
 def pick_device() -> str:
@@ -127,7 +148,10 @@ def pick_device() -> str:
     services = bt.discover()
     if services:
         items = [(s["host"], s.get("name", s["host"])) for s in services]
-        return pick_from_list(items, auto_select=True)
+        addr = pick_from_list(items, auto_select=True)
+        if addr is None:
+            raise ConnectionError("No device selected")
+        return addr
 
     # No Muninn service found — fall back to general BT scan
     print("No Muninn services found. Scanning all nearby devices...")
@@ -136,6 +160,8 @@ def pick_device() -> str:
         raise ConnectionError("No Bluetooth devices found nearby")
 
     addr = pick_from_list(devices)  # always prompt — any BT device could appear
+    if addr is None:
+        raise ConnectionError("No device selected")
     bt.ensure_paired(addr)
     return addr
 
@@ -221,8 +247,8 @@ def connect_with_listen(local_mac):
     if services:
         items = [(s["host"], s.get("name", s["host"])) for s in services]
         print("(Incoming connections still accepted while you choose)")
-        addr = pick_from_list(items, auto_select=True)
-        if connected.is_set():
+        addr = pick_from_list(items, auto_select=True, abort=connected)
+        if addr is None or connected.is_set():
             return use_incoming()
         return use_outgoing(addr)
 
@@ -233,8 +259,8 @@ def connect_with_listen(local_mac):
 
     if devices:
         print("(Incoming connections still accepted while you choose)")
-        addr = pick_from_list(devices)
-        if connected.is_set():
+        addr = pick_from_list(devices, abort=connected)
+        if addr is None or connected.is_set():
             return use_incoming()
         return use_outgoing(addr)
 
