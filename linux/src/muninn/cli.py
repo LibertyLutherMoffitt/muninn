@@ -198,9 +198,10 @@ def listen_worker(q: queue.Queue, result: dict, connected: threading.Event) -> N
     connected.set()
 
 
-def connect_with_listen(local_mac):
+def connect_with_listen(local_mac, target: str | None = None):
     """Listen for incoming AND scan/connect outgoing simultaneously.
 
+    If target is given, skip discovery and reconnect directly to that peer.
     Returns (sock, peer_addr).
     Server already started by caller.
     """
@@ -218,7 +219,10 @@ def connect_with_listen(local_mac):
     )
     listen_thread.start()
 
-    print("Scanning for Muninn devices (or waiting for incoming)...")
+    if target is not None:
+        print(f"Reconnecting to {target} (or waiting for incoming)...")
+    else:
+        print("Scanning for Muninn devices (or waiting for incoming)...")
 
     def use_incoming():
         print(f"Incoming connection from {result['peer_addr']}")
@@ -261,6 +265,11 @@ def connect_with_listen(local_mac):
                 return incoming_sock, incoming_addr
 
         return sock, peer_addr
+
+    if target is not None:
+        if connected.is_set():
+            return use_incoming()
+        return use_outgoing(target)
 
     services = bt.discover()
     if connected.is_set():
@@ -330,8 +339,9 @@ def main():
                     addr = pick_device()
                     sock, peer_addr = bt.connect(addr)
                 else:
-                    # Default: listen + scan simultaneously
-                    sock, peer_addr = connect_with_listen(local_mac)
+                    # Default: listen + scan simultaneously.
+                    # On reconnect, skip discovery and go straight to last peer.
+                    sock, peer_addr = connect_with_listen(local_mac, target=last_peer)
 
                 last_peer = peer_addr
                 box = handshake(sock, private_key)

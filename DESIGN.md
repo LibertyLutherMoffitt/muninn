@@ -16,8 +16,11 @@ and permitted on commercial flights per FAA guidelines.
 **Language:** Python 3  
 **BT Stack:** BlueZ via D-Bus (`dbus-python`, `pygobject3`) — RFCOMM profile registered via `org.bluez.ProfileManager1`  
 **Crypto:** PyNaCl (libsodium binding)  
-**UI Options:**
-- GTK (PyGObject) or Qt (PyQt6 / PySide6) desktop GUI
+**UI:**
+- **Qt6/QML (PySide6)** desktop GUI — GPU-composited, animation-friendly, flexible
+  theming. Chosen over GTK4 for better keybinding support, superior animation story, and
+  scalability to image sending and embedded game widgets (future). Wayland-native, works
+  well on Hyprland.
 - **Terminal/CLI mode** — fully operable from the command line without a GUI, for headless
   use, SSH sessions, or developer preference. CLI and GUI share the same core protocol layer.
 
@@ -269,7 +272,7 @@ everything built on top.
 ---
 
 ## UI Polish (any point after Step 4)
-- Linux GTK or Qt GUI
+- Linux Qt6/QML GUI (PySide6)
 - Android Compose UI polish
 - Key fingerprint display for manual MITM verification
 
