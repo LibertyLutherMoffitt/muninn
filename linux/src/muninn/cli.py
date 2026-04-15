@@ -7,13 +7,19 @@ import time
 
 from muninn import bt, crypto, protocol
 
+# Lock to serialize sock.sendall() calls from chat + recv_loop threads.
+# sendall() can loop internally (partial send → release GIL → retry), so
+# concurrent sendall() on the same socket could interleave bytes on the wire.
+_send_lock = threading.Lock()
+
 # 1:1 uses a zeroed group_id
 GROUP_ID = b"\x00" * 16
 
 
 def handshake(sock, private_key):
     pubkey_bytes = bytes(private_key.public_key)
-    sock.send(protocol.encode_handshake(pubkey_bytes))
+    with _send_lock:
+        sock.sendall(protocol.encode_handshake(pubkey_bytes))
 
     prev_timeout = sock.gettimeout()
     sock.settimeout(15)
@@ -43,7 +49,8 @@ def recv_loop(sock, box, local_mac_bytes, unacked, seen, stop_event):
                 plaintext = crypto.decrypt(box, encrypted)
 
                 if msg_id in seen:
-                    sock.send(protocol.encode_ack(msg_id, local_mac_bytes))
+                    with _send_lock:
+                        sock.sendall(protocol.encode_ack(msg_id, local_mac_bytes))
                     continue
 
                 seen.add(msg_id)
@@ -51,7 +58,8 @@ def recv_loop(sock, box, local_mac_bytes, unacked, seen, stop_event):
                 print(f"\r< {text}")
                 print("> ", end="", flush=True)
 
-                sock.send(protocol.encode_ack(msg_id, local_mac_bytes))
+                with _send_lock:
+                    sock.sendall(protocol.encode_ack(msg_id, local_mac_bytes))
 
             elif frame_type == protocol.TYPE_ACK:
                 msg_id, _ = protocol.decode_ack(payload)
@@ -69,7 +77,8 @@ def chat(sock, box, local_mac, peer_addr, unacked, seen):
 
     # Resend unacked messages from previous connection
     for msg_id, frame_bytes in list(unacked.items()):
-        sock.send(frame_bytes)
+        with _send_lock:
+            sock.sendall(frame_bytes)
 
     recv_thread = threading.Thread(
         target=recv_loop,
@@ -102,7 +111,8 @@ def chat(sock, box, local_mac, peer_addr, unacked, seen):
             )
             unacked[msg_id] = frame
             try:
-                sock.send(frame)
+                with _send_lock:
+                    sock.sendall(frame)
             except (ConnectionError, OSError):
                 stop_event.set()
                 break

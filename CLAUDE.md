@@ -9,6 +9,16 @@ nix run .#muninn-linux -- --help
 
 Use `nix run` not `nix build` — avoids creating `result/` symlink in repo root.
 
+### Linting
+
+Run all pre-commit hooks (ruff format, ruff check, ty check, alejandra, nix flake check):
+
+```bash
+nix develop --command prek run --all-files
+```
+
+Don't run individual linters — `prek` runs the full suite as configured in `.pre-commit-config.yaml`.
+
 Pre-commit hooks run automatically via prek, which enters the nix dev shell itself — commits work from anywhere.
 
 ## Intentional Decisions (don't "fix" these)

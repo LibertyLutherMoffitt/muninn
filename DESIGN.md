@@ -215,9 +215,9 @@ Handshake frame payload:
 ```
 
 Handshake frames are sent in plaintext (before shared secret exists). After both sides
-exchange pubkeys and derive the shared secret, all subsequent frames (message, ACK) have
-their payloads Box-encrypted before framing. The universal header (type + length) is
-always plaintext.
+exchange pubkeys and derive the shared secret, message text is Box-encrypted. ACK and
+message metadata (group_id, msg_id, sender, dest, timestamp) remain plaintext. The
+universal header (type + length) is always plaintext.
 
 ---
 
