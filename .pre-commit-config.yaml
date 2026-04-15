@@ -28,7 +28,7 @@ repos:
 
       - id: ty-check
         name: ty check
-        entry: ty check --project linux/
+        entry: ty check --project python/
         language: system
         pass_filenames: false
         files: '\.py$'

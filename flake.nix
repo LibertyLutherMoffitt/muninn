@@ -24,7 +24,7 @@
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn";
           version = "0.1.0";
-          src = ./linux;
+          src = ./python;
           pyproject = true;
 
           build-system = [pkgs.python3Packages.setuptools];
