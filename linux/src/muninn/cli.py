@@ -118,12 +118,12 @@ def pick_from_list(
     for i, (addr, name) in enumerate(items, 1):
         print(f"  {i}) {name} ({addr})")
 
+    print("Pick device: ", end="", flush=True)
     while True:
         if abort is not None and abort.is_set():
             return None
-        print("Pick device: ", end="", flush=True)
         if abort is not None:
-            # Poll stdin so we can check abort between keystrokes
+            # Poll stdin so we can check abort without blocking forever
             ready, _, _ = select.select([sys.stdin], [], [], 0.5)
             if not ready:
                 continue
@@ -141,6 +141,7 @@ def pick_from_list(
             pass
         if abort is None or not abort.is_set():
             print(f"Enter 1-{len(items)}")
+        print("Pick device: ", end="", flush=True)
 
 
 def pick_device() -> str:
