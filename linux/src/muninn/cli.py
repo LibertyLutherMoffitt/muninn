@@ -15,7 +15,12 @@ def handshake(sock, private_key):
     pubkey_bytes = bytes(private_key.public_key)
     sock.send(protocol.encode_handshake(pubkey_bytes))
 
-    frame_type, payload = protocol.read_frame(sock)
+    prev_timeout = sock.gettimeout()
+    sock.settimeout(15)
+    try:
+        frame_type, payload = protocol.read_frame(sock)
+    finally:
+        sock.settimeout(prev_timeout)
     if frame_type != protocol.TYPE_HANDSHAKE:
         raise ConnectionError(f"Expected handshake frame, got 0x{frame_type:02x}")
     if len(payload) != 32:
@@ -155,8 +160,7 @@ def pick_device() -> str:
     # First try SDP — finds paired devices already running Muninn
     services = bt.discover()
     if services:
-        items = [(s["host"], s.get("name", s["host"])) for s in services]
-        addr = pick_from_list(items, auto_select=True)
+        addr = pick_from_list(services, auto_select=True)
         if addr is None:
             raise ConnectionError("No device selected")
         return addr
@@ -253,9 +257,8 @@ def connect_with_listen(local_mac):
         return use_incoming()
 
     if services:
-        items = [(s["host"], s.get("name", s["host"])) for s in services]
         print("(Incoming connections still accepted while you choose)")
-        addr = pick_from_list(items, auto_select=True, abort=connected)
+        addr = pick_from_list(services, auto_select=True, abort=connected)
         if addr is None or connected.is_set():
             return use_incoming()
         return use_outgoing(addr)

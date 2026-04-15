@@ -14,7 +14,7 @@ and permitted on commercial flights per FAA guidelines.
 ### 1. Linux Client — Python
 
 **Language:** Python 3  
-**BT Stack:** BlueZ via PyBluez2 (RFCOMM)  
+**BT Stack:** BlueZ via D-Bus (`dbus-python`, `pygobject3`) — RFCOMM profile registered via `org.bluez.ProfileManager1`  
 **Crypto:** PyNaCl (libsodium binding)  
 **UI Options:**
 - GTK (PyGObject) or Qt (PyQt6 / PySide6) desktop GUI
@@ -49,7 +49,7 @@ role) via BlueZ is painful and poorly documented. RFCOMM is well-supported on bo
 platforms with no manufacturer fragmentation issues.  
 **Range:** ~10–30m open-air (Class 2). In-cabin through seats and bodies: realistically
 ~3–8 rows. Sufficient for nearby travel companions; not expected to span a full aircraft.  
-**Pairing:** Standard OS-level Bluetooth pairing required once before first use.
+**Pairing:** Handled automatically by the Linux client via `org.bluez.Device1.Pair()` with a registered `NoInputNoOutput` agent. No OS-level pairing UI required. Pairing happens on first connect and persists (link key stored with `store_hint=1`).
 
 ### Connection Initiation
 
@@ -58,8 +58,11 @@ can initiate a connection to any paired device — the initiating device does an
 and connects; the other accepts. Works regardless of platform combination
 (Linux↔Linux, Android↔Android, Linux↔Android).
 
-**Simultaneous connect:** if both users initiate at the same time, two sockets form. The
-socket where the local BT MAC address is higher is dropped. Both sides apply this rule
+**Simultaneous connect:** to avoid both sides calling `ConnectProfile` at the same time
+(which deadlocks bluetoothd), the device with the higher MAC address waits up to 10 seconds
+for the lower-MAC device to initiate. If an incoming connection arrives during that wait, it
+is used directly. If both sides do end up connecting simultaneously anyway, two sockets form:
+the socket initiated by the higher-MAC device is closed. Both sides apply this rule
 deterministically, leaving exactly one connection.
 
 ### Reconnection
@@ -234,18 +237,18 @@ Complexity is layered. Each step is testable before the next begins. E2EE is est
 early because it defines the wire format and handshake — retrofitting it later would break
 everything built on top.
 
-**Step 1 — RFCOMM socket**
+**Step 1 — RFCOMM socket** ✅
 - Two devices connect over RFCOMM
 - Raw bytes flow both directions
 - No crypto, no framing, no protocol
 
-**Step 2 — Wire framing + E2EE handshake**
+**Step 2 — Wire framing + E2EE handshake** ✅
 - Universal frame header: `[type][length][payload]`
 - Handshake frame: exchange X25519 pubkeys on connect
 - All post-handshake frames: Box encrypted with random nonce prepended
 - Verify decrypt works cross-platform (Linux ↔ Android)
 
-**Step 3 — 1:1 messaging**
+**Step 3 — 1:1 messaging** ✅
 - Send/receive encrypted text messages
 - ACK per message — sender tracks unacked messages
 - Auto-reconnect on disconnect — fresh handshake, resend unacked messages
@@ -278,8 +281,7 @@ everything built on top.
 
 ## Known Pain Points
 
-- **Pairing UX** — users must pair devices in OS settings before first use (one-time)
-- **Linux pybluez2 install** — may require `libbluetooth-dev` system package
+- **Pairing UX** — first connection is slower as `Device1.Pair()` runs; subsequent connects are fast
 - **Android background** — RFCOMM socket killed by aggressive OEM power management;
   foreground service required (Step 1)
 - **WearOS standalone BT** — deprioritized; tethered model is reliable, standalone is not

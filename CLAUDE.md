@@ -15,7 +15,7 @@ Pre-commit hooks run automatically via prek, which enters the nix dev shell itse
 
 - **Static keypairs** — generated once per process, reused across reconnects. Same shared secret every handshake. Intentional for simplicity.
 - **No message persistence** — unacked/seen dicts are in-memory. Messages lost on process exit. Intentional.
-- **bluetoothctl subprocess for pairing** — not D-Bus. Intentional: simpler, fewer deps.
+- **D-Bus pairing via Device1.Pair()** — not bluetoothctl subprocess. Required: subprocess pairing uses store_hint=0 so link keys aren't persisted, causing br-connection-key-missing on ConnectProfile.
 - **No forward secrecy** — acceptable for this use case.
 - **ACK and message metadata are plaintext** — only message text is encrypted. Intentional for future relay routing.
 - **Zeroed group_id for 1:1** — 16 zero bytes. Not a bug.

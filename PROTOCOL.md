@@ -139,7 +139,11 @@ On socket error or EOF:
 
 ## Simultaneous Connection Tiebreak
 
-If both devices initiate a connection at the same time, two RFCOMM sockets form. Resolution:
+To reduce the chance of both devices initiating at the same time, the device with the higher
+MAC address defers: it waits up to 10 seconds for the lower-MAC device to initiate before
+calling `ConnectProfile` itself.
+
+If two sockets do form anyway:
 
 - Compare local BT MAC addresses (as 6-byte unsigned integers)
 - The socket initiated by the device with the **higher** MAC address is closed

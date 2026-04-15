@@ -1,4 +1,5 @@
 import struct
+import time
 import uuid
 
 TYPE_HANDSHAKE = 0x01
@@ -44,8 +45,6 @@ def encode_message(
     dest_mac: bytes,
     encrypted: bytes,
 ) -> bytes:
-    import time
-
     timestamp = struct.pack("!I", int(time.time()))
     payload = group_id + msg_id + sender_mac + dest_mac + timestamp + encrypted
     return encode_frame(TYPE_MESSAGE, payload)

@@ -177,6 +177,7 @@ def close_server() -> None:
     if _loop:
         _loop.quit()
     _accept_queue.put((None, None))
+    set_listener_queue(None)
 
 
 def accept(_=None) -> tuple:
@@ -215,11 +216,11 @@ def set_listener_queue(q: queue.Queue | None) -> None:
         old_q.put((None, None))  # unblock stale listener
 
 
-def discover() -> list[dict]:
+def discover() -> list[tuple[str, str]]:
     """Find nearby devices advertising the Muninn service UUID via BlueZ D-Bus.
 
     Uses BlueZ's ObjectManager cache, populated after bluetoothctl scanning.
-    Returns list of dicts with 'host' (MAC) and 'name' keys.
+    Returns list of (addr, name) tuples.
     """
     print("Scanning for Muninn devices...")
     try:
@@ -241,7 +242,7 @@ def discover() -> list[dict]:
         if SERVICE_UUID.lower() in uuids:
             addr = str(device.get("Address", "")).upper()
             name = str(device.get("Name", addr))
-            results.append({"host": addr, "name": name})
+            results.append((addr, name))
     return results
 
 

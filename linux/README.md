@@ -7,59 +7,40 @@ Encrypted peer-to-peer chat over Bluetooth Classic (RFCOMM). No internet require
 - Two Linux devices with Bluetooth
 - Nix package manager
 
-## Pairing (one-time)
-
-Devices must be paired at the OS level before Muninn can connect.
-
-On both machines:
+## Run
 
 ```
-bluetoothctl
-> power on
-> scan on
-        (wait for the other device to appear)
-> pair XX:XX:XX:XX:XX:XX
-> trust XX:XX:XX:XX:XX:XX
-> quit
+nix run .#muninn-linux
 ```
 
-You do **not** need to "connect" in bluetoothctl — Muninn handles the RFCOMM connection itself.
-
-## Build
-
-```
-nix build .#muninn-linux
-```
-
-Binary is at `./result/bin/muninn`.
-
-## Dev Shell
-
-```
-nix develop
-```
-
-Then run directly:
-
-```
-python -m muninn.cli --help
-```
+No flags needed — both devices scan for each other and connect automatically. Pairing is
+handled on first connect; no OS-level pairing setup required.
 
 ## Usage
 
-**Device A (listener):**
+**Default (recommended):** run with no flags on both devices. Each scans for Muninn
+services and listens for incoming connections simultaneously. Lower MAC initiates,
+higher MAC waits — they find each other automatically.
+
+```
+muninn
+```
+
+**Listen only:** wait for an incoming connection, don't scan.
 
 ```
 muninn --listen
 ```
 
-**Device B (connector):**
+**Connect only:** scan and connect (no address), or connect to a specific address.
 
 ```
+muninn --connect
 muninn --connect XX:XX:XX:XX:XX:XX
 ```
 
-After connection and E2EE handshake, you get a `>` prompt. Type a message and press enter. Incoming messages appear as `< message`.
+After the E2EE handshake, you get a `>` prompt. Type and press enter to send.
+Incoming messages appear as `< message`.
 
 ```
 E2EE established.
@@ -70,13 +51,21 @@ E2EE established.
 
 Ctrl+C to quit.
 
+## Dev Shell
+
+```
+nix develop
+python -m muninn.cli --help
+```
+
 ## What works today
 
-- RFCOMM connect/listen via SDP service discovery
+- RFCOMM connect/listen via BlueZ D-Bus (`org.bluez.ProfileManager1`)
+- Automatic pairing via `org.bluez.Device1.Pair()` — no OS UI needed
 - X25519 key exchange + XSalsa20-Poly1305 encryption (NaCl Box)
 - 1:1 encrypted messaging with CLI interface
 - ACK per message — sender tracks delivery
-- Auto-reconnect on BT disconnect (retries every 2s)
+- Auto-reconnect on BT disconnect (2s for lower MAC, 4s for higher MAC)
 - Resend unacked messages after reconnect
 - Receiver deduplicates by message ID
 
@@ -90,11 +79,8 @@ Ctrl+C to quit.
 
 ## Troubleshooting
 
-**`No Muninn service found`** — the listener isn't running yet, or SDP registration failed.
-Run `--listen` first, then `--connect`.
+**`No Muninn service found`** — the other device isn't running Muninn yet, or BlueZ
+hasn't cached its SDP record. Start Muninn on both devices; they will find each other.
 
-**`FileNotFoundError: /sys/class/bluetooth/hci0/address`** — no Bluetooth adapter found.
-Check `bluetoothctl show` to verify adapter exists and is powered on.
-
-**`libbluetooth-dev` errors during install** — use `nix develop` or `nix build` to avoid
-system dependency issues.
+**`No Bluetooth adapter found`** — check `bluetoothctl show` to verify adapter exists
+and is powered on.
