@@ -7,8 +7,8 @@ name = "muninn"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-  "PyBluez",
   "PyNaCl",
+  "dbus-python",
 ]
 
 [project.scripts]

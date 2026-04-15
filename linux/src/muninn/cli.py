@@ -3,8 +3,6 @@ import sys
 import threading
 import time
 
-import bluetooth.btcommon
-
 from muninn import bt, crypto, protocol
 
 # 1:1 uses a zeroed group_id
@@ -52,7 +50,7 @@ def recv_loop(sock, box, local_mac_bytes, unacked, seen, stop_event):
                 msg_id, _ = protocol.decode_ack(payload)
                 unacked.pop(msg_id, None)
 
-    except (ConnectionError, OSError, bluetooth.btcommon.BluetoothError):
+    except (ConnectionError, OSError):
         stop_event.set()
         print("\nConnection lost.")
 
@@ -91,7 +89,7 @@ def chat(sock, box, local_mac, peer_addr, unacked, seen):
             unacked[msg_id] = frame
             try:
                 sock.send(frame)
-            except (ConnectionError, OSError, bluetooth.btcommon.BluetoothError):
+            except (ConnectionError, OSError):
                 stop_event.set()
                 break
             print("> ", end="", flush=True)
@@ -103,8 +101,8 @@ def chat(sock, box, local_mac, peer_addr, unacked, seen):
         raise ConnectionError("Disconnected")
 
 
-def pick_from_list(items: list[tuple[str, str]]) -> str:
-    if len(items) == 1:
+def pick_from_list(items: list[tuple[str, str]], auto_select: bool = False) -> str:
+    if auto_select and len(items) == 1:
         addr, name = items[0]
         print(f"Found: {name} ({addr})")
         return addr
@@ -128,7 +126,7 @@ def pick_device() -> str:
     services = bt.discover()
     if services:
         items = [(s["host"], s.get("name", s["host"])) for s in services]
-        return pick_from_list(items)
+        return pick_from_list(items, auto_select=True)
 
     # No Muninn service found — fall back to general BT scan
     print("No Muninn services found. Scanning all nearby devices...")
@@ -136,74 +134,81 @@ def pick_device() -> str:
     if not devices:
         raise ConnectionError("No Bluetooth devices found nearby")
 
-    addr = pick_from_list(devices)
+    addr = pick_from_list(devices)  # always prompt — any BT device could appear
     bt.ensure_paired(addr)
     return addr
 
 
-def listen_worker(server_sock, result, connected):
-    """Background thread: accept incoming connection."""
+def listen_worker(result, connected):
+    """Background thread: wait for incoming connection from D-Bus queue."""
     try:
-        sock, peer_addr = bt.accept(server_sock)
+        sock, peer_addr = bt.accept()
         result["sock"] = sock
         result["peer_addr"] = peer_addr
         connected.set()
-    except (OSError, bluetooth.btcommon.BluetoothError):
-        pass  # server socket closed or adapter error
+    except (ConnectionError, OSError):
+        pass
 
 
-def connect_with_listen(local_mac, existing_server=None):
+def connect_with_listen(local_mac):
     """Listen for incoming AND scan/connect outgoing simultaneously.
 
-    Returns (sock, peer_addr, server_sock).
+    Returns (sock, peer_addr).
+    Server already started by caller.
     """
-    server_sock = existing_server or bt.create_server()
     result = {}
     connected = threading.Event()
 
     listen_thread = threading.Thread(
         target=listen_worker,
-        args=(server_sock, result, connected),
+        args=(result, connected),
         daemon=True,
     )
     listen_thread.start()
 
-    # Scan while listening in background
     print("Scanning for Muninn devices (or waiting for incoming)...")
 
     def use_incoming():
-        """Incoming won the race — use that connection, keep server for reconnect."""
         print(f"Incoming connection from {result['peer_addr']}")
-        return result["sock"], result["peer_addr"], server_sock
+        return result["sock"], result["peer_addr"]
 
     def use_outgoing(addr):
-        """We picked a device — connect outgoing, resolve conflicts."""
         bt.ensure_paired(addr)
+
+        # Check if remote connected to us during pairing.
+        if connected.is_set():
+            return use_incoming()
+
+        # MAC tiebreaker: higher MAC defers to the lower MAC to initiate.
+        # This prevents both sides calling ConnectProfile simultaneously,
+        # which deadlocks bluetoothd and causes NoReply after 25s.
+        if not bt.should_keep_outgoing(local_mac, addr):
+            print("Higher MAC — waiting for remote to initiate (10s)...")
+            connected.wait(timeout=10)
+            if connected.is_set():
+                return use_incoming()
+
         sock, peer_addr = bt.connect(addr)
 
         if connected.is_set():
-            # Both connections formed — apply tiebreaker
             incoming_sock = result["sock"]
             incoming_addr = result["peer_addr"]
-
             if bt.should_keep_outgoing(local_mac, peer_addr):
                 print("Simultaneous connection — keeping outgoing (lower MAC)")
                 try:
                     incoming_sock.close()
                 except Exception:
                     pass
-                server_sock.close()
-                return sock, peer_addr, None
+                return sock, peer_addr
             else:
                 print("Simultaneous connection — keeping incoming (lower MAC)")
                 try:
                     sock.close()
                 except Exception:
                     pass
-                return incoming_sock, incoming_addr, server_sock
+                return incoming_sock, incoming_addr
 
-        server_sock.close()
-        return sock, peer_addr, None
+        return sock, peer_addr
 
     services = bt.discover()
     if connected.is_set():
@@ -212,7 +217,7 @@ def connect_with_listen(local_mac, existing_server=None):
     if services:
         items = [(s["host"], s.get("name", s["host"])) for s in services]
         print("(Incoming connections still accepted while you choose)")
-        addr = pick_from_list(items)
+        addr = pick_from_list(items, auto_select=True)
         if connected.is_set():
             return use_incoming()
         return use_outgoing(addr)
@@ -257,15 +262,16 @@ def main():
     private_key = crypto.generate_keypair()
     unacked = {}
     seen = set()
-    server_sock = None
+    last_peer: str | None = None
+    # All modes register the profile: listeners receive via accept(), connectors
+    # use ConnectProfile which delivers the socket via NewConnection callback.
+    bt.create_server()
 
     try:
         while True:
             try:
                 if args.listen:
-                    if not server_sock:
-                        server_sock = bt.create_server()
-                    sock, peer_addr = bt.accept(server_sock)  # ty:ignore[invalid-argument-type]
+                    sock, peer_addr = bt.accept()
                 elif args.connect is not None and args.connect:
                     bt.ensure_paired(args.connect)
                     sock, peer_addr = bt.connect(args.connect)
@@ -274,26 +280,26 @@ def main():
                     sock, peer_addr = bt.connect(addr)
                 else:
                     # Default: listen + scan simultaneously
-                    sock, peer_addr, server_sock = connect_with_listen(
-                        local_mac, server_sock
-                    )
+                    sock, peer_addr = connect_with_listen(local_mac)
 
+                last_peer = peer_addr
                 box = handshake(sock, private_key)
                 chat(sock, box, local_mac, peer_addr, unacked, seen)
 
-            except (
-                ConnectionError,
-                OSError,
-                bluetooth.btcommon.BluetoothError,
-            ) as e:
-                print(f"Reconnecting in 2s... ({e})")
-                time.sleep(2)
+            except (ConnectionError, OSError) as e:
+                # Stagger reconnect so both sides don't race on ConnectProfile.
+                # Lower MAC reconnects faster — same tiebreaker as simultaneous-connect.
+                if last_peer and bt.should_keep_outgoing(local_mac, last_peer):
+                    delay = 2.0
+                else:
+                    delay = 4.0
+                print(f"Reconnecting in {delay:.0f}s... ({e})")
+                time.sleep(delay)
 
     except KeyboardInterrupt:
         print("\nBye.")
     finally:
-        if server_sock:
-            server_sock.close()
+        bt.close_server()
 
 
 if __name__ == "__main__":

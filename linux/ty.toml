@@ -3,3 +3,4 @@
 # at runtime but are invisible to static analysis.
 [rules]
 unresolved-attribute = "ignore"
+unresolved-import = "ignore"

@@ -16,8 +16,9 @@
         pkgs = nixpkgs.legacyPackages.${system};
 
         pythonPkgs = pkgs.python3.withPackages (ps: [
-          ps.pybluez
           ps.pynacl
+          ps.dbus-python
+          ps.pygobject3
         ]);
 
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
@@ -29,8 +30,9 @@
           build-system = [pkgs.python3Packages.setuptools];
 
           dependencies = [
-            pkgs.python3Packages.pybluez
             pkgs.python3Packages.pynacl
+            pkgs.python3Packages.dbus-python
+            pkgs.python3Packages.pygobject3
           ];
 
           meta = {
