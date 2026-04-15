@@ -75,9 +75,16 @@ def chat(sock, box, local_mac, peer_addr, unacked, seen):
 
     print("> ", end="", flush=True)
     try:
-        for line in sys.stdin:
+        while not stop_event.is_set():
+            ready, _, _ = select.select([sys.stdin], [], [], 0.5)
             if stop_event.is_set():
                 break
+            if not ready:
+                continue
+            line = sys.stdin.readline()
+            if not line:  # EOF
+                stop_event.set()
+                raise KeyboardInterrupt
             text = line.strip()
             if not text:
                 print("> ", end="", flush=True)

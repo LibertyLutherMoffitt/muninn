@@ -191,15 +191,28 @@ def accept(_=None) -> tuple:
 def set_listener_queue(q: queue.Queue | None) -> None:
     """Set the per-call incoming queue for connect_with_listen.
 
-    Sends a sentinel to the previous queue so any stale listen_worker
-    unblocks and exits rather than stealing a future connection.
+    Drains the previous queue first: any real connections that arrived
+    while the caller was between iterations (e.g. sleeping in the reconnect
+    delay) are forwarded to the new queue rather than orphaned.
+    Then sends a sentinel to unblock any stale listen_worker still blocked
+    on the old queue.
     """
     global _listener_queue
     with _listener_lock:
         old_q = _listener_queue
         _listener_queue = q
     if old_q is not None:
-        old_q.put((None, None))
+        # Forward connections that arrived before the swap.
+        # Once _listener_queue points to q, NewConnection sends new
+        # connections there directly — only pre-swap items can be in old_q.
+        try:
+            while True:
+                item = old_q.get_nowait()
+                if item[0] is not None and q is not None:
+                    q.put(item)
+        except queue.Empty:
+            pass
+        old_q.put((None, None))  # unblock stale listener
 
 
 def discover() -> list[dict]:
