@@ -1,4 +1,5 @@
 import argparse
+import queue
 import sys
 import threading
 import time
@@ -139,15 +140,14 @@ def pick_device() -> str:
     return addr
 
 
-def listen_worker(result, connected):
-    """Background thread: wait for incoming connection from D-Bus queue."""
-    try:
-        sock, peer_addr = bt.accept()
-        result["sock"] = sock
-        result["peer_addr"] = peer_addr
-        connected.set()
-    except (ConnectionError, OSError):
-        pass
+def listen_worker(q: queue.Queue, result: dict, connected: threading.Event) -> None:
+    """Background thread: wait for incoming connection on the per-call queue."""
+    sock, peer_addr = q.get()
+    if sock is None:
+        return  # sentinel — stale worker from a previous iteration, stop
+    result["sock"] = sock
+    result["peer_addr"] = peer_addr
+    connected.set()
 
 
 def connect_with_listen(local_mac):
@@ -158,10 +158,14 @@ def connect_with_listen(local_mac):
     """
     result = {}
     connected = threading.Event()
+    # Per-call queue: replaces the previous one and sends it a sentinel so
+    # any stale listen_worker from a prior iteration unblocks and exits.
+    my_q: queue.Queue = queue.Queue()
+    bt.set_listener_queue(my_q)
 
     listen_thread = threading.Thread(
         target=listen_worker,
-        args=(result, connected),
+        args=(my_q, result, connected),
         daemon=True,
     )
     listen_thread.start()

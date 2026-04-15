@@ -16,9 +16,13 @@ RFCOMM_CHANNEL = 3
 _PROFILE_PATH = "/org/muninn/rfcomm"
 _AGENT_PATH = "/org/muninn/agent"
 
-_incoming: queue.Queue = queue.Queue()
+_accept_queue: queue.Queue = queue.Queue()  # for accept() in --listen mode
+# Per-call queue set by connect_with_listen so each iteration gets its own
+# listener. Replaced (with sentinel to unblock stale workers) on each new call.
+_listener_queue: queue.Queue | None = None
+_listener_lock = threading.Lock()
 # Per-address queues for connections we initiated via ConnectProfile.
-# NewConnection routes here when addr matches, otherwise to _incoming.
+# NewConnection routes here when addr matches.
 _waiters: dict[str, queue.Queue] = {}
 _waiters_lock = threading.Lock()
 _loop: GLib.MainLoop | None = None
@@ -81,11 +85,16 @@ class _Profile(dbus.service.Object):
             dev = str(device_path).rsplit("/", 1)[-1]  # dev_AA_BB_CC_DD_EE_FF
             addr = dev[4:].replace("_", ":").upper()
         with _waiters_lock:
-            q = _waiters.get(addr)
-        if q is not None:
-            q.put((sock, addr))
+            waiter_q = _waiters.get(addr)
+        if waiter_q is not None:
+            waiter_q.put((sock, addr))
+            return
+        with _listener_lock:
+            lq = _listener_queue
+        if lq is not None:
+            lq.put((sock, addr))
         else:
-            _incoming.put((sock, addr))
+            _accept_queue.put((sock, addr))
 
     @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
     def RequestDisconnection(self, device_path):
@@ -167,17 +176,30 @@ def close_server() -> None:
     set_discoverable(False)
     if _loop:
         _loop.quit()
-    # Unblock any waiting accept()
-    _incoming.put((None, None))
+    _accept_queue.put((None, None))
 
 
 def accept(_=None) -> tuple:
     """Block until incoming connection. Returns (sock, peer_addr)."""
-    sock, addr = _incoming.get()
+    sock, addr = _accept_queue.get()
     if sock is None:
         raise ConnectionError("Server closed")
     print(f"Connected: {addr}")
     return sock, addr
+
+
+def set_listener_queue(q: queue.Queue | None) -> None:
+    """Set the per-call incoming queue for connect_with_listen.
+
+    Sends a sentinel to the previous queue so any stale listen_worker
+    unblocks and exits rather than stealing a future connection.
+    """
+    global _listener_queue
+    with _listener_lock:
+        old_q = _listener_queue
+        _listener_queue = q
+    if old_q is not None:
+        old_q.put((None, None))
 
 
 def discover() -> list[dict]:
