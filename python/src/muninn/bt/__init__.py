@@ -10,7 +10,6 @@ from muninn.bt.bluez import (
     mac_to_int,
     scan_devices,
     set_discoverable,
-    set_listener_queue,
     should_keep_outgoing,
 )
 
@@ -26,6 +25,5 @@ __all__ = [
     "mac_to_int",
     "scan_devices",
     "set_discoverable",
-    "set_listener_queue",
     "should_keep_outgoing",
 ]

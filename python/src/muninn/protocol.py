@@ -5,6 +5,9 @@ import uuid
 TYPE_HANDSHAKE = 0x01
 TYPE_MESSAGE = 0x02
 TYPE_ACK = 0x03
+TYPE_GROUP_SETUP = 0x04
+TYPE_READ = 0x05
+TYPE_PROFILE = 0x06
 
 
 def encode_frame(frame_type: int, payload: bytes) -> bytes:
@@ -71,6 +74,68 @@ def decode_ack(payload: bytes):
     msg_id = payload[0:16]
     from_mac = payload[16:22]
     return msg_id, from_mac
+
+
+# --- Read receipt ---
+
+
+def encode_read(msg_id: bytes, from_mac: bytes) -> bytes:
+    return encode_frame(TYPE_READ, msg_id + from_mac)
+
+
+def decode_read(payload: bytes):
+    msg_id = payload[0:16]
+    from_mac = payload[16:22]
+    return msg_id, from_mac
+
+
+# --- Group Setup ---
+
+
+def encode_group_setup(
+    group_id: bytes,
+    members: list[tuple[bytes, bytes]],
+    name: str,
+) -> bytes:
+    """members: list of (mac_bytes, pubkey_bytes)."""
+    parts = [group_id, struct.pack("!B", len(members))]
+    for mac, pubkey in members:
+        parts.append(mac)
+        parts.append(pubkey)
+    name_bytes = name.encode("utf-8")
+    parts.append(struct.pack("!H", len(name_bytes)))
+    parts.append(name_bytes)
+    return encode_frame(TYPE_GROUP_SETUP, b"".join(parts))
+
+
+def decode_group_setup(
+    payload: bytes,
+) -> tuple[bytes, list[tuple[bytes, bytes]], str]:
+    group_id = payload[0:16]
+    member_count = payload[16]
+    offset = 17
+    members = []
+    for _ in range(member_count):
+        mac = payload[offset : offset + 6]
+        pubkey = payload[offset + 6 : offset + 38]
+        members.append((mac, pubkey))
+        offset += 38
+    name_length = struct.unpack("!H", payload[offset : offset + 2])[0]
+    offset += 2
+    name = payload[offset : offset + name_length].decode("utf-8")
+    return group_id, members, name
+
+
+# --- Profile ---
+
+
+def encode_profile(name: str) -> bytes:
+    """Self-chosen display name. Sent immediately after handshake."""
+    return encode_frame(TYPE_PROFILE, name.encode("utf-8"))
+
+
+def decode_profile(payload: bytes) -> str:
+    return payload.decode("utf-8")
 
 
 # --- Helpers ---

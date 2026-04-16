@@ -16,11 +16,7 @@ RFCOMM_CHANNEL = 3
 _PROFILE_PATH = "/org/muninn/rfcomm"
 _AGENT_PATH = "/org/muninn/agent"
 
-_accept_queue: queue.Queue = queue.Queue()  # for accept() in --listen mode
-# Per-call queue set by connect_with_listen so each iteration gets its own
-# listener. Replaced (with sentinel to unblock stale workers) on each new call.
-_listener_queue: queue.Queue | None = None
-_listener_lock = threading.Lock()
+_incoming_queue: queue.Queue = queue.Queue()
 # Per-address queues for connections we initiated via ConnectProfile.
 # NewConnection routes here when addr matches.
 _waiters: dict[str, queue.Queue] = {}
@@ -89,12 +85,7 @@ class _Profile(dbus.service.Object):
         if waiter_q is not None:
             waiter_q.put((sock, addr))
             return
-        with _listener_lock:
-            lq = _listener_queue
-        if lq is not None:
-            lq.put((sock, addr))
-        else:
-            _accept_queue.put((sock, addr))
+        _incoming_queue.put((sock, addr))
 
     @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
     def RequestDisconnection(self, device_path):
@@ -176,44 +167,15 @@ def close_server() -> None:
     set_discoverable(False)
     if _loop:
         _loop.quit()
-    _accept_queue.put((None, None))
-    set_listener_queue(None)
+    _incoming_queue.put((None, None))
 
 
-def accept(_=None) -> tuple:
+def accept() -> tuple:
     """Block until incoming connection. Returns (sock, peer_addr)."""
-    sock, addr = _accept_queue.get()
+    sock, addr = _incoming_queue.get()
     if sock is None:
         raise ConnectionError("Server closed")
-    print(f"Connected: {addr}")
     return sock, addr
-
-
-def set_listener_queue(q: queue.Queue | None) -> None:
-    """Set the per-call incoming queue for connect_with_listen.
-
-    Drains the previous queue first: any real connections that arrived
-    while the caller was between iterations (e.g. sleeping in the reconnect
-    delay) are forwarded to the new queue rather than orphaned.
-    Then sends a sentinel to unblock any stale listen_worker still blocked
-    on the old queue.
-    """
-    global _listener_queue
-    with _listener_lock:
-        old_q = _listener_queue
-        _listener_queue = q
-    if old_q is not None:
-        # Forward connections that arrived before the swap.
-        # Once _listener_queue points to q, NewConnection sends new
-        # connections there directly — only pre-swap items can be in old_q.
-        try:
-            while True:
-                item = old_q.get_nowait()
-                if item[0] is not None and q is not None:
-                    q.put(item)
-        except queue.Empty:
-            pass
-        old_q.put((None, None))  # unblock stale listener
 
 
 def discover() -> list[tuple[str, str]]:
@@ -222,7 +184,6 @@ def discover() -> list[tuple[str, str]]:
     Uses BlueZ's ObjectManager cache, populated after bluetoothctl scanning.
     Returns list of (addr, name) tuples.
     """
-    print("Scanning for Muninn devices...")
     try:
         bus = dbus.SystemBus()
         manager = dbus.Interface(

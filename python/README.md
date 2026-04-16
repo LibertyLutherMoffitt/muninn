@@ -13,40 +13,59 @@ Encrypted peer-to-peer chat over Bluetooth Classic (RFCOMM). No internet require
 nix run .#muninn-linux
 ```
 
-No flags needed — both devices scan for each other and connect automatically. Pairing is
-handled on first connect; no OS-level pairing setup required.
+No flags. Every device both listens and scans continuously. Each discovers nearby Muninn
+peers, connects to all of them simultaneously, and maintains independent sessions.
+Pairing is handled on first connect; no OS-level pairing setup required.
 
 ## Usage
 
-**Default (recommended):** run with no flags on both devices. Each scans for Muninn
-services and listens for incoming connections simultaneously. Lower MAC initiates,
-higher MAC waits — they find each other automatically.
+Once running, type `/help` for the full command list:
 
 ```
-muninn
+/dm <name|addr>         — switch to DM with the given peer
+/group <name>           — switch to a named group
+/new <name> <p1> [p2…]  — create a group with currently-connected peers
+/nick <name>            — set your own self-chosen display name (broadcast to peers)
+/nick <peer> <name>     — set a local-only override for a peer
+/list                   — list all conversations (DMs + groups)
+/peers                  — list connected peers
 ```
 
-**Listen only:** wait for an incoming connection, don't scan.
+Tab-complete works for peer display names + MAC addresses (under `/dm`, `/new`, `/nick`) and group names (under `/group`).
+
+### Display names
+
+Two knobs:
+
+- **Self-chosen** — set via `/nick <name>` (or the `MUNINN_NAME` env var at launch).
+  Broadcast to every peer you connect to. Peers see this as your name by default.
+- **Local override** — set via `/nick <peer> <name>`. Per-device, not sent over the
+  wire. Overrides what the peer announced. Useful when someone self-names "Odin" but
+  you want them shown as "Dave".
+
+Overrides win on display and when resolving names in commands (e.g. `/dm Dave`).
+Both names fall back to the MAC address if unset. In-memory only — lost on exit.
+
+Launch with a name pre-set:
+
+```bash
+MUNINN_NAME=Josh nix run .#muninn-linux
+```
+
+Incoming messages print inline, tagged by conversation:
 
 ```
-muninn --listen
+[DM:AA:BB:CC:DD:EE:FF] < hey
+[Flight] < BB:CC:DD:EE:FF:00: anyone want coffee?
 ```
 
-**Connect only:** scan and connect (no address), or connect to a specific address.
+Outbound messages show status icons as they progress:
 
 ```
-muninn --connect
-muninn --connect XX:XX:XX:XX:XX:XX
-```
-
-After the E2EE handshake, you get a `>` prompt. Type and press enter to send.
-Incoming messages appear as `< message`.
-
-```
-E2EE established.
-> hello from device A
-< hello from device B
-> nice, it works
+[DM:AA:BB:CC:DD:EE:FF] > hello
+  ⧗ sent
+  ✓ AA:BB:CC:DD:EE:FF       ← delivered (recipient ACKed)
+  ✓✓ AA:BB:CC:DD:EE:FF      ← read (recipient viewed the conversation)
 ```
 
 Ctrl+C to quit.
@@ -63,18 +82,22 @@ python -m muninn.cli --help
 - RFCOMM connect/listen via BlueZ D-Bus (`org.bluez.ProfileManager1`)
 - Automatic pairing via `org.bluez.Device1.Pair()` — no OS UI needed
 - X25519 key exchange + XSalsa20-Poly1305 encryption (NaCl Box)
-- 1:1 encrypted messaging with CLI interface
-- ACK per message — sender tracks delivery
-- Auto-reconnect on BT disconnect (2s for lower MAC, 4s for higher MAC)
-- Resend unacked messages after reconnect
+- Simultaneous multi-peer connections — each peer has independent socket/box/recv thread
+- Continuous scan + acceptor threads — peers find and reconnect to each other automatically
+- 1:1 DMs and named groups (up to 6 members); any peer can create a group
+- Pairwise E2EE per recipient — a group message is encrypted separately for each member
+- Relay — frames destined for unreachable peers are forwarded by connected intermediaries
+  and queued if no path exists yet
+- End-to-end ACKs (flood-back through all peers) — sender sees delivery per recipient
+- Read receipts (`✓✓`) when the recipient switches to the conversation
+- Resend of unacked messages on peer reconnect
 - Receiver deduplicates by message ID
+- MAC tiebreaker (higher MAC defers 10s) to avoid simultaneous `ConnectProfile` deadlocks
 
 ## What doesn't exist yet
 
-- Groups / multi-device
-- Relay through intermediary devices
-- GUI (GTK/Qt)
-- Message persistence (in-memory only — messages lost on process exit)
+- GUI (Qt6/QML planned)
+- Message persistence (in-memory only — messages, known pubkeys, and display names lost on process exit)
 - Android client
 
 ## Troubleshooting

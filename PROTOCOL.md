@@ -29,11 +29,14 @@ Maximum payload: 65,535 bytes.
 
 ## Frame Types
 
-| Type      | Value  | Direction    | Encrypted |
-|-----------|--------|--------------|-----------|
-| Handshake | `0x01` | Both → Both  | No        |
-| Message   | `0x02` | Sender → Receiver | Partially (see below) |
-| ACK       | `0x03` | Receiver → Sender | No |
+| Type         | Value  | Direction             | Encrypted                |
+|--------------|--------|-----------------------|--------------------------|
+| Handshake    | `0x01` | Both → Both           | No                       |
+| Message      | `0x02` | Sender → Receiver     | Partially (see below)    |
+| ACK          | `0x03` | Receiver → Sender     | No                       |
+| Group Setup  | `0x04` | Creator → Members     | No (metadata only)       |
+| Read         | `0x05` | Reader → Sender       | No                       |
+| Profile      | `0x06` | Peer → Peer           | No (metadata only)       |
 
 ---
 
@@ -89,7 +92,9 @@ Total header before ciphertext: 72 bytes.
 
 ## ACK Frame (`0x03`)
 
-Sent by the receiver upon receiving and successfully decrypting a message.
+Sent by the final recipient upon receiving and successfully decrypting a message. ACKs
+flood-back through all connected peers (deduplicated by `(msg_id, from)`) so the original
+sender receives delivery confirmation even across relay hops.
 
 **Payload:**
 
@@ -99,6 +104,85 @@ Sent by the receiver upon receiving and successfully decrypting a message.
 ```
 
 Total payload: 22 bytes.
+
+---
+
+## Group Setup Frame (`0x04`)
+
+Sent by a group creator to each member, and forwarded by any receiving member to other
+connected group members who may not yet have received it. Plaintext metadata (like ACKs).
+
+**Payload:**
+
+```
+[ 16 bytes: group_id       ]  — UUID v4
+[  1 byte:  member_count   ]  — uint8
+For each member:
+    [  6 bytes: member_mac    ]
+    [ 32 bytes: member_pubkey ]
+[  2 bytes: name_length    ]  — uint16
+[  N bytes: name           ]  — UTF-8
+```
+
+Max size for 6 members: ~247 bytes. Receivers dedupe by `group_id` — a repeated setup for
+a known group is dropped without re-forwarding, bounding flood.
+
+---
+
+## Read Frame (`0x05`)
+
+Sent by the user's device when they view a conversation containing previously-undisplayed
+messages. Flood-back semantics identical to ACK. Frame shape is identical to ACK.
+
+**Payload:**
+
+```
+[ 16 bytes: msg_id ]  — echoed from the message being read
+[  6 bytes: from   ]  — BT MAC of the reading device
+```
+
+Total payload: 22 bytes.
+
+**Read vs ACK:**
+- `ACK` = recipient's device received and decrypted the message.
+- `Read` = recipient's user switched to the conversation (or was already on it when the
+  message arrived), indicating the message was presented.
+
+---
+
+## Profile Frame (`0x06`)
+
+Sent by each peer immediately after the handshake, and re-broadcast to all connected peers
+whenever the user changes their self-chosen display name. Plaintext metadata.
+
+**Payload:**
+
+```
+[ N bytes: display_name ]  — UTF-8, no length prefix (payload_length in header bounds it)
+```
+
+An empty payload is valid and means "no self-chosen name; fall back to MAC." Receivers
+store the announcement as the peer's self-chosen name; the local user may still override
+it, and overrides win over the self-chosen name on display and command resolution.
+
+Profile frames are **not** forwarded to third parties — each peer hears only directly-
+connected peers' names. Relay intermediaries do not propagate them.
+
+---
+
+## Relay & Routing
+
+`final_dest` in the message frame identifies the intended recipient. Any connected peer
+may forward:
+
+1. On receipt, peer compares `final_dest` to its own MAC.
+2. If equal → decrypt + deliver + send ACK.
+3. If not equal → re-emit the frame toward another peer connected to `final_dest`, or
+   queue the frame for delivery when `final_dest` reconnects.
+
+`GROUP_SETUP` forwards similarly, bounded by the per-peer "already have this group_id"
+check. `ACK` and `READ` flood back through all connected peers (deduplicated by
+`(msg_id, from)`).
 
 ---
 

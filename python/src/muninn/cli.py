@@ -1,366 +1,401 @@
-import argparse
+import os
 import queue
-import select
+import readline
 import sys
 import threading
 import time
 
-from muninn import bt, crypto, protocol
+from muninn import bt
+from muninn.crypto import generate_keypair
+from muninn.groups import Group, GroupStore
+from muninn.peers import GROUP_ZERO, ConnectionManager
 
-# Lock to serialize sock.sendall() calls from chat + recv_loop threads.
-# sendall() can loop internally (partial send → release GIL → retry), so
-# concurrent sendall() on the same socket could interleave bytes on the wire.
-_send_lock = threading.Lock()
-
-# 1:1 uses a zeroed group_id
-GROUP_ID = b"\x00" * 16
+COMMANDS = ["/dm ", "/group ", "/new ", "/nick ", "/list", "/peers", "/help"]
 
 
-def handshake(sock, private_key):
-    pubkey_bytes = bytes(private_key.public_key)
-    with _send_lock:
-        sock.sendall(protocol.encode_handshake(pubkey_bytes))
+def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
+    def completer(text, state):
+        buf = readline.get_line_buffer().lstrip()
+        if (
+            buf.startswith("/dm ")
+            or buf.startswith("/new ")
+            or buf.startswith("/nick ")
+        ):
+            # Offer both MAC addresses and display names.
+            low = text.lower()
+            upper = text.upper()
+            with conn_mgr.peers_lock:
+                addrs = list(conn_mgr.peers.keys())
+            options = [a for a in addrs if a.startswith(upper)]
+            seen_addrs = set(options)
+            for addr in addrs:
+                name = group_store.display_name(addr)
+                if (
+                    name != addr
+                    and name.lower().startswith(low)
+                    and addr not in seen_addrs
+                ):
+                    options.append(name)
+                    seen_addrs.add(addr)
+        elif buf.startswith("/group "):
+            options = [
+                g.name for g in group_store.groups.values() if g.name.startswith(text)
+            ]
+        elif buf.startswith("/"):
+            options = [c for c in COMMANDS if c.startswith(buf)]
+        else:
+            options = []
+        try:
+            return options[state]
+        except IndexError:
+            return None
 
-    prev_timeout = sock.gettimeout()
-    sock.settimeout(15)
-    try:
-        frame_type, payload = protocol.read_frame(sock)
-    finally:
-        sock.settimeout(prev_timeout)
-    if frame_type != protocol.TYPE_HANDSHAKE:
-        raise ConnectionError(f"Expected handshake frame, got 0x{frame_type:02x}")
-    if len(payload) != 32:
-        raise ConnectionError(f"Bad handshake pubkey length: {len(payload)}")
-
-    box = crypto.derive_box(private_key, payload)
-    print("E2EE established.")
-    return box
+    readline.set_completer(completer)
+    readline.parse_and_bind("tab: complete")
+    readline.set_completer_delims(" ")
 
 
-def recv_loop(sock, box, local_mac_bytes, unacked, seen, stop_event):
-    try:
-        while not stop_event.is_set():
-            frame_type, payload = protocol.read_frame(sock)
+class ChatUI:
+    def __init__(
+        self,
+        conn_mgr: ConnectionManager,
+        group_store: GroupStore,
+        local_mac: str,
+    ):
+        self.conn_mgr = conn_mgr
+        self.group_store = group_store
+        self.local_mac = local_mac
+        self.active_conv: tuple[str, str | bytes] | None = None
+        self.input_queue: queue.Queue = queue.Queue()
 
-            if frame_type == protocol.TYPE_MESSAGE:
-                gid, msg_id, sender, dest, ts, encrypted = protocol.decode_message(
-                    payload
-                )
-                plaintext = crypto.decrypt(box, encrypted)
+        # msg_id -> set of dest addrs (for our outbound msgs)
+        self.outbound: dict[bytes, set[str]] = {}
+        # conv_key -> [(msg_id, sender_addr)] — unread incoming msgs per conv
+        self.unread: dict[tuple[str, str | bytes], list[bytes]] = {}
 
-                if msg_id in seen:
-                    with _send_lock:
-                        sock.sendall(protocol.encode_ack(msg_id, local_mac_bytes))
+        conn_mgr.on_message = self._on_message
+        conn_mgr.on_peer_change = self._on_peer_change
+        conn_mgr.on_group_setup = self._on_group_setup
+        conn_mgr.on_ack = self._on_ack
+        conn_mgr.on_read = self._on_read
+        conn_mgr.on_profile = self._on_profile
+
+    def _name(self, addr: str) -> str:
+        return self.group_store.display_name(addr)
+
+    def _prompt(self) -> str:
+        if self.active_conv is None:
+            return "> "
+        conv_type, key = self.active_conv
+        if conv_type == "dm":
+            assert isinstance(key, str)
+            return f"[DM:{self._name(key)}] > "
+        assert isinstance(key, bytes)
+        group = self.group_store.groups.get(key)
+        name = group.name if group else "?"
+        return f"[{name}] > "
+
+    def _display(self, msg: str) -> None:
+        sys.stdout.write(f"\r\033[K{msg}\n")
+        sys.stdout.flush()
+
+    def _on_message(
+        self, group_id: bytes, sender_mac: str, text: str, msg_id: bytes
+    ) -> None:
+        sender_name = self._name(sender_mac)
+        if group_id == GROUP_ZERO:
+            conv_key: tuple[str, str | bytes] = ("dm", sender_mac)
+            self._display(f"[DM:{sender_name}] < {text}")
+        else:
+            conv_key = ("group", group_id)
+            group = self.group_store.groups.get(group_id)
+            name = group.name if group else "?"
+            self._display(f"[{name}] < {sender_name}: {text}")
+
+        if self.active_conv == conv_key:
+            self.conn_mgr.send_read(msg_id)
+        else:
+            self.unread.setdefault(conv_key, []).append(msg_id)
+
+    def _on_ack(self, msg_id: bytes, from_mac: str) -> None:
+        if msg_id in self.outbound:
+            self._display(f"  \u2713 {self._name(from_mac)}")
+
+    def _on_read(self, msg_id: bytes, from_mac: str) -> None:
+        if msg_id in self.outbound:
+            self._display(f"  \u2713\u2713 {self._name(from_mac)}")
+
+    def _on_profile(self, addr: str, name: str) -> None:
+        self._display(f"  {addr} is now known as {name}")
+
+    def _flush_reads(self, conv_key: tuple[str, str | bytes]) -> None:
+        for msg_id in self.unread.pop(conv_key, []):
+            self.conn_mgr.send_read(msg_id)
+
+    def _on_peer_change(self, addr: str, connected: bool) -> None:
+        label = self._name(addr)
+        if connected:
+            self._display(f"+ {label} connected")
+            if self.active_conv is None:
+                self.active_conv = ("dm", addr)
+                self._display(f"  Active conversation: DM with {label}")
+        else:
+            self._display(f"- {label} disconnected")
+
+    def _on_group_setup(self, group: Group) -> None:
+        members = len(group.members)
+        self._display(f"+ Group '{group.name}' created ({members} members)")
+
+    def _input_reader(self) -> None:
+        try:
+            while True:
+                line = input(self._prompt())
+                self.input_queue.put(line)
+        except (EOFError, KeyboardInterrupt):
+            self.input_queue.put(None)
+
+    def _handle_command(self, text: str) -> None:
+        parts = text.split()
+        cmd = parts[0].lower()
+
+        if cmd == "/peers":
+            with self.conn_mgr.peers_lock:
+                addrs = list(self.conn_mgr.peers.keys())
+            if not addrs:
+                print("No connected peers.")
+            else:
+                print("Connected peers:")
+                for addr in addrs:
+                    name = self._name(addr)
+                    suffix = f" ({addr})" if name != addr else ""
+                    print(f"  {name}{suffix}")
+
+        elif cmd == "/dm":
+            if len(parts) < 2:
+                print("Usage: /dm <name|addr>")
+                return
+            resolved = self.group_store.resolve(parts[1])
+            if resolved is None:
+                print(f"Unknown peer: {parts[1]}")
+                return
+            self.active_conv = ("dm", resolved)
+            self._flush_reads(self.active_conv)
+            print(f"Switched to DM with {self._name(resolved)}")
+
+        elif cmd == "/group":
+            if len(parts) < 2:
+                print("Usage: /group <name>")
+                return
+            name = parts[1]
+            for gid, group in self.group_store.groups.items():
+                if group.name == name:
+                    self.active_conv = ("group", gid)
+                    self._flush_reads(self.active_conv)
+                    print(f"Switched to group '{name}'")
+                    return
+            print(f"Group '{name}' not found.")
+
+        elif cmd == "/new":
+            if len(parts) < 3:
+                print("Usage: /new <name> <peer1> [peer2] ...")
+                return
+            name = parts[1]
+            addrs: list[str] = []
+            for p in parts[2:]:
+                resolved = self.group_store.resolve(p)
+                if resolved is None:
+                    print(f"Unknown peer: {p}")
+                    return
+                addrs.append(resolved)
+            try:
+                group = self.conn_mgr.create_group(name, addrs)
+                self.active_conv = ("group", group.group_id)
+                self._flush_reads(self.active_conv)
+                print(f"Created group '{name}'")
+            except ValueError as e:
+                print(f"Error: {e}")
+
+        elif cmd == "/nick":
+            if len(parts) == 2:
+                # /nick <name> — set our own name and broadcast.
+                new_name = parts[1]
+                self.conn_mgr.set_display_name(new_name)
+                print(f"You are now known as '{new_name}'")
+            elif len(parts) == 3:
+                # /nick <peer> <name> — set local override.
+                resolved = self.group_store.resolve(parts[1])
+                if resolved is None:
+                    print(f"Unknown peer: {parts[1]}")
+                    return
+                self.group_store.set_override(resolved, parts[2])
+                print(f"Local override: {resolved} → '{parts[2]}'")
+            else:
+                print("Usage: /nick <name>  |  /nick <peer> <name>")
+
+        elif cmd == "/list":
+            print("Conversations:")
+            with self.conn_mgr.peers_lock:
+                for addr in self.conn_mgr.peers:
+                    marker = " *" if self.active_conv == ("dm", addr) else ""
+                    print(f"  DM: {self._name(addr)}{marker}")
+            for gid, group in self.group_store.groups.items():
+                marker = " *" if self.active_conv == ("group", gid) else ""
+                n = len(group.members)
+                print(f"  Group: {group.name} ({n} members){marker}")
+
+        elif cmd == "/help":
+            print("Commands:")
+            print("  /dm <name|addr>         — switch to DM")
+            print("  /group <name>           — switch to group")
+            print("  /new <name> <p1> [p2..] — create group")
+            print("  /nick <name>            — set your own display name")
+            print("  /nick <peer> <name>     — local override for a peer")
+            print("  /list                   — show conversations")
+            print("  /peers                  — show connected peers")
+
+        else:
+            print(f"Unknown command: {cmd}. Type /help")
+
+    def run(self) -> None:
+        threading.Thread(target=self._input_reader, daemon=True).start()
+
+        try:
+            while True:
+                try:
+                    line = self.input_queue.get(timeout=0.5)
+                except queue.Empty:
                     continue
 
-                seen.add(msg_id)
-                text = plaintext.decode("utf-8")
-                print(f"\r< {text}")
-                print("> ", end="", flush=True)
+                if line is None:
+                    break
 
-                with _send_lock:
-                    sock.sendall(protocol.encode_ack(msg_id, local_mac_bytes))
+                text = line.strip()
+                if not text:
+                    continue
 
-            elif frame_type == protocol.TYPE_ACK:
-                msg_id, _ = protocol.decode_ack(payload)
-                unacked.pop(msg_id, None)
+                if text.startswith("/"):
+                    self._handle_command(text)
+                    continue
 
-    except (ConnectionError, OSError):
-        stop_event.set()
-        print("\nConnection lost.")
+                if self.active_conv is None:
+                    print("No active conversation. Use /dm <addr> or /peers")
+                    continue
 
+                conv_type, key = self.active_conv
+                dests: list[str] = []
+                gid: bytes = GROUP_ZERO
+                if conv_type == "dm":
+                    assert isinstance(key, str)
+                    dests = [key]
+                elif conv_type == "group":
+                    assert isinstance(key, bytes)
+                    group = self.group_store.groups.get(key)
+                    if group:
+                        dests = [a for a in group.members if a != self.local_mac]
+                        gid = key
+                    else:
+                        print("Group not found.")
 
-def chat(sock, box, local_mac, peer_addr, unacked, seen):
-    local_mac_bytes = protocol.mac_to_bytes(local_mac)
-    peer_mac_bytes = protocol.mac_to_bytes(peer_addr)
-    stop_event = threading.Event()
+                if dests:
+                    # Display before send so peer-disconnect messages from
+                    # send_to's error path appear after, not before.
+                    self._display("  \u29d7 sent")
+                    msg_id = self.conn_mgr.send_message(gid, text, dests)
+                    if msg_id is not None:
+                        self.outbound[msg_id] = set(dests)
 
-    # Resend unacked messages from previous connection
-    for msg_id, frame_bytes in list(unacked.items()):
-        with _send_lock:
-            sock.sendall(frame_bytes)
-
-    recv_thread = threading.Thread(
-        target=recv_loop,
-        args=(sock, box, local_mac_bytes, unacked, seen, stop_event),
-        daemon=True,
-    )
-    recv_thread.start()
-
-    print("> ", end="", flush=True)
-    try:
-        while not stop_event.is_set():
-            ready, _, _ = select.select([sys.stdin], [], [], 0.5)
-            if stop_event.is_set():
-                break
-            if not ready:
-                continue
-            line = sys.stdin.readline()
-            if not line:  # EOF
-                stop_event.set()
-                raise KeyboardInterrupt
-            text = line.strip()
-            if not text:
-                print("> ", end="", flush=True)
-                continue
-
-            msg_id = protocol.new_msg_id()
-            encrypted = crypto.encrypt(box, text.encode("utf-8"))
-            frame = protocol.encode_message(
-                GROUP_ID, msg_id, local_mac_bytes, peer_mac_bytes, encrypted
-            )
-            unacked[msg_id] = frame
-            try:
-                with _send_lock:
-                    sock.sendall(frame)
-            except (ConnectionError, OSError):
-                stop_event.set()
-                break
-            print("> ", end="", flush=True)
-    except (KeyboardInterrupt, EOFError):
-        stop_event.set()
-        raise KeyboardInterrupt
-
-    if stop_event.is_set():
-        raise ConnectionError("Disconnected")
-
-
-def pick_from_list(
-    items: list[tuple[str, str]],
-    auto_select: bool = False,
-    abort: threading.Event | None = None,
-) -> str | None:
-    """Prompt user to pick a device. Returns None if abort fires first."""
-    if auto_select and len(items) == 1:
-        addr, name = items[0]
-        print(f"Found: {name} ({addr})")
-        return addr
-
-    print("Found devices:")
-    for i, (addr, name) in enumerate(items, 1):
-        print(f"  {i}) {name} ({addr})")
-
-    print("Pick device: ", end="", flush=True)
-    while True:
-        if abort is not None and abort.is_set():
-            return None
-        if abort is not None:
-            # Poll stdin so we can check abort without blocking forever
-            ready, _, _ = select.select([sys.stdin], [], [], 0.5)
-            if not ready:
-                continue
-            line = sys.stdin.readline().strip()
-        else:
-            try:
-                line = input()
-            except EOFError:
-                continue
-        try:
-            choice = int(line)
-            if 1 <= choice <= len(items):
-                return items[choice - 1][0]
-        except ValueError:
+        except KeyboardInterrupt:
             pass
-        if abort is None or not abort.is_set():
-            print(f"Enter 1-{len(items)}")
-        print("Pick device: ", end="", flush=True)
 
 
-def pick_device() -> str:
-    # First try SDP — finds paired devices already running Muninn
-    services = bt.discover()
-    if services:
-        addr = pick_from_list(services, auto_select=True)
-        if addr is None:
-            raise ConnectionError("No device selected")
-        return addr
-
-    # No Muninn service found — fall back to general BT scan
-    print("No Muninn services found. Scanning all nearby devices...")
-    devices = bt.scan_devices()
-    if not devices:
-        raise ConnectionError("No Bluetooth devices found nearby")
-
-    addr = pick_from_list(devices)  # always prompt — any BT device could appear
-    if addr is None:
-        raise ConnectionError("No device selected")
-    bt.ensure_paired(addr)
-    return addr
+def acceptor(conn_mgr: ConnectionManager) -> None:
+    """Accept incoming connections and hand to ConnectionManager."""
+    while True:
+        try:
+            sock, addr = bt.accept()
+            conn_mgr.add_peer(sock, addr)
+        except ConnectionError:
+            break
 
 
-def listen_worker(q: queue.Queue, result: dict, connected: threading.Event) -> None:
-    """Background thread: wait for incoming connection on the per-call queue."""
-    sock, peer_addr = q.get()
-    if sock is None:
-        return  # sentinel — stale worker from a previous iteration, stop
-    result["sock"] = sock
-    result["peer_addr"] = peer_addr
-    connected.set()
+def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) -> None:
+    """Periodically discover and connect to new Muninn peers."""
+    # Initial scan to populate BlueZ cache
+    try:
+        bt.scan_devices(duration=5)
+    except Exception:
+        pass
 
+    deferred: dict[str, float] = {}  # MAC tiebreaker deferral
 
-def connect_with_listen(local_mac, target: str | None = None):
-    """Listen for incoming AND scan/connect outgoing simultaneously.
+    while not stop.is_set():
+        try:
+            services = bt.discover()
+        except Exception:
+            services = []
 
-    If target is given, skip discovery and reconnect directly to that peer.
-    Returns (sock, peer_addr).
-    Server already started by caller.
-    """
-    result = {}
-    connected = threading.Event()
-    # Per-call queue: replaces the previous one and sends it a sentinel so
-    # any stale listen_worker from a prior iteration unblocks and exits.
-    my_q: queue.Queue = queue.Queue()
-    bt.set_listener_queue(my_q)
+        for addr, _name in services:
+            addr = addr.upper()
+            if addr == local_mac:
+                continue
+            with conn_mgr.peers_lock:
+                if addr in conn_mgr.peers:
+                    deferred.pop(addr, None)
+                    continue
 
-    listen_thread = threading.Thread(
-        target=listen_worker,
-        args=(my_q, result, connected),
-        daemon=True,
-    )
-    listen_thread.start()
+            # Higher MAC defers 10s to let lower MAC initiate
+            if not bt.should_keep_outgoing(local_mac, addr):
+                if addr not in deferred:
+                    deferred[addr] = time.time()
+                    continue
+                if time.time() - deferred[addr] < 10:
+                    continue
 
-    if target is not None:
-        print(f"Reconnecting to {target} (or waiting for incoming)...")
-    else:
-        print("Scanning for Muninn devices (or waiting for incoming)...")
+            deferred.pop(addr, None)
+            try:
+                bt.ensure_paired(addr)
+                sock, peer_addr = bt.connect(addr)
+                conn_mgr.add_peer(sock, peer_addr)
+            except (ConnectionError, OSError):
+                pass
 
-    def use_incoming():
-        print(f"Incoming connection from {result['peer_addr']}")
-        return result["sock"], result["peer_addr"]
-
-    def use_outgoing(addr):
-        bt.ensure_paired(addr)
-
-        # Check if remote connected to us during pairing.
-        if connected.is_set():
-            return use_incoming()
-
-        # MAC tiebreaker: higher MAC defers to the lower MAC to initiate.
-        # This prevents both sides calling ConnectProfile simultaneously,
-        # which deadlocks bluetoothd and causes NoReply after 25s.
-        if not bt.should_keep_outgoing(local_mac, addr):
-            print("Higher MAC — waiting for remote to initiate (10s)...")
-            connected.wait(timeout=10)
-            if connected.is_set():
-                return use_incoming()
-
-        sock, peer_addr = bt.connect(addr)
-
-        if connected.is_set():
-            incoming_sock = result["sock"]
-            incoming_addr = result["peer_addr"]
-            if bt.should_keep_outgoing(local_mac, peer_addr):
-                print("Simultaneous connection — keeping outgoing (lower MAC)")
-                try:
-                    incoming_sock.close()
-                except Exception:
-                    pass
-                return sock, peer_addr
-            else:
-                print("Simultaneous connection — keeping incoming (lower MAC)")
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-                return incoming_sock, incoming_addr
-
-        return sock, peer_addr
-
-    if target is not None:
-        if connected.is_set():
-            return use_incoming()
-        return use_outgoing(target)
-
-    services = bt.discover()
-    if connected.is_set():
-        return use_incoming()
-
-    if services:
-        print("(Incoming connections still accepted while you choose)")
-        addr = pick_from_list(services, auto_select=True, abort=connected)
-        if addr is None or connected.is_set():
-            return use_incoming()
-        return use_outgoing(addr)
-
-    print("No Muninn services found. Scanning all nearby devices...")
-    devices = bt.scan_devices()
-    if connected.is_set():
-        return use_incoming()
-
-    if devices:
-        print("(Incoming connections still accepted while you choose)")
-        addr = pick_from_list(devices, abort=connected)
-        if addr is None or connected.is_set():
-            return use_incoming()
-        return use_outgoing(addr)
-
-    print("No devices found. Waiting for incoming connection...")
-    connected.wait()
-    return use_incoming()
+        stop.wait(15)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="muninn",
-        description="Encrypted P2P chat over Bluetooth Classic",
-    )
-    parser.add_argument(
-        "--listen", action="store_true", help="Listen only (don't scan)"
-    )
-    parser.add_argument(
-        "--connect",
-        metavar="BT_ADDR",
-        nargs="?",
-        const="",
-        help="Connect only (scan if no address given)",
-    )
-    args = parser.parse_args()
-
     local_mac = bt.get_local_mac()
     print(f"Local MAC: {local_mac}")
 
-    private_key = crypto.generate_keypair()
-    unacked = {}
-    seen = set()
-    last_peer: str | None = None
-    # All modes register the profile: listeners receive via accept(), connectors
-    # use ConnectProfile which delivers the socket via NewConnection callback.
+    private_key = generate_keypair()
+    group_store = GroupStore()
+    display_name = os.environ.get("MUNINN_NAME", "")
+    conn_mgr = ConnectionManager(
+        local_mac, private_key, group_store, display_name=display_name
+    )
+    if display_name:
+        print(f"Display name: {display_name}")
+
+    setup_completer(conn_mgr, group_store)
     bt.create_server()
 
+    stop = threading.Event()
+    threading.Thread(target=acceptor, args=(conn_mgr,), daemon=True).start()
+    threading.Thread(
+        target=scanner, args=(conn_mgr, local_mac, stop), daemon=True
+    ).start()
+
+    print("Scanning for peers... (type /help for commands)")
+
+    ui = ChatUI(conn_mgr, group_store, local_mac)
     try:
-        while True:
-            try:
-                if args.listen:
-                    sock, peer_addr = bt.accept()
-                elif args.connect is not None and args.connect:
-                    bt.ensure_paired(args.connect)
-                    sock, peer_addr = bt.connect(args.connect)
-                elif args.connect is not None:
-                    addr = pick_device()
-                    sock, peer_addr = bt.connect(addr)
-                else:
-                    # Default: listen + scan simultaneously.
-                    # On reconnect, skip discovery and go straight to last peer.
-                    sock, peer_addr = connect_with_listen(local_mac, target=last_peer)
-
-                last_peer = peer_addr
-                box = handshake(sock, private_key)
-                chat(sock, box, local_mac, peer_addr, unacked, seen)
-
-            except (ConnectionError, OSError) as e:
-                # Stagger reconnect so both sides don't race on ConnectProfile.
-                # Lower MAC reconnects faster — same tiebreaker as simultaneous-connect.
-                if last_peer and bt.should_keep_outgoing(local_mac, last_peer):
-                    delay = 2.0
-                else:
-                    delay = 4.0
-                print(f"Reconnecting in {delay:.0f}s... ({e})")
-                time.sleep(delay)
-
+        ui.run()
     except KeyboardInterrupt:
-        print("\nBye.")
+        pass
     finally:
+        stop.set()
         bt.close_server()
+
+    print("\nBye.")
 
 
 if __name__ == "__main__":

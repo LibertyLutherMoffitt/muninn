@@ -112,11 +112,9 @@ scale (~2^96 nonce space).
 
 ## Conversations (Groups & DMs)
 
-> **Scope note:** 1:1 messaging (Steps 1–4) is the initial implementation target. Everything
-> in this section is Steps 5–7.
-
-Every conversation is a **group**. A 1:1 DM is a group of 2. There is no separate DM
-protocol — this eliminates a code path and keeps the implementation uniform.
+Every conversation is a **group**. A 1:1 DM is a group of 2 using a zeroed `group_id`.
+There is no separate DM protocol — this eliminates a code path and keeps the
+implementation uniform.
 
 **Group size:** up to 6 members.
 
@@ -190,11 +188,14 @@ The receiver loop is type-agnostic: read 1 byte (type), read 2 bytes (length), r
 
 ### Type Bytes
 
-| Type | Value | Encrypted |
-|------|-------|-----------|
-| Handshake | `0x01` | No (pre-key-exchange) |
-| Message   | `0x02` | Partially (metadata plaintext, message text encrypted) |
-| ACK       | `0x03` | No (contains only msg_id + sender MAC) |
+| Type        | Value  | Encrypted |
+|-------------|--------|-----------|
+| Handshake   | `0x01` | No (pre-key-exchange) |
+| Message     | `0x02` | Partially (metadata plaintext, message text encrypted) |
+| ACK         | `0x03` | No (contains only msg_id + sender MAC) |
+| Group Setup | `0x04` | No (group_id + member MACs + pubkeys + name) |
+| Read        | `0x05` | No (msg_id + reader MAC; same shape as ACK) |
+| Profile     | `0x06` | No (self-chosen display name, UTF-8) |
 
 Message frame payload:
 ```
@@ -212,10 +213,37 @@ ACK frame payload:
 [ 6 bytes: from (BT MAC of acknowledging device) ]
 ```
 
+Read frame payload (identical shape to ACK; signals user actually viewed the message):
+```
+[ 16 bytes: msg_id ]
+[ 6 bytes: from (BT MAC of reading device) ]
+```
+
+Group Setup frame payload:
+```
+[ 16 bytes: group_id (UUID v4) ]
+[  1 byte:  member_count ]
+For each member:
+    [  6 bytes: member_mac ]
+    [ 32 bytes: member_pubkey ]
+[  2 bytes: name_length ]
+[  N bytes: name (UTF-8) ]
+```
+
 Handshake frame payload:
 ```
 [ 32 bytes: X25519 public key ]
 ```
+
+Profile frame payload:
+```
+[ N bytes: display_name (UTF-8; empty = no self-chosen name) ]
+```
+
+Sent immediately after handshake, and re-sent to all connected peers when the local user
+changes their name via `/nick <name>`. Not forwarded by relay — each peer hears only
+directly-connected peers' names. Local users may override a peer's self-chosen name with
+`/nick <peer> <name>`; overrides win on display.
 
 Handshake frames are sent in plaintext (before shared secret exists). After both sides
 exchange pubkeys and derive the shared secret, message text is Box-encrypted. ACK and
@@ -259,15 +287,17 @@ everything built on top.
 - CLI functional on Linux
 - This is a complete, shippable thing — two people, encrypted chat, no internet
 
-**Step 4 — Groups**
+**Step 4 — Groups** ✅
 - group_id, sender_id, final_dest become meaningful (ignored in 1:1)
 - All conversations become groups (1:1 = group of 2)
-- Group formation + member pubkey distribution
+- Group formation + member pubkey distribution (`GROUP_SETUP` frame, `0x04`)
+- Simultaneous multi-peer connections via `ConnectionManager`
 
-**Step 5 — Group relay + delivery**
-- Relay for non-directly-connected members
-- End-to-end ACK routing through relay path
-- Delivery gossip — any device holding undelivered message retries when recipient reachable
+**Step 5 — Group relay + delivery** ✅
+- Relay for non-directly-connected members (per-peer `final_dest` routing)
+- End-to-end ACK routing through relay path (flood-back, dedup'd by `(msg_id, from)`)
+- Relay queue holds frames for currently-unreachable peers, flushed on reconnect
+- Read receipts (`READ` frame, `0x05`) — flood-back when user views a conversation
 
 ---
 

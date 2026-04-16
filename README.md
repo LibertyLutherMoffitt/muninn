@@ -25,13 +25,15 @@ Legal for personal use in the USA and Taiwan, and permitted on commercial flight
 ```
 Step 1 — RFCOMM socket          ✅  done
 Step 2 — Wire framing + E2EE    ✅  done
-Step 3 — 1:1 messaging + CLI    ✅  done  ← current
-Step 4 — Groups (up to 6)          planned
-Step 5 — Relay + delivery          planned
+Step 3 — 1:1 messaging + CLI    ✅  done
+Step 4 — Groups (up to 6)       ✅  done  ← current
+Step 5 — Relay + delivery       ✅  done
 Step 6 — Qt6/QML GUI               planned
 ```
 
-**The Linux CLI client is functional today.** Two people, encrypted chat, no infrastructure. Steps 4–6 are on the roadmap but not yet built.
+**The Linux CLI client is functional today.** Multi-peer simultaneous connections, group
+messaging, relay through intermediaries, delivery + read receipts, all encrypted.
+Step 6 (GUI) is on the roadmap but not yet built.
 
 ---
 
@@ -96,9 +98,8 @@ No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pub
 
 ## Roadmap
 
-- **Groups** — up to 6 members, pairwise E2EE to each recipient
-- **Relay** — messages hop through intermediaries (`A ── B ── C`) so all group members don't need direct BT connections
 - **Qt6/QML GUI** — Wayland-native desktop UI (PySide6), GPU-composited, animation-friendly
+- **Persistence** — SQLite layer for messages, pubkeys, and dedup state across restarts
 - **Android client** — Kotlin + Jetpack Compose
 - **WearOS thin client** — tethered to Android phone via Wearable Data Layer
 
@@ -110,11 +111,14 @@ No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pub
 [ 1 byte: type ][ 2 bytes: length ][ N bytes: payload ]
 ```
 
-| Type | Value | Notes |
-|------|-------|-------|
-| Handshake | `0x01` | 32-byte X25519 pubkey, plaintext |
-| Message | `0x02` | metadata plaintext, text Box-encrypted |
-| ACK | `0x03` | msg_id + sender MAC, plaintext |
+| Type        | Value  | Notes |
+|-------------|--------|-------|
+| Handshake   | `0x01` | 32-byte X25519 pubkey, plaintext |
+| Message     | `0x02` | metadata plaintext, text Box-encrypted |
+| ACK         | `0x03` | msg_id + sender MAC, plaintext |
+| Group Setup | `0x04` | group_id + member MACs/pubkeys + name, plaintext |
+| Read        | `0x05` | msg_id + reader MAC, plaintext (same shape as ACK) |
+| Profile     | `0x06` | self-chosen UTF-8 display name, plaintext |
 
 Full spec in [`PROTOCOL.md`](PROTOCOL.md). Architecture and decisions in [`DESIGN.md`](DESIGN.md).
 
