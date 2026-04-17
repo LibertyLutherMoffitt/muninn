@@ -11,35 +11,132 @@ and permitted on commercial flights per FAA guidelines.
 
 ## Clients
 
-### 1. Linux Client — Python
+Three independent clients are planned. Each reimplements the wire protocol in its own
+language — `PROTOCOL.md` is the only cross-client contract. Duplication is cheap at this
+size and simpler than threading a generated IDL (protobuf/flatbuffers) through three
+ecosystems.
 
-**Language:** Python 3  
-**BT Stack:** BlueZ via D-Bus (`dbus-python`, `pygobject3`) — RFCOMM profile registered via `org.bluez.ProfileManager1`  
-**Crypto:** PyNaCl (libsodium binding)  
-**UI:**
-- **Qt6/QML (PySide6)** desktop GUI — GPU-composited, animation-friendly, flexible
-  theming. Chosen over GTK4 for better keybinding support, superior animation story, and
-  scalability to image sending and embedded game widgets (future). Wayland-native, works
-  well on Hyprland.
-- **Terminal/CLI mode** — fully operable from the command line without a GUI, for headless
-  use, SSH sessions, or developer preference. CLI and GUI share the same core protocol layer.
+### 1. Desktop Client — Python (CLI + Qt6 GUI in one package)
 
-### 2. Android Client — Kotlin
+**Language:** Python 3
+**Targets:** Linux (working), Windows (future)
+**BT Stack:**
+- **Linux** — BlueZ via D-Bus (`dbus-python`, `pygobject3`); RFCOMM profile registered
+  via `org.bluez.ProfileManager1`. Lives in `python/src/muninn/bt/bluez.py`.
+- **Windows** — WinRT Bluetooth APIs (`winsdk` / `pywinrt`). Will live in
+  `python/src/muninn/bt/winrt.py`. Not yet written.
 
-**Language:** Kotlin  
+The `muninn.bt` package dispatches on `sys.platform` at import time. Everything above
+(`crypto.py`, `protocol.py`, `peers.py`, `groups.py`) is platform-agnostic.
+
+**Crypto:** PyNaCl (libsodium binding)
+
+**Frontends — both in the same Python package, sharing the full core:**
+- **CLI** (`cli.py`) — readline-based terminal UI. Working today on Linux.
+- **Qt6/QML GUI** (`gui.py`, planned) — PySide6 + QML. GPU-composited, animation-friendly,
+  flexible theming. Chosen over GTK4 for better keybinding support, superior animation
+  story, and scalability to image sending and embedded widgets (future). Wayland-native
+  on Linux (tested on Hyprland), native on Windows.
+
+CLI and GUI import the same `ConnectionManager`, the same protocol, the same BT backend.
+The only difference is the layer that talks to the user. Splitting them into separate
+projects would duplicate 100% of the non-UI code, so they ship as one package with two
+entry points (`muninn-cli`, `muninn-gui`).
+
+### 2. Terminal Client — Go + Bubble Tea
+
+**Language:** Go
+**Targets:** Linux, Windows
+**BT Stack:** Same two-backend pattern as the Python client, selected via Go build tags:
+- **Linux** — BlueZ via D-Bus (`tui/internal/bt/bluez.go`, `//go:build linux`)
+- **Windows** — WinRT (`tui/internal/bt/winrt.go`, `//go:build windows`)
+
+Both files implement a common `bt.Transport` interface; the compiler picks the right one
+at build time.
+
+**Crypto:** `golang.org/x/crypto/nacl/box` — same X25519 + XSalsa20-Poly1305 primitive
+as the Python client, wire-compatible.
+
+**UI:** `charmbracelet/bubbletea` (Elm-architecture TUI) + `lipgloss` for styling.
+
+**Why a Go TUI in addition to the Python CLI:** single static binary, cross-compiles
+to Windows without a Python runtime, smoother rendering than readline for multi-pane
+conversation views.
+
+### 3. Android Client — Kotlin
+
+**Language:** Kotlin
+**Target:** Android (single platform — no separate BT backend needed)
 **BT Stack:** Android Bluetooth API — `BluetoothAdapter`, `BluetoothServerSocket` /
-`BluetoothSocket` via RFCOMM (stable since API 5)  
-**Crypto:** lazysodium-android (libsodium binding)  
+`BluetoothSocket` via RFCOMM (stable since API 5)
+**Crypto:** lazysodium-android (libsodium binding)
 **UI:** Jetpack Compose
 
-### 3. WearOS Client — Kotlin (future)
+### 4. WearOS Client — Kotlin (future)
 
 **Architecture:** Thin client via Wearable Data Layer API — watch relays messages through
-paired Android phone, which handles all BT communication.  
-**UI:** Compose for Wear  
+paired Android phone, which handles all BT communication.
+**UI:** Compose for Wear
 **Note:** Requires paired Android phone running the Android client. Standalone direct BT
 from watch is possible on some hardware (Galaxy Watch, Pixel Watch) but deprioritized due
 to poor BT stack reliability and aggressive power management on WearOS.
+
+---
+
+## Monorepo Structure
+
+```
+muninn/
+├── PROTOCOL.md              ← cross-client wire contract (source of truth)
+├── DESIGN.md                ← architecture + decisions (this file)
+├── README.md
+├── flake.nix                ← Nix dev shell, builds all desktop clients
+├── python/                  ← Desktop client: CLI + Qt6 GUI (Linux + Windows)
+│   ├── pyproject.toml
+│   └── src/muninn/
+│       ├── bt/
+│       │   ├── __init__.py  ← dispatches on sys.platform
+│       │   ├── bluez.py     ← Linux backend (working)
+│       │   └── winrt.py     ← Windows backend (future)
+│       ├── crypto.py        ┐
+│       ├── protocol.py      │  platform-agnostic core,
+│       ├── peers.py         │  shared by CLI and GUI
+│       ├── groups.py        ┘
+│       ├── cli.py           ← readline frontend (working)
+│       └── gui.py           ← Qt6/QML frontend (future)
+├── tui/                     ← Go Bubble Tea TUI (Linux + Windows)
+│   ├── go.mod
+│   ├── cmd/muninn-tui/
+│   │   └── main.go
+│   └── internal/
+│       ├── bt/
+│       │   ├── bt.go        ← Transport interface
+│       │   ├── bluez.go     ← //go:build linux
+│       │   └── winrt.go     ← //go:build windows
+│       ├── crypto/
+│       ├── protocol/
+│       ├── peers/
+│       └── ui/              ← bubbletea model/update/view
+├── android/                 ← Kotlin + Jetpack Compose (future)
+│   └── …                    ← standard Gradle/Android Studio layout
+└── wearos/                  ← Compose-for-Wear, tethered to android/ (future)
+```
+
+### Structural rules
+
+- **`PROTOCOL.md` is the only shared artifact.** Every client reimplements framing,
+  encoding, and state in its own language. There is no generated IDL.
+- **BT backend is the only per-OS split inside a cross-platform client.** Two of our
+  desktop clients (Python, Go) target both Linux and Windows — each isolates the platform
+  difference to a single file inside a `bt/` subpackage (`bluez.*` vs `winrt.*`). Adding
+  Windows support means writing one file, not branching the codebase. Android is
+  single-OS and has no such split.
+- **One Python client, two frontends.** CLI and Qt6 GUI share `crypto.py`,
+  `protocol.py`, `peers.py`, `groups.py`, and `bt/`. They differ only in the user-facing
+  layer.
+- **Android lives in its own top-level directory.** Its toolchain (Gradle, Android SDK)
+  and language (Kotlin) don't overlap with the desktop clients; sharing a build system
+  would be more pain than win.
 
 ---
 

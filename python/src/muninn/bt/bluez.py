@@ -354,15 +354,25 @@ def connect(addr: str) -> tuple:
         )
 
         # Wait for NewConnection to fire (delivers socket via waiter queue).
-        try:
-            sock, peer_addr = q.get(timeout=20)
-            print(f"Connected to {peer_addr}")
-            return sock, peer_addr
-        except queue.Empty:
-            connect_done.wait(timeout=5)
-            if connect_error:
-                raise ConnectionError(f"ConnectProfile failed: {connect_error[0]}")
-            raise ConnectionError(f"Timed out waiting for connection from {addr}")
+        # Poll both the queue and the error channel so an immediate
+        # ConnectProfile failure surfaces without waiting the full timeout.
+        deadline = time.monotonic() + 20
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                sock, peer_addr = q.get(timeout=min(0.5, remaining))
+                print(f"Connected to {peer_addr}")
+                return sock, peer_addr
+            except queue.Empty:
+                if connect_error:
+                    raise ConnectionError(f"ConnectProfile failed: {connect_error[0]}")
+                # connect_done set without error means ConnectProfile returned
+                # OK but NewConnection hasn't fired yet — keep waiting.
+        if connect_error:
+            raise ConnectionError(f"ConnectProfile failed: {connect_error[0]}")
+        raise ConnectionError(f"Timed out waiting for connection from {addr}")
 
     finally:
         with _waiters_lock:

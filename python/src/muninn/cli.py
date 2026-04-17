@@ -1,6 +1,8 @@
 import os
 import queue
 import readline
+import shlex
+import shutil
 import sys
 import threading
 import time
@@ -9,8 +11,9 @@ from muninn import bt
 from muninn.crypto import generate_keypair
 from muninn.groups import Group, GroupStore
 from muninn.peers import GROUP_ZERO, ConnectionManager
+from muninn.protocol import FrameTooLarge
 
-COMMANDS = ["/dm ", "/group ", "/new ", "/nick ", "/list", "/peers", "/help"]
+COMMANDS = ["/dm ", "/group ", "/new ", "/nick ", "/list", "/peers", "/rpeers", "/help"]
 
 
 def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
@@ -21,14 +24,20 @@ def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
             or buf.startswith("/new ")
             or buf.startswith("/nick ")
         ):
-            # Offer both MAC addresses and display names.
+            # Offer MACs + display names for every peer we know about, not
+            # just the currently-connected ones — matches what resolve()
+            # accepts so tab-complete never refuses something the command
+            # parser would have accepted.
             low = text.lower()
             upper = text.upper()
             with conn_mgr.peers_lock:
-                addrs = list(conn_mgr.peers.keys())
-            options = [a for a in addrs if a.startswith(upper)]
+                known = set(conn_mgr.peers.keys())
+            known.update(group_store.pubkeys.keys())
+            known.update(group_store.names.keys())
+            known.update(group_store.overrides.keys())
+            options = [a for a in known if a.startswith(upper)]
             seen_addrs = set(options)
-            for addr in addrs:
+            for addr in known:
                 name = group_store.display_name(addr)
                 if (
                     name != addr
@@ -67,6 +76,9 @@ class ChatUI:
         self.local_mac = local_mac
         self.active_conv: tuple[str, str | bytes] | None = None
         self.input_queue: queue.Queue = queue.Queue()
+        self._display_lock = threading.Lock()
+        # Set while input() is blocking so _display() knows to redraw the prompt.
+        self._input_active = threading.Event()
 
         # msg_id -> set of dest addrs (for our outbound msgs)
         self.outbound: dict[bytes, set[str]] = {}
@@ -96,8 +108,26 @@ class ChatUI:
         return f"[{name}] > "
 
     def _display(self, msg: str) -> None:
-        sys.stdout.write(f"\r\033[K{msg}\n")
-        sys.stdout.flush()
+        """Print a line without corrupting the readline input in progress.
+
+        Clears the current terminal line (which readline drew as prompt +
+        partial input), prints msg, then redraws prompt + buffer so the user
+        can keep typing from where they left off. The redraw is skipped when
+        input() is not currently blocking (e.g. between commands) to avoid
+        spurious blank prompt lines.
+        """
+        buf = readline.get_line_buffer()
+        prompt = self._prompt()
+        with self._display_lock:
+            sys.stdout.write("\r\033[K" + msg + "\n")
+            if self._input_active.is_set():
+                sys.stdout.write(prompt + buf)
+            sys.stdout.flush()
+
+    def _status(self, text: str) -> None:
+        """Print a right-aligned delivery status indicator."""
+        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+        self._display(text.rjust(cols))
 
     def _on_message(
         self, group_id: bytes, sender_mac: str, text: str, msg_id: bytes
@@ -119,14 +149,17 @@ class ChatUI:
 
     def _on_ack(self, msg_id: bytes, from_mac: str) -> None:
         if msg_id in self.outbound:
-            self._display(f"  \u2713 {self._name(from_mac)}")
+            self._status(f"\u2713 {self._name(from_mac)}")
 
     def _on_read(self, msg_id: bytes, from_mac: str) -> None:
         if msg_id in self.outbound:
-            self._display(f"  \u2713\u2713 {self._name(from_mac)}")
+            self._status(f"\u2713\u2713 {self._name(from_mac)}")
 
     def _on_profile(self, addr: str, name: str) -> None:
-        self._display(f"  {addr} is now known as {name}")
+        if name:
+            self._display(f"  {addr} is now known as {name}")
+        else:
+            self._display(f"  {addr} cleared their display name")
 
     def _flush_reads(self, conv_key: tuple[str, str | bytes]) -> None:
         for msg_id in self.unread.pop(conv_key, []):
@@ -149,13 +182,24 @@ class ChatUI:
     def _input_reader(self) -> None:
         try:
             while True:
+                self._input_active.set()
                 line = input(self._prompt())
+                self._input_active.clear()
                 self.input_queue.put(line)
         except (EOFError, KeyboardInterrupt):
+            self._input_active.clear()
             self.input_queue.put(None)
 
     def _handle_command(self, text: str) -> None:
-        parts = text.split()
+        # shlex lets names/values contain spaces when quoted
+        # (e.g. `/nick "Long Name"`, `/new "Sky Team" alice bob`).
+        try:
+            parts = shlex.split(text)
+        except ValueError as e:
+            print(f"Parse error: {e}")
+            return
+        if not parts:
+            return
         cmd = parts[0].lower()
 
         if cmd == "/peers":
@@ -169,6 +213,24 @@ class ChatUI:
                     name = self._name(addr)
                     suffix = f" ({addr})" if name != addr else ""
                     print(f"  {name}{suffix}")
+
+        elif cmd == "/rpeers":
+            with self.conn_mgr.peers_lock:
+                direct = set(self.conn_mgr.peers.keys())
+            indirect = [
+                (addr, self.conn_mgr.indirect_via.get(addr, "?"))
+                for addr in self.group_store.pubkeys
+                if addr != self.local_mac and addr not in direct
+            ]
+            if not indirect:
+                print("No reachable indirect peers.")
+            else:
+                print("Reachable via relay:")
+                for addr, via in indirect:
+                    name = self._name(addr)
+                    suffix = f" ({addr})" if name != addr else ""
+                    via_name = self._name(via)
+                    print(f"  {name}{suffix}  via {via_name}")
 
         elif cmd == "/dm":
             if len(parts) < 2:
@@ -220,17 +282,28 @@ class ChatUI:
                 # /nick <name> — set our own name and broadcast.
                 new_name = parts[1]
                 self.conn_mgr.set_display_name(new_name)
-                print(f"You are now known as '{new_name}'")
+                if new_name:
+                    print(f"You are now known as '{new_name}'")
+                else:
+                    print("Cleared your display name")
             elif len(parts) == 3:
-                # /nick <peer> <name> — set local override.
+                # /nick <peer> <name> — set local override, or clear it
+                # when <name> is empty (pass as "" via shell quoting).
                 resolved = self.group_store.resolve(parts[1])
                 if resolved is None:
                     print(f"Unknown peer: {parts[1]}")
                     return
-                self.group_store.set_override(resolved, parts[2])
-                print(f"Local override: {resolved} → '{parts[2]}'")
+                if parts[2] == "":
+                    self.group_store.clear_override(resolved)
+                    print(f"Cleared override for {resolved}")
+                else:
+                    self.group_store.set_override(resolved, parts[2])
+                    print(f"Local override: {resolved} → '{parts[2]}'")
             else:
-                print("Usage: /nick <name>  |  /nick <peer> <name>")
+                print(
+                    "Usage: /nick <name>  |  /nick <peer> <name>  "
+                    '|  /nick <peer> ""  (clear override)'
+                )
 
         elif cmd == "/list":
             print("Conversations:")
@@ -250,8 +323,10 @@ class ChatUI:
             print("  /new <name> <p1> [p2..] — create group")
             print("  /nick <name>            — set your own display name")
             print("  /nick <peer> <name>     — local override for a peer")
+            print('  /nick <peer> ""         — clear a local override')
             print("  /list                   — show conversations")
             print("  /peers                  — show connected peers")
+            print("  /rpeers                 — show reachable peers via relay")
 
         else:
             print(f"Unknown command: {cmd}. Type /help")
@@ -299,10 +374,19 @@ class ChatUI:
                 if dests:
                     # Display before send so peer-disconnect messages from
                     # send_to's error path appear after, not before.
-                    self._display("  \u29d7 sent")
-                    msg_id = self.conn_mgr.send_message(gid, text, dests)
-                    if msg_id is not None:
-                        self.outbound[msg_id] = set(dests)
+                    self._status("\u29d7")
+                    try:
+                        result = self.conn_mgr.send_message(gid, text, dests)
+                    except FrameTooLarge as e:
+                        self._status(f"! message too large: {e}")
+                        continue
+                    if result is None:
+                        self._status("! no reachable recipient (no pubkey)")
+                    else:
+                        msg_id, sent, skipped = result
+                        self.outbound[msg_id] = set(sent)
+                        for addr in skipped:
+                            self._status(f"! skipped {self._name(addr)} (no pubkey)")
 
         except KeyboardInterrupt:
             pass

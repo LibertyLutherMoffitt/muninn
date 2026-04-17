@@ -21,10 +21,16 @@ class GroupStore:
 
     def add_group(self, group: Group) -> None:
         self.groups[group.group_id] = group
+        # Only populate pubkeys for members we haven't yet handshaken with.
+        # A known pubkey came from a direct handshake and is authoritative;
+        # overwriting it with a value forwarded in a plaintext GROUP_SETUP
+        # would let any group creator redirect our encryption for that peer.
         for addr, pubkey in group.members.items():
-            self.pubkeys[addr] = pubkey
+            self.pubkeys.setdefault(addr, pubkey)
 
     def add_pubkey(self, addr: str, pubkey: bytes) -> None:
+        # Always wins: direct handshake is the source of truth for a peer's
+        # pubkey. Group-setup seeding uses setdefault; this one overwrites.
         self.pubkeys[addr] = pubkey
 
     def get_pubkey(self, addr: str) -> bytes | None:

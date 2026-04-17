@@ -62,11 +62,17 @@ send Message(encrypted)   ──────────►  decrypt → display
 
 ## Clients
 
-| Platform | Language | BT Stack | UI | Status |
-|----------|----------|----------|----|--------|
-| Linux | Python 3 | BlueZ via D-Bus | CLI (Qt6/QML planned) | **Working** |
-| Android | Kotlin | Android Bluetooth API | Jetpack Compose | Planned |
-| WearOS | Kotlin | via Android phone relay | Compose for Wear | Future |
+| Client | Language | Targets | BT Stack | UI | Status |
+|--------|----------|---------|----------|----|--------|
+| Desktop — CLI | Python 3 | Linux, Windows | BlueZ / WinRT | readline | **Working (Linux)** |
+| Desktop — GUI | Python 3 | Linux, Windows | BlueZ / WinRT | Qt6/QML (PySide6) | Planned |
+| Terminal | Go | Linux, Windows | BlueZ / WinRT | Bubble Tea | Planned |
+| Android | Kotlin | Android | Android Bluetooth API | Jetpack Compose | Planned |
+| WearOS | Kotlin | WearOS | via Android phone relay | Compose for Wear | Future |
+
+The Desktop CLI and Desktop GUI ship as one Python package with two entry points — they
+share the full protocol/BT/crypto core and differ only in the user-facing layer. See
+[`DESIGN.md`](DESIGN.md#monorepo-structure) for the repo layout.
 
 ---
 
@@ -98,8 +104,10 @@ No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pub
 
 ## Roadmap
 
-- **Qt6/QML GUI** — Wayland-native desktop UI (PySide6), GPU-composited, animation-friendly
 - **Persistence** — SQLite layer for messages, pubkeys, and dedup state across restarts
+- **Qt6/QML GUI** — Wayland-native desktop UI (PySide6), GPU-composited, animation-friendly
+- **Go + Bubble Tea TUI** — single static binary, cross-compiles to Linux + Windows
+- **Windows BT backend** — WinRT bindings for both the Python and Go clients
 - **Android client** — Kotlin + Jetpack Compose
 - **WearOS thin client** — tethered to Android phone via Wearable Data Layer
 
@@ -119,6 +127,7 @@ No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pub
 | Group Setup | `0x04` | group_id + member MACs/pubkeys + name, plaintext |
 | Read        | `0x05` | msg_id + reader MAC, plaintext (same shape as ACK) |
 | Profile     | `0x06` | self-chosen UTF-8 display name, plaintext |
+| Peer Annc   | `0x07` | list of known peer MACs + pubkeys, plaintext |
 
 Full spec in [`PROTOCOL.md`](PROTOCOL.md). Architecture and decisions in [`DESIGN.md`](DESIGN.md).
 

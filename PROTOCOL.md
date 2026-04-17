@@ -37,6 +37,7 @@ Maximum payload: 65,535 bytes.
 | Group Setup  | `0x04` | Creator → Members     | No (metadata only)       |
 | Read         | `0x05` | Reader → Sender       | No                       |
 | Profile      | `0x06` | Peer → Peer           | No (metadata only)       |
+| Peer Annc    | `0x07` | Peer → Peer           | No (metadata only)       |
 
 ---
 
@@ -167,6 +168,34 @@ it, and overrides win over the self-chosen name on display and command resolutio
 
 Profile frames are **not** forwarded to third parties — each peer hears only directly-
 connected peers' names. Relay intermediaries do not propagate them.
+
+---
+
+## Peer Announcement Frame (`0x07`)
+
+Sent by each peer immediately after the handshake (after Profile). Lists the sender's
+currently-known peers (MAC + pubkey) so the receiver can learn about devices not yet in
+range. Also sent to existing peers when a new peer joins, advertising the newcomer's
+MAC + pubkey.
+
+**Payload:**
+
+```
+[ 1 byte: peer_count ]  — uint8
+For each peer:
+    [  6 bytes: mac    ]
+    [ 32 bytes: pubkey ]
+```
+
+Total per-peer entry: 38 bytes. An empty list (`peer_count = 0`) is valid and a no-op.
+
+Recipients add the announced MACs + pubkeys to their local registry with
+`setdefault` semantics: a pubkey received via direct handshake is always preferred
+over one announced in a Peer Annc frame, preventing any peer from redirecting
+encryption for another device.
+
+Peer Annc frames are **not** forwarded — they are point-to-point between directly
+connected devices. The information propagates one hop at a time as devices connect.
 
 ---
 

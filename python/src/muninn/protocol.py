@@ -8,9 +8,18 @@ TYPE_ACK = 0x03
 TYPE_GROUP_SETUP = 0x04
 TYPE_READ = 0x05
 TYPE_PROFILE = 0x06
+TYPE_PEER_ANNC = 0x07
+
+MAX_PAYLOAD = 0xFFFF  # uint16 — see PROTOCOL.md
+
+
+class FrameTooLarge(ValueError):
+    """Payload exceeds the 65535-byte wire limit for a single frame."""
 
 
 def encode_frame(frame_type: int, payload: bytes) -> bytes:
+    if len(payload) > MAX_PAYLOAD:
+        raise FrameTooLarge(f"payload {len(payload)} bytes exceeds max {MAX_PAYLOAD}")
     return struct.pack("!BH", frame_type, len(payload)) + payload
 
 
@@ -22,13 +31,15 @@ def read_frame(sock) -> tuple[int, bytes]:
 
 
 def recv_exact(sock, n: int) -> bytes:
-    data = b""
+    # bytearray avoids the O(n^2) copy that `data += chunk` produces when a
+    # large payload arrives in many small recv chunks.
+    data = bytearray()
     while len(data) < n:
         chunk = sock.recv(n - len(data))
         if not chunk:
             raise ConnectionError("Connection closed")
-        data += chunk
-    return data
+        data.extend(chunk)
+    return bytes(data)
 
 
 # --- Handshake ---
@@ -136,6 +147,30 @@ def encode_profile(name: str) -> bytes:
 
 def decode_profile(payload: bytes) -> str:
     return payload.decode("utf-8")
+
+
+# --- Peer announcement ---
+
+
+def encode_peer_annc(peers: list[tuple[bytes, bytes]]) -> bytes:
+    """peers: list of (mac_6_bytes, pubkey_32_bytes)."""
+    parts = [struct.pack("!B", len(peers))]
+    for mac, pubkey in peers:
+        parts.append(mac)
+        parts.append(pubkey)
+    return encode_frame(TYPE_PEER_ANNC, b"".join(parts))
+
+
+def decode_peer_annc(payload: bytes) -> list[tuple[bytes, bytes]]:
+    count = payload[0]
+    offset = 1
+    peers = []
+    for _ in range(count):
+        mac = payload[offset : offset + 6]
+        pubkey = payload[offset + 6 : offset + 38]
+        peers.append((mac, pubkey))
+        offset += 38
+    return peers
 
 
 # --- Helpers ---
