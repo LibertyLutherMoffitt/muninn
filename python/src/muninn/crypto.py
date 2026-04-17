@@ -5,6 +5,10 @@ def generate_keypair() -> PrivateKey:
     return PrivateKey.generate()
 
 
+def privkey_from_bytes(data: bytes) -> PrivateKey:
+    return PrivateKey(data)
+
+
 def derive_box(private_key: PrivateKey, peer_pubkey_bytes: bytes) -> Box:
     return Box(private_key, PublicKey(peer_pubkey_bytes))
 

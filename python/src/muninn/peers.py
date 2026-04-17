@@ -9,20 +9,27 @@ Thread safety:
   happen atomically so a reconnect can't pop an empty queue while another
   thread is concurrently enqueuing.
 - Individual socket sends use per-peer send_lock.
-- seen/seen_acks/seen_reads: single-op dict/set mutations rely on the GIL.
+- seen_acks/seen_reads: single-op set mutations rely on the GIL.
+- seen dedup: delegated to Storage; claim/release atomic via sqlite
+  INSERT OR IGNORE.
 - unacked: inner-dict reads/writes rely on the GIL; add_peer snapshots via
   .copy() (C-level atomic) so concurrent del can't raise RuntimeError.
 """
 
 import socket
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from nacl.public import PrivateKey
 
 from muninn import crypto, protocol
 from muninn.groups import Group, GroupStore
+
+if TYPE_CHECKING:
+    from muninn.storage import Storage
 
 GROUP_ZERO = b"\x00" * 16
 
@@ -44,11 +51,13 @@ class ConnectionManager:
         private_key: PrivateKey,
         group_store: GroupStore,
         display_name: str = "",
+        storage: "Storage | None" = None,
     ):
         self.local_mac = local_mac
         self.local_mac_bytes = protocol.mac_to_bytes(local_mac)
         self.private_key = private_key
         self.group_store = group_store
+        self.storage = storage
         # Leave empty when unset so group_store.display_name() falls back to
         # the MAC. Previously this defaulted to local_mac, which caused us to
         # broadcast our own MAC as a self-chosen name — producing a pointless
@@ -62,13 +71,42 @@ class ConnectionManager:
 
         # Message state
         self.unacked: dict[bytes, dict[str, bytes]] = {}  # msg_id -> {addr -> frame}
-        self.seen: set[bytes] = set()  # msg_id (delivered to us as final dest)
-        self.seen_lock = threading.Lock()  # atomic claim for seen
+        # Fallback in-memory dedup state, used only when storage is None
+        # (tests). Production always goes through Storage.claim_seen().
+        self._seen_fallback: set[bytes] = set()
+        self._seen_fallback_lock = threading.Lock()
         self.seen_relayed: set[bytes] = set()  # msg_id (forwarded by us as relay)
         self.seen_acks: set[tuple[bytes, bytes]] = set()  # (msg_id, from_mac_bytes)
         self.seen_reads: set[tuple[bytes, bytes]] = set()  # (msg_id, from_mac_bytes)
         self.relay_queue: dict[str, list[bytes]] = {}  # dest_addr -> [frame_bytes]
         self.indirect_via: dict[str, str] = {}  # addr -> relay_addr we learned from
+
+        # Rebuild unacked outbound from storage — re-encrypt fresh frames per
+        # recipient (new nonce). msg_id stays the same so the receiver's seen
+        # table drops the resend as a dup once delivered.
+        if storage is not None:
+            for msg in storage.load_unacked_outbound(local_mac):
+                entry: dict[str, bytes] = {}
+                plaintext = msg.body.encode("utf-8")
+                for recipient in msg.recipients:
+                    pubkey = self.group_store.get_pubkey(recipient)
+                    if pubkey is None:
+                        continue
+                    box = crypto.derive_box(self.private_key, pubkey)
+                    encrypted = crypto.encrypt(box, plaintext)
+                    try:
+                        frame = protocol.encode_message(
+                            msg.group_id,
+                            msg.msg_id,
+                            self.local_mac_bytes,
+                            protocol.mac_to_bytes(recipient),
+                            encrypted,
+                        )
+                    except protocol.FrameTooLarge:
+                        continue
+                    entry[recipient] = frame
+                if entry:
+                    self.unacked[msg.msg_id] = entry
 
         # Callbacks (set by CLI layer)
         self.on_message: Callable | None = None  # (group_id, sender_mac, text, msg_id)
@@ -260,6 +298,18 @@ class ConnectionManager:
 
         self.unacked[msg_id] = unacked_entry
 
+        # Persist before sending so a crash mid-send still gives us a chance
+        # to retransmit on restart (we rebuild self.unacked from storage).
+        if self.storage is not None:
+            self.storage.save_outgoing_message(
+                msg_id,
+                group_id,
+                self.local_mac,
+                text,
+                int(time.time()),
+                list(unacked_entry.keys()),
+            )
+
         for dest_addr, frame in unacked_entry.items():
             self._route_frame(dest_addr, frame)
 
@@ -327,6 +377,25 @@ class ConnectionManager:
             return self.send_to(dest_addr, frame)
         return False
 
+    # --- Seen dedup (delegates to storage, falls back to in-memory) ---
+
+    def _claim_seen(self, msg_id: bytes) -> bool:
+        """Return True if this is the first time we've seen msg_id."""
+        if self.storage is not None:
+            return self.storage.claim_seen(msg_id)
+        with self._seen_fallback_lock:
+            if msg_id in self._seen_fallback:
+                return False
+            self._seen_fallback.add(msg_id)
+            return True
+
+    def _release_seen(self, msg_id: bytes) -> None:
+        if self.storage is not None:
+            self.storage.release_seen(msg_id)
+            return
+        with self._seen_fallback_lock:
+            self._seen_fallback.discard(msg_id)
+
     # --- Receive loop ---
 
     def _recv_loop(self, peer: PeerState) -> None:
@@ -373,14 +442,7 @@ class ConnectionManager:
 
         # Atomic dedup claim. Two relay paths delivering the same msg_id
         # concurrently must not both reach on_message.
-        with self.seen_lock:
-            if msg_id in self.seen:
-                already_seen = True
-            else:
-                self.seen.add(msg_id)
-                already_seen = False
-
-        if already_seen:
+        if not self._claim_seen(msg_id):
             ack = protocol.encode_ack(msg_id, self.local_mac_bytes)
             self.send_to(from_addr, ack)
             return
@@ -390,8 +452,7 @@ class ConnectionManager:
         # us) would be silently dropped by the dedup check above.
         pubkey = self.group_store.get_pubkey(sender)
         if pubkey is None:
-            with self.seen_lock:
-                self.seen.discard(msg_id)
+            self._release_seen(msg_id)
             return
 
         box = crypto.derive_box(self.private_key, pubkey)
@@ -399,9 +460,11 @@ class ConnectionManager:
             plaintext = crypto.decrypt(box, encrypted)
             text = plaintext.decode("utf-8")
         except Exception:
-            with self.seen_lock:
-                self.seen.discard(msg_id)
+            self._release_seen(msg_id)
             return
+
+        if self.storage is not None:
+            self.storage.save_incoming_body(msg_id, gid, sender, text, ts)
 
         if self.on_message:
             self.on_message(gid, sender, text, msg_id)
@@ -424,6 +487,11 @@ class ConnectionManager:
             self.unacked[msg_id].pop(ack_from, None)
             if not self.unacked[msg_id]:
                 del self.unacked[msg_id]
+
+        # mark_acked is a no-op for relay traffic (no matching row); safe to
+        # call unconditionally.
+        if self.storage is not None:
+            self.storage.mark_acked(msg_id, ack_from)
 
         if self.on_ack:
             self.on_ack(msg_id, ack_from)
@@ -453,6 +521,9 @@ class ConnectionManager:
         if read_key in self.seen_reads:
             return
         self.seen_reads.add(read_key)
+
+        if self.storage is not None:
+            self.storage.mark_read(msg_id, reader)
 
         if self.on_read:
             self.on_read(msg_id, reader)
@@ -511,6 +582,8 @@ class ConnectionManager:
             self.group_store.set_name(self.local_mac, name)
         else:
             self.group_store.names.pop(self.local_mac, None)
+        if self.storage is not None:
+            self.storage.set_display_name(name)
         frame = protocol.encode_profile(name)
         with self.peers_lock:
             targets = list(self.peers.keys())

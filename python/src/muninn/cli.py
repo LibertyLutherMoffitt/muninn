@@ -8,10 +8,11 @@ import threading
 import time
 
 from muninn import bt
-from muninn.crypto import generate_keypair
+from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import Group, GroupStore
 from muninn.peers import GROUP_ZERO, ConnectionManager
 from muninn.protocol import FrameTooLarge
+from muninn.storage import Storage
 
 COMMANDS = ["/dm ", "/group ", "/new ", "/nick ", "/list", "/peers", "/rpeers", "/help"]
 
@@ -450,11 +451,29 @@ def main():
     local_mac = bt.get_local_mac()
     print(f"Local MAC: {local_mac}")
 
-    private_key = generate_keypair()
-    group_store = GroupStore()
-    display_name = os.environ.get("MUNINN_NAME", "")
+    storage = Storage()
+
+    # Load or create persistent identity. Privkey is reused across runs so
+    # our X25519 pubkey (and therefore shared secrets with peers) is stable.
+    identity = storage.get_identity()
+    if identity is None:
+        private_key = generate_keypair()
+        identity = storage.create_identity(bytes(private_key))
+    else:
+        private_key = privkey_from_bytes(identity.privkey)
+
+    # MUNINN_NAME env var takes precedence over persisted name so users can
+    # override per-session without clobbering persisted state.
+    env_name = os.environ.get("MUNINN_NAME", "")
+    display_name = env_name or identity.display_name
+
+    group_store = GroupStore(storage=storage)
     conn_mgr = ConnectionManager(
-        local_mac, private_key, group_store, display_name=display_name
+        local_mac,
+        private_key,
+        group_store,
+        display_name=display_name,
+        storage=storage,
     )
     if display_name:
         print(f"Display name: {display_name}")
@@ -478,6 +497,7 @@ def main():
     finally:
         stop.set()
         bt.close_server()
+        storage.close()
 
     print("\nBye.")
 
