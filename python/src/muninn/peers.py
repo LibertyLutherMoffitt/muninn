@@ -571,7 +571,7 @@ class ConnectionManager:
             addr = protocol.bytes_to_mac(mac_bytes)
             if addr == self.local_mac:
                 continue
-            self.group_store.pubkeys.setdefault(addr, pubkey)
+            self.group_store.add_pubkey_if_missing(addr, pubkey)
             if addr not in direct and addr not in self.indirect_via:
                 self.indirect_via[addr] = from_addr
 

@@ -19,6 +19,10 @@ from muninn.groups import Group
 
 SCHEMA_VERSION = 1
 
+# Duplicated from peers.GROUP_ZERO. Importing would create a cycle, and this
+# byte pattern is a protocol constant unlikely to churn.
+_GROUP_ZERO = b"\x00" * 16
+
 
 def default_db_path() -> Path:
     """XDG-compliant on Linux; APPDATA on Windows; $HOME/.muninn fallback."""
@@ -264,13 +268,54 @@ class Storage:
             )
 
     def mark_read(self, msg_id: bytes, recipient: str) -> None:
+        # AND read_at IS NULL keeps the first read timestamp. In-memory
+        # seen_reads short-circuits dup READ frames within a session, but
+        # that set is lost on restart — without this guard, a re-received
+        # READ would bump read_at to a much later time than the actual read.
         now = int(time.time())
         with self._lock:
             self._conn.execute(
                 "UPDATE message_recipients SET read_at = ? "
-                "WHERE msg_id = ? AND recipient = ?",
+                "WHERE msg_id = ? AND recipient = ? AND read_at IS NULL",
                 (now, msg_id, recipient),
             )
+
+    def load_dm_history(
+        self, local_mac: str, peer: str, limit: int
+    ) -> list[tuple[bytes, str, str, int]]:
+        """Recent DM history with `peer`, oldest-first.
+
+        Returns [(msg_id, sender, body, ts), ...]. Covers both directions:
+        inbound msgs (sender = peer) and outbound msgs (sender = local_mac
+        AND peer listed in message_recipients).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT msg_id, sender, body, ts FROM ("
+                "  SELECT msg_id, sender, body, ts FROM messages "
+                "  WHERE group_id = ? AND ("
+                "    sender = ? OR "
+                "    (sender = ? AND msg_id IN "
+                "      (SELECT msg_id FROM message_recipients WHERE recipient = ?))"
+                "  ) ORDER BY ts DESC LIMIT ?"
+                ") ORDER BY ts ASC",
+                (_GROUP_ZERO, peer, local_mac, peer, limit),
+            ).fetchall()
+        return [(bytes(r[0]), r[1], r[2], r[3]) for r in rows]
+
+    def load_group_history(
+        self, group_id: bytes, limit: int
+    ) -> list[tuple[bytes, str, str, int]]:
+        """Recent group history, oldest-first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT msg_id, sender, body, ts FROM ("
+                "  SELECT msg_id, sender, body, ts FROM messages "
+                "  WHERE group_id = ? ORDER BY ts DESC LIMIT ?"
+                ") ORDER BY ts ASC",
+                (group_id, limit),
+            ).fetchall()
+        return [(bytes(r[0]), r[1], r[2], r[3]) for r in rows]
 
     def load_unacked_outbound(self, local_mac: str) -> list[UnackedMessage]:
         """Messages we sent that still have recipients without an ACK."""

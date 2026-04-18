@@ -48,10 +48,7 @@ class GroupStore:
         # overwriting it with a value forwarded in a plaintext GROUP_SETUP
         # would let any group creator redirect our encryption for that peer.
         for addr, pubkey in group.members.items():
-            if addr not in self.pubkeys:
-                self.pubkeys[addr] = pubkey
-                if self.storage is not None:
-                    self.storage.save_peer_pubkey_if_missing(addr, pubkey)
+            self.add_pubkey_if_missing(addr, pubkey)
         if self.storage is not None:
             self.storage.save_group(group)
 
@@ -61,6 +58,17 @@ class GroupStore:
         self.pubkeys[addr] = pubkey
         if self.storage is not None:
             self.storage.save_peer_pubkey(addr, pubkey)
+
+    def add_pubkey_if_missing(self, addr: str, pubkey: bytes) -> None:
+        # Provisional: used for pubkeys learned via GROUP_SETUP or PEER_ANNC
+        # relays. Never overwrites a direct-handshake pubkey. setdefault is
+        # atomic under the GIL, so a concurrent add_pubkey() from direct
+        # handshake can't be clobbered by a later check-then-set here.
+        # save_peer_pubkey_if_missing is INSERT OR IGNORE (idempotent), so
+        # unconditional persist is safe.
+        self.pubkeys.setdefault(addr, pubkey)
+        if self.storage is not None:
+            self.storage.save_peer_pubkey_if_missing(addr, pubkey)
 
     def get_pubkey(self, addr: str) -> bytes | None:
         return self.pubkeys.get(addr)
