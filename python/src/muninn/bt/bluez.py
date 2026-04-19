@@ -207,14 +207,15 @@ def discover() -> list[tuple[str, str]]:
     return results
 
 
-def scan_devices(duration: float = 10.0) -> list[tuple[str, str]]:
+def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str, str]]:
     """General BT scan via BlueZ D-Bus Adapter1.StartDiscovery.
 
     Using D-Bus directly (rather than a bluetoothctl subprocess killed by
     timeout) ensures discovered devices are committed to bluetoothd's cache
     and appear in ObjectManager results.
     """
-    print(f"Scanning for nearby Bluetooth devices ({duration:.0f}s)...")
+    if not quiet:
+        print(f"Scanning for nearby Bluetooth devices ({duration:.0f}s)...")
     try:
         bus = dbus.SystemBus()
         adapter = dbus.Interface(

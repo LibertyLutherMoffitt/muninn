@@ -21,7 +21,7 @@ COMMANDS = [
     "/nick ",
     "/list",
     "/peers",
-    "/rpeers",
+    "/known",
     "/history",
     "/help",
 ]
@@ -98,6 +98,10 @@ class ChatUI:
         self.outbound: dict[bytes, set[str]] = {}
         # conv_key -> [(msg_id, sender_addr)] — unread incoming msgs per conv
         self.unread: dict[tuple[str, str | bytes], list[bytes]] = {}
+        # Blocks _input_reader from drawing the next prompt until the current
+        # command has finished printing all output.
+        self._ready_for_prompt = threading.Event()
+        self._ready_for_prompt.set()
 
         conn_mgr.on_message = self._on_message
         conn_mgr.on_peer_change = self._on_peer_change
@@ -235,6 +239,8 @@ class ChatUI:
     def _input_reader(self) -> None:
         try:
             while True:
+                self._ready_for_prompt.wait()
+                self._ready_for_prompt.clear()
                 self._input_active.set()
                 line = input(self._prompt())
                 self._input_active.clear()
@@ -257,33 +263,51 @@ class ChatUI:
 
         if cmd == "/peers":
             with self.conn_mgr.peers_lock:
-                addrs = list(self.conn_mgr.peers.keys())
-            if not addrs:
-                print("No connected peers.")
-            else:
-                print("Connected peers:")
-                for addr in addrs:
-                    name = self._name(addr)
-                    suffix = f" ({addr})" if name != addr else ""
-                    print(f"  {name}{suffix}")
-
-        elif cmd == "/rpeers":
-            with self.conn_mgr.peers_lock:
-                direct = set(self.conn_mgr.peers.keys())
+                direct_addrs = list(self.conn_mgr.peers.keys())
+            direct_set = set(direct_addrs)
             indirect = [
-                (addr, self.conn_mgr.indirect_via.get(addr, "?"))
-                for addr in self.group_store.pubkeys
-                if addr != self.local_mac and addr not in direct
+                (addr, self.conn_mgr.indirect_via[addr])
+                for addr in self.conn_mgr.indirect_via
+                if addr not in direct_set
             ]
-            if not indirect:
-                print("No reachable indirect peers.")
+            if not direct_addrs and not indirect:
+                print("No connected or reachable peers.")
             else:
-                print("Reachable via relay:")
-                for addr, via in indirect:
+                if direct_addrs:
+                    print("Connected:")
+                    for addr in direct_addrs:
+                        name = self._name(addr)
+                        suffix = f" ({addr})" if name != addr else ""
+                        print(f"  {name}{suffix}")
+                if indirect:
+                    print("Reachable via relay:")
+                    for addr, via in indirect:
+                        name = self._name(addr)
+                        suffix = f" ({addr})" if name != addr else ""
+                        via_name = self._name(via)
+                        print(f"  {name}{suffix}  via {via_name}")
+
+        elif cmd == "/known":
+            all_peers = sorted(
+                addr for addr in self.group_store.pubkeys if addr != self.local_mac
+            )
+            if not all_peers:
+                print("No known peers.")
+            else:
+                with self.conn_mgr.peers_lock:
+                    direct_set = set(self.conn_mgr.peers.keys())
+                print("All known peers:")
+                for addr in all_peers:
                     name = self._name(addr)
                     suffix = f" ({addr})" if name != addr else ""
-                    via_name = self._name(via)
-                    print(f"  {name}{suffix}  via {via_name}")
+                    if addr in direct_set:
+                        status = "  [connected]"
+                    elif addr in self.conn_mgr.indirect_via:
+                        via = self.conn_mgr.indirect_via[addr]
+                        status = f"  [relay via {self._name(via)}]"
+                    else:
+                        status = "  [offline]"
+                    print(f"  {name}{suffix}{status}")
 
         elif cmd == "/dm":
             if len(parts) < 2:
@@ -397,8 +421,8 @@ class ChatUI:
             print("  /nick <peer> <name>     — local override for a peer")
             print('  /nick <peer> ""         — clear a local override')
             print("  /list                   — show conversations")
-            print("  /peers                  — show connected peers")
-            print("  /rpeers                 — show reachable peers via relay")
+            print("  /peers                  — show connected + relay peers")
+            print("  /known                  — show all peers ever seen")
             print(
                 f"  /history [N]            — show last N msgs (default {HISTORY_DEFAULT})"
             )
@@ -420,48 +444,53 @@ class ChatUI:
                     break
 
                 text = line.strip()
-                if not text:
-                    continue
-
-                if text.startswith("/"):
-                    self._handle_command(text)
-                    continue
-
-                if self.active_conv is None:
-                    print("No active conversation. Use /dm <addr> or /peers")
-                    continue
-
-                conv_type, key = self.active_conv
-                dests: list[str] = []
-                gid: bytes = GROUP_ZERO
-                if conv_type == "dm":
-                    assert isinstance(key, str)
-                    dests = [key]
-                elif conv_type == "group":
-                    assert isinstance(key, bytes)
-                    group = self.group_store.groups.get(key)
-                    if group:
-                        dests = [a for a in group.members if a != self.local_mac]
-                        gid = key
-                    else:
-                        print("Group not found.")
-
-                if dests:
-                    # Display before send so peer-disconnect messages from
-                    # send_to's error path appear after, not before.
-                    self._status("\u29d7")
-                    try:
-                        result = self.conn_mgr.send_message(gid, text, dests)
-                    except FrameTooLarge as e:
-                        self._status(f"! message too large: {e}")
+                try:
+                    if not text:
                         continue
-                    if result is None:
-                        self._status("! no reachable recipient (no pubkey)")
-                    else:
-                        msg_id, sent, skipped = result
-                        self.outbound[msg_id] = set(sent)
-                        for addr in skipped:
-                            self._status(f"! skipped {self._name(addr)} (no pubkey)")
+
+                    if text.startswith("/"):
+                        self._handle_command(text)
+                        continue
+
+                    if self.active_conv is None:
+                        print("No active conversation. Use /dm <addr> or /peers")
+                        continue
+
+                    conv_type, key = self.active_conv
+                    dests: list[str] = []
+                    gid: bytes = GROUP_ZERO
+                    if conv_type == "dm":
+                        assert isinstance(key, str)
+                        dests = [key]
+                    elif conv_type == "group":
+                        assert isinstance(key, bytes)
+                        group = self.group_store.groups.get(key)
+                        if group:
+                            dests = [a for a in group.members if a != self.local_mac]
+                            gid = key
+                        else:
+                            print("Group not found.")
+
+                    if dests:
+                        # Display before send so peer-disconnect messages from
+                        # send_to's error path appear after, not before.
+                        self._status("\u29d7")
+                        try:
+                            result = self.conn_mgr.send_message(gid, text, dests)
+                        except FrameTooLarge as e:
+                            self._status(f"! message too large: {e}")
+                            continue
+                        if result is None:
+                            self._status("! no reachable recipient (no pubkey)")
+                        else:
+                            msg_id, sent, skipped = result
+                            self.outbound[msg_id] = set(sent)
+                            for addr in skipped:
+                                self._status(
+                                    f"! skipped {self._name(addr)} (no pubkey)"
+                                )
+                finally:
+                    self._ready_for_prompt.set()
 
         except KeyboardInterrupt:
             pass
@@ -486,8 +515,17 @@ def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) 
         pass
 
     deferred: dict[str, float] = {}  # MAC tiebreaker deferral
+    cycles = 0
 
     while not stop.is_set():
+        cycles += 1
+        # Refresh BT cache every ~2 min so UUIDs stay current and newly-online
+        # peers are discoverable even if they missed the initial scan window.
+        if cycles % 8 == 0:
+            try:
+                bt.scan_devices(duration=5, quiet=True)
+            except Exception:
+                pass
         try:
             services = bt.discover()
         except Exception:

@@ -232,6 +232,10 @@ class ConnectionManager:
             peer.sock.close()
         except Exception:
             pass
+        # Drop any indirect routes that depended on this peer as relay.
+        stale = [k for k, v in self.indirect_via.items() if v == addr]
+        for k in stale:
+            del self.indirect_via[k]
         if self.on_peer_change:
             self.on_peer_change(addr, False)
 
