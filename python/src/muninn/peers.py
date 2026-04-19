@@ -64,7 +64,7 @@ class ConnectionManager:
         self.unacked: dict[bytes, dict[str, bytes]] = {}  # msg_id -> {addr -> frame}
         self.seen: set[bytes] = set()  # msg_id (delivered to us as final dest)
         self.seen_lock = threading.Lock()  # atomic claim for seen
-        self.seen_relayed: set[bytes] = set()  # msg_id (forwarded by us as relay)
+        self.seen_relayed: set[tuple[bytes, bytes]] = set()  # (msg_id, dest_bytes)
         self.seen_acks: set[tuple[bytes, bytes]] = set()  # (msg_id, from_mac_bytes)
         self.seen_reads: set[tuple[bytes, bytes]] = set()  # (msg_id, from_mac_bytes)
         self.relay_queue: dict[str, list[bytes]] = {}  # dest_addr -> [frame_bytes]
@@ -154,8 +154,9 @@ class ConnectionManager:
         # Tell existing peers about the new peer (if we have their pubkey).
         new_pubkey = self.group_store.get_pubkey(addr)
         if new_pubkey is not None:
+            new_name = self.group_store.names.get(addr, "")
             annc = protocol.encode_peer_annc(
-                [(protocol.mac_to_bytes(addr), new_pubkey)]
+                [(protocol.mac_to_bytes(addr), new_pubkey, new_name)]
             )
             with self.peers_lock:
                 existing = [a for a in self.peers if a != addr]
@@ -325,7 +326,7 @@ class ConnectionManager:
 
         if connected_now:
             return self.send_to(dest_addr, frame)
-        return False
+        return True  # queued — will be sent on reconnect
 
     # --- Receive loop ---
 
@@ -364,11 +365,12 @@ class ConnectionManager:
         if final_dest != self.local_mac:
             if final_dest == from_addr:
                 return  # nonsense: would echo back to the peer that sent it
-            if msg_id in self.seen_relayed:
+            relay_key = (msg_id, dest_bytes)
+            if relay_key in self.seen_relayed:
                 return  # already forwarded — prevent multi-path storms
-            self.seen_relayed.add(msg_id)
             frame = protocol.encode_frame(protocol.TYPE_MESSAGE, payload)
-            self._route_frame(final_dest, frame, exclude=from_addr)
+            if self._route_frame(final_dest, frame, exclude=from_addr):
+                self.seen_relayed.add(relay_key)
             return
 
         # Atomic dedup claim. Two relay paths delivering the same msg_id
@@ -483,12 +485,13 @@ class ConnectionManager:
             self.on_profile(from_addr, name)
 
     def _send_peer_annc(self, to_addr: str) -> None:
-        """Send our known peers (MAC+pubkey) to a single peer."""
+        """Send our known peers (MAC+pubkey+name) to a single peer."""
         entries = []
         for addr, pubkey in self.group_store.pubkeys.items():
             if addr == self.local_mac or addr == to_addr:
                 continue
-            entries.append((protocol.mac_to_bytes(addr), pubkey))
+            name = self.group_store.names.get(addr, "")
+            entries.append((protocol.mac_to_bytes(addr), pubkey, name))
         if entries:
             self.send_to(to_addr, protocol.encode_peer_annc(entries))
 
@@ -496,11 +499,15 @@ class ConnectionManager:
         pairs = protocol.decode_peer_annc(payload)
         with self.peers_lock:
             direct = set(self.peers.keys())
-        for mac_bytes, pubkey in pairs:
+        for mac_bytes, pubkey, name in pairs:
             addr = protocol.bytes_to_mac(mac_bytes)
             if addr == self.local_mac:
                 continue
             self.group_store.pubkeys.setdefault(addr, pubkey)
+            if name and addr not in self.group_store.names:
+                self.group_store.set_name(addr, name)
+                if self.on_profile:
+                    self.on_profile(addr, name)
             if addr not in direct and addr not in self.indirect_via:
                 self.indirect_via[addr] = from_addr
 

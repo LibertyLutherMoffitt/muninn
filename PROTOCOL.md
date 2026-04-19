@@ -183,16 +183,19 @@ MAC + pubkey.
 ```
 [ 1 byte: peer_count ]  — uint8
 For each peer:
-    [  6 bytes: mac    ]
-    [ 32 bytes: pubkey ]
+    [  6 bytes: mac         ]
+    [ 32 bytes: pubkey      ]
+    [  1 byte:  name_length ]  — uint8, 0 = no self-chosen name
+    [  N bytes: name        ]  — UTF-8 display name (may be empty)
 ```
 
-Total per-peer entry: 38 bytes. An empty list (`peer_count = 0`) is valid and a no-op.
+Per-peer entry size varies: 39 + name_length bytes. An empty list (`peer_count = 0`) is valid and a no-op.
 
 Recipients add the announced MACs + pubkeys to their local registry with
 `setdefault` semantics: a pubkey received via direct handshake is always preferred
 over one announced in a Peer Annc frame, preventing any peer from redirecting
-encryption for another device.
+encryption for another device. Names from Peer Annc are stored only if the
+recipient has no existing name for that peer (direct Profile wins).
 
 Peer Annc frames are **not** forwarded — they are point-to-point between directly
 connected devices. The information propagates one hop at a time as devices connect.

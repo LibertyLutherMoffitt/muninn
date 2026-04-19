@@ -152,24 +152,31 @@ def decode_profile(payload: bytes) -> str:
 # --- Peer announcement ---
 
 
-def encode_peer_annc(peers: list[tuple[bytes, bytes]]) -> bytes:
-    """peers: list of (mac_6_bytes, pubkey_32_bytes)."""
+def encode_peer_annc(peers: list[tuple[bytes, bytes, str]]) -> bytes:
+    """peers: list of (mac_6_bytes, pubkey_32_bytes, display_name)."""
     parts = [struct.pack("!B", len(peers))]
-    for mac, pubkey in peers:
+    for mac, pubkey, name in peers:
+        name_bytes = name.encode("utf-8")[:255]
         parts.append(mac)
         parts.append(pubkey)
+        parts.append(struct.pack("!B", len(name_bytes)))
+        parts.append(name_bytes)
     return encode_frame(TYPE_PEER_ANNC, b"".join(parts))
 
 
-def decode_peer_annc(payload: bytes) -> list[tuple[bytes, bytes]]:
+def decode_peer_annc(payload: bytes) -> list[tuple[bytes, bytes, str]]:
     count = payload[0]
     offset = 1
     peers = []
     for _ in range(count):
         mac = payload[offset : offset + 6]
         pubkey = payload[offset + 6 : offset + 38]
-        peers.append((mac, pubkey))
-        offset += 38
+        name_len = payload[offset + 38]
+        name = payload[offset + 39 : offset + 39 + name_len].decode(
+            "utf-8", errors="replace"
+        )
+        peers.append((mac, pubkey, name))
+        offset += 39 + name_len
     return peers
 
 
