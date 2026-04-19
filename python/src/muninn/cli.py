@@ -8,12 +8,26 @@ import threading
 import time
 
 from muninn import bt
-from muninn.crypto import generate_keypair
+from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import Group, GroupStore
 from muninn.peers import GROUP_ZERO, ConnectionManager
 from muninn.protocol import FrameTooLarge
+from muninn.storage import Storage
 
-COMMANDS = ["/dm ", "/group ", "/new ", "/nick ", "/list", "/peers", "/rpeers", "/help"]
+COMMANDS = [
+    "/dm ",
+    "/group ",
+    "/new ",
+    "/nick ",
+    "/list",
+    "/peers",
+    "/rpeers",
+    "/history",
+    "/help",
+]
+
+HISTORY_DEFAULT = 20
+HISTORY_MAX = 500
 
 
 def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
@@ -165,6 +179,44 @@ class ChatUI:
         for msg_id in self.unread.pop(conv_key, []):
             self.conn_mgr.send_read(msg_id)
 
+    def _render_history(
+        self, conv_key: tuple[str, str | bytes], limit: int = HISTORY_DEFAULT
+    ) -> None:
+        """Print recent stored messages for a conv. No-op if storage unset."""
+        storage = self.conn_mgr.storage
+        if storage is None:
+            return
+        conv_type, key = conv_key
+        msgs: list[tuple[bytes, str, str, int]]
+        if conv_type == "dm":
+            assert isinstance(key, str)
+            peer_name = self._name(key)
+            msgs = storage.load_dm_history(self.local_mac, key, limit)
+            if not msgs:
+                return
+            plural = "s" if len(msgs) != 1 else ""
+            self._display(f"--- {len(msgs)} previous message{plural} ---")
+            for _msg_id, sender, body, ts in msgs:
+                t = time.strftime("%H:%M", time.localtime(ts))
+                arrow = ">" if sender == self.local_mac else "<"
+                self._display(f"  {t} [DM:{peer_name}] {arrow} {body}")
+        else:
+            assert isinstance(key, bytes)
+            group = self.group_store.groups.get(key)
+            gname = group.name if group else "?"
+            msgs = storage.load_group_history(key, limit)
+            if not msgs:
+                return
+            plural = "s" if len(msgs) != 1 else ""
+            self._display(f"--- {len(msgs)} previous message{plural} ---")
+            for _msg_id, sender, body, ts in msgs:
+                t = time.strftime("%H:%M", time.localtime(ts))
+                if sender == self.local_mac:
+                    self._display(f"  {t} [{gname}] > {body}")
+                else:
+                    self._display(f"  {t} [{gname}] < {self._name(sender)}: {body}")
+        self._display("---")
+
     def _on_peer_change(self, addr: str, connected: bool) -> None:
         label = self._name(addr)
         if connected:
@@ -172,6 +224,7 @@ class ChatUI:
             if self.active_conv is None:
                 self.active_conv = ("dm", addr)
                 self._display(f"  Active conversation: DM with {label}")
+                self._render_history(self.active_conv)
         else:
             self._display(f"- {label} disconnected")
 
@@ -243,6 +296,7 @@ class ChatUI:
             self.active_conv = ("dm", resolved)
             self._flush_reads(self.active_conv)
             print(f"Switched to DM with {self._name(resolved)}")
+            self._render_history(self.active_conv)
 
         elif cmd == "/group":
             if len(parts) < 2:
@@ -254,6 +308,7 @@ class ChatUI:
                     self.active_conv = ("group", gid)
                     self._flush_reads(self.active_conv)
                     print(f"Switched to group '{name}'")
+                    self._render_history(self.active_conv)
                     return
             print(f"Group '{name}' not found.")
 
@@ -316,6 +371,23 @@ class ChatUI:
                 n = len(group.members)
                 print(f"  Group: {group.name} ({n} members){marker}")
 
+        elif cmd == "/history":
+            if self.active_conv is None:
+                print("No active conversation.")
+                return
+            limit = HISTORY_DEFAULT
+            if len(parts) >= 2:
+                try:
+                    limit = int(parts[1])
+                except ValueError:
+                    print(f"Usage: /history [N]  (default {HISTORY_DEFAULT})")
+                    return
+                if limit <= 0:
+                    print("N must be positive.")
+                    return
+                limit = min(limit, HISTORY_MAX)
+            self._render_history(self.active_conv, limit=limit)
+
         elif cmd == "/help":
             print("Commands:")
             print("  /dm <name|addr>         — switch to DM")
@@ -327,6 +399,9 @@ class ChatUI:
             print("  /list                   — show conversations")
             print("  /peers                  — show connected peers")
             print("  /rpeers                 — show reachable peers via relay")
+            print(
+                f"  /history [N]            — show last N msgs (default {HISTORY_DEFAULT})"
+            )
 
         else:
             print(f"Unknown command: {cmd}. Type /help")
@@ -450,11 +525,33 @@ def main():
     local_mac = bt.get_local_mac()
     print(f"Local MAC: {local_mac}")
 
-    private_key = generate_keypair()
-    group_store = GroupStore()
-    display_name = os.environ.get("MUNINN_NAME", "")
+    storage = Storage()
+
+    # Load or create persistent identity. Privkey is reused across runs so
+    # our X25519 pubkey (and therefore shared secrets with peers) is stable.
+    identity = storage.get_identity()
+    if identity is None:
+        private_key = generate_keypair()
+        identity = storage.create_identity(bytes(private_key))
+    else:
+        private_key = privkey_from_bytes(identity.privkey)
+
+    # Register ourselves in the peers table so load_groups can JOIN on
+    # local_mac and include us in every group's member list.
+    storage.save_peer_pubkey(local_mac, bytes(private_key.public_key))
+
+    # MUNINN_NAME env var takes precedence over persisted name so users can
+    # override per-session without clobbering persisted state.
+    env_name = os.environ.get("MUNINN_NAME", "")
+    display_name = env_name or identity.display_name
+
+    group_store = GroupStore(storage=storage)
     conn_mgr = ConnectionManager(
-        local_mac, private_key, group_store, display_name=display_name
+        local_mac,
+        private_key,
+        group_store,
+        display_name=display_name,
+        storage=storage,
     )
     if display_name:
         print(f"Display name: {display_name}")
@@ -478,6 +575,7 @@ def main():
     finally:
         stop.set()
         bt.close_server()
+        storage.close()
 
     print("\nBye.")
 

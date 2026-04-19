@@ -1,4 +1,8 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from muninn.storage import Storage
 
 
 @dataclass
@@ -9,7 +13,15 @@ class Group:
 
 
 class GroupStore:
-    def __init__(self):
+    """In-memory cache of peer/group state with write-through to Storage.
+
+    All reads hit the in-memory dicts (hot path). All mutations update both
+    the dict and the underlying DB. On construction, the DB is loaded into
+    memory so the CLI/GUI can share state across restarts.
+    """
+
+    def __init__(self, storage: "Storage | None" = None):
+        self.storage = storage
         self.groups: dict[bytes, Group] = {}
         self.pubkeys: dict[str, bytes] = {}  # addr -> pubkey (global registry)
         # Display names. `names` holds the peer's self-chosen name (received
@@ -19,6 +31,16 @@ class GroupStore:
         self.names: dict[str, str] = {}
         self.overrides: dict[str, str] = {}
 
+        if storage is not None:
+            for mac, pubkey, name, override in storage.load_peers():
+                self.pubkeys[mac] = pubkey
+                if name:
+                    self.names[mac] = name
+                if override:
+                    self.overrides[mac] = override
+            for group in storage.load_groups():
+                self.groups[group.group_id] = group
+
     def add_group(self, group: Group) -> None:
         self.groups[group.group_id] = group
         # Only populate pubkeys for members we haven't yet handshaken with.
@@ -26,24 +48,45 @@ class GroupStore:
         # overwriting it with a value forwarded in a plaintext GROUP_SETUP
         # would let any group creator redirect our encryption for that peer.
         for addr, pubkey in group.members.items():
-            self.pubkeys.setdefault(addr, pubkey)
+            self.add_pubkey_if_missing(addr, pubkey)
+        if self.storage is not None:
+            self.storage.save_group(group)
 
     def add_pubkey(self, addr: str, pubkey: bytes) -> None:
         # Always wins: direct handshake is the source of truth for a peer's
         # pubkey. Group-setup seeding uses setdefault; this one overwrites.
         self.pubkeys[addr] = pubkey
+        if self.storage is not None:
+            self.storage.save_peer_pubkey(addr, pubkey)
+
+    def add_pubkey_if_missing(self, addr: str, pubkey: bytes) -> None:
+        # Provisional: used for pubkeys learned via GROUP_SETUP or PEER_ANNC
+        # relays. Never overwrites a direct-handshake pubkey. setdefault is
+        # atomic under the GIL, so a concurrent add_pubkey() from direct
+        # handshake can't be clobbered by a later check-then-set here.
+        # save_peer_pubkey_if_missing is INSERT OR IGNORE (idempotent), so
+        # unconditional persist is safe.
+        self.pubkeys.setdefault(addr, pubkey)
+        if self.storage is not None:
+            self.storage.save_peer_pubkey_if_missing(addr, pubkey)
 
     def get_pubkey(self, addr: str) -> bytes | None:
         return self.pubkeys.get(addr)
 
     def set_name(self, addr: str, name: str) -> None:
         self.names[addr] = name
+        if self.storage is not None:
+            self.storage.set_peer_name(addr, name)
 
     def set_override(self, addr: str, name: str) -> None:
         self.overrides[addr] = name
+        if self.storage is not None:
+            self.storage.set_peer_override(addr, name)
 
     def clear_override(self, addr: str) -> None:
         self.overrides.pop(addr, None)
+        if self.storage is not None:
+            self.storage.clear_peer_override(addr)
 
     def display_name(self, addr: str) -> str:
         if addr in self.overrides:
