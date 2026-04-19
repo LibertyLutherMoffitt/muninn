@@ -483,6 +483,17 @@ class ConnectionManager:
         self.group_store.set_name(from_addr, name)
         if self.on_profile:
             self.on_profile(from_addr, name)
+        # Re-announce updated name to all other connected peers so indirect
+        # peers learn this device's nick without waiting for a reconnect.
+        pubkey = self.group_store.get_pubkey(from_addr)
+        if pubkey is not None:
+            annc = protocol.encode_peer_annc(
+                [(protocol.mac_to_bytes(from_addr), pubkey, name)]
+            )
+            with self.peers_lock:
+                targets = [a for a in self.peers if a != from_addr]
+            for addr in targets:
+                self.send_to(addr, annc)
 
     def _send_peer_annc(self, to_addr: str) -> None:
         """Send our known peers (MAC+pubkey+name) to a single peer."""
@@ -504,7 +515,7 @@ class ConnectionManager:
             if addr == self.local_mac:
                 continue
             self.group_store.pubkeys.setdefault(addr, pubkey)
-            if name and addr not in self.group_store.names:
+            if name and self.group_store.names.get(addr) != name:
                 self.group_store.set_name(addr, name)
                 if self.on_profile:
                     self.on_profile(addr, name)
