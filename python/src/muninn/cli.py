@@ -265,12 +265,17 @@ class ChatUI:
             with self.conn_mgr.peers_lock:
                 direct_addrs = list(self.conn_mgr.peers.keys())
             direct_set = set(direct_addrs)
-            indirect = [
-                (addr, self.conn_mgr.indirect_via[addr])
-                for addr in self.conn_mgr.indirect_via
-                if addr not in direct_set
+            # Relay section: all known peers that aren't direct. Uses
+            # group_store.pubkeys (not indirect_via) as the source of truth so
+            # peers whose pubkey arrived via DB or a previous Peer Annc still
+            # show even if indirect_via wasn't populated yet. indirect_via is
+            # used for the "via X" annotation only (best-effort).
+            relay_addrs = [
+                addr
+                for addr in self.group_store.pubkeys
+                if addr != self.local_mac and addr not in direct_set
             ]
-            if not direct_addrs and not indirect:
+            if not direct_addrs and not relay_addrs:
                 print("No connected or reachable peers.")
             else:
                 if direct_addrs:
@@ -279,13 +284,14 @@ class ChatUI:
                         name = self._name(addr)
                         suffix = f" ({addr})" if name != addr else ""
                         print(f"  {name}{suffix}")
-                if indirect:
+                if relay_addrs:
                     print("Reachable via relay:")
-                    for addr, via in indirect:
+                    for addr in relay_addrs:
                         name = self._name(addr)
                         suffix = f" ({addr})" if name != addr else ""
-                        via_name = self._name(via)
-                        print(f"  {name}{suffix}  via {via_name}")
+                        via = self.conn_mgr.indirect_via.get(addr)
+                        via_str = self._name(via) if via else "?"
+                        print(f"  {name}{suffix}  via {via_str}")
 
         elif cmd == "/known":
             all_peers = sorted(

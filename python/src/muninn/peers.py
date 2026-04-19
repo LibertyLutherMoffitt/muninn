@@ -595,7 +595,9 @@ class ConnectionManager:
                 self.group_store.set_name(addr, name)
                 if self.on_profile:
                     self.on_profile(addr, name)
-            if addr not in direct and addr not in self.indirect_via:
+            # Always update indirect_via so we track the freshest relay path.
+            # Only skip if addr is currently a direct peer — direct beats relay.
+            if addr not in direct:
                 self.indirect_via[addr] = from_addr
 
     def set_display_name(self, name: str) -> None:
