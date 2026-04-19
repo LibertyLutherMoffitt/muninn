@@ -101,7 +101,8 @@ muninn/
 │       ├── crypto.py        ┐
 │       ├── protocol.py      │  platform-agnostic core,
 │       ├── peers.py         │  shared by CLI and GUI
-│       ├── groups.py        ┘
+│       ├── groups.py        │
+│       ├── storage.py       ┘
 │       ├── cli.py           ← readline frontend (working)
 │       └── gui.py           ← Qt6/QML frontend (future)
 ├── tui/                     ← Go Bubble Tea TUI (Linux + Windows)
@@ -293,6 +294,7 @@ The receiver loop is type-agnostic: read 1 byte (type), read 2 bytes (length), r
 | Group Setup | `0x04` | No (group_id + member MACs + pubkeys + name) |
 | Read        | `0x05` | No (msg_id + reader MAC; same shape as ACK) |
 | Profile     | `0x06` | No (self-chosen display name, UTF-8) |
+| Peer Annc   | `0x07` | No (list of known peer MACs + pubkeys + names) |
 
 Message frame payload:
 ```
@@ -338,9 +340,11 @@ Profile frame payload:
 ```
 
 Sent immediately after handshake, and re-sent to all connected peers when the local user
-changes their name via `/nick <name>`. Not forwarded by relay — each peer hears only
-directly-connected peers' names. Local users may override a peer's self-chosen name with
-`/nick <peer> <name>`; overrides win on display.
+changes their name via `/nick <name>`. Profile frames are not forwarded directly — but
+when a relay node (B) receives a Profile from A, it re-announces A's updated name to all
+other connected peers via a Peer Annc frame. This causes name updates to propagate to
+indirect peers. Local users may override a peer's self-chosen name with `/nick <peer>
+<name>`; overrides win on display.
 
 Handshake frames are sent in plaintext (before shared secret exists). After both sides
 exchange pubkeys and derive the shared secret, message text is Box-encrypted. ACK and
@@ -395,6 +399,18 @@ everything built on top.
 - End-to-end ACK routing through relay path (flood-back, dedup'd by `(msg_id, from)`)
 - Relay queue holds frames for currently-unreachable peers, flushed on reconnect
 - Read receipts (`READ` frame, `0x05`) — flood-back when user views a conversation
+- `seen_relayed` keyed on `(msg_id, dest_bytes)` — prevents relay storms without blocking
+  retransmits to different destinations
+- Nick propagation to indirect peers via Peer Annc re-announcement on Profile receipt
+
+**Step 5b — SQLite persistence** ✅
+- `storage.py`: WAL-mode SQLite, `threading.Lock` serialization, schema versioned via
+  `PRAGMA user_version`
+- `GroupStore` write-through cache: all mutations update in-memory dicts and the DB atomically
+- Identity (keypair) persisted — same X25519 pubkey across restarts
+- Messages, groups, pubkeys, display names, unacked state, and seen-dedup table all
+  survive process exit
+- Unacked messages rebuilt on startup from DB (re-encrypted with fresh nonces, same msg_id)
 
 ---
 

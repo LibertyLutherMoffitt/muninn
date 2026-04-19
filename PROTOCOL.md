@@ -166,17 +166,22 @@ An empty payload is valid and means "no self-chosen name; fall back to MAC." Rec
 store the announcement as the peer's self-chosen name; the local user may still override
 it, and overrides win over the self-chosen name on display and command resolution.
 
-Profile frames are **not** forwarded to third parties — each peer hears only directly-
-connected peers' names. Relay intermediaries do not propagate them.
+Profile frames are **not** forwarded directly. However, when a relay node (B) receives a
+Profile from peer A, B immediately sends a Peer Annc to all other connected peers
+advertising A's updated name. This causes name changes to propagate one hop at a time to
+indirect peers without requiring a direct connection.
 
 ---
 
 ## Peer Announcement Frame (`0x07`)
 
 Sent by each peer immediately after the handshake (after Profile). Lists the sender's
-currently-known peers (MAC + pubkey) so the receiver can learn about devices not yet in
-range. Also sent to existing peers when a new peer joins, advertising the newcomer's
-MAC + pubkey.
+currently-known peers (MAC + pubkey + name) so the receiver can learn about devices not
+yet in range. Also sent in two other cases:
+- When a new peer joins: existing connected peers receive a Peer Annc advertising the
+  newcomer's MAC + pubkey + name.
+- When a connected peer changes their name (Profile received): the intermediary re-announces
+  that peer's updated name to all other connected peers.
 
 **Payload:**
 
@@ -191,11 +196,13 @@ For each peer:
 
 Per-peer entry size varies: 39 + name_length bytes. An empty list (`peer_count = 0`) is valid and a no-op.
 
-Recipients add the announced MACs + pubkeys to their local registry with
-`setdefault` semantics: a pubkey received via direct handshake is always preferred
-over one announced in a Peer Annc frame, preventing any peer from redirecting
-encryption for another device. Names from Peer Annc are stored only if the
-recipient has no existing name for that peer (direct Profile wins).
+Recipients apply the following rules:
+- **Pubkeys** — `setdefault` semantics. A pubkey from a direct handshake is never
+  overwritten by a Peer Annc; this prevents any relay from redirecting encryption for
+  another device.
+- **Names** — updated if the announced name differs from the stored name. This allows
+  name changes to propagate to indirect peers via the re-announcement mechanism above.
+  A local override always wins on display regardless of what Peer Annc carries.
 
 Peer Annc frames are **not** forwarded — they are point-to-point between directly
 connected devices. The information propagates one hop at a time as devices connect.

@@ -26,14 +26,15 @@ Legal for personal use in the USA and Taiwan, and permitted on commercial flight
 Step 1 — RFCOMM socket          ✅  done
 Step 2 — Wire framing + E2EE    ✅  done
 Step 3 — 1:1 messaging + CLI    ✅  done
-Step 4 — Groups (up to 6)       ✅  done  ← current
+Step 4 — Groups (up to 6)       ✅  done
 Step 5 — Relay + delivery       ✅  done
+Step 5b— SQLite persistence     ✅  done
 Step 6 — Qt6/QML GUI               planned
 ```
 
 **The Linux CLI client is functional today.** Multi-peer simultaneous connections, group
-messaging, relay through intermediaries, delivery + read receipts, all encrypted.
-Step 6 (GUI) is on the roadmap but not yet built.
+messaging, relay through intermediaries, delivery + read receipts, message history, all
+encrypted and persisted across restarts. Step 6 (GUI) is on the roadmap but not yet built.
 
 ---
 
@@ -94,9 +95,9 @@ First connection pairs devices automatically via `org.bluez.Device1.Pair()` — 
 
 ## Security model
 
-Messages are end-to-end encrypted. Only message text is encrypted; metadata (sender MAC, timestamp, message ID) is plaintext to enable future relay routing.
+Messages are end-to-end encrypted. Only message text is encrypted; metadata (sender MAC, timestamp, message ID) is plaintext to enable relay routing.
 
-Static keypairs are generated once per process and reused across reconnects. This means every handshake produces the same shared secret — simple and fast, but **no forward secrecy**. For an in-flight chat tool this tradeoff is acceptable.
+Static keypairs are generated once and persisted to SQLite — the same X25519 keypair is reused across restarts and reconnects, so the shared secret with each peer never changes. Simple and fast, but **no forward secrecy**. For an in-flight chat tool this tradeoff is acceptable.
 
 No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pubkey exchange. For manual verification, both parties can compare a short key fingerprint (display UI planned).
 
@@ -104,7 +105,6 @@ No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pub
 
 ## Roadmap
 
-- **Persistence** — SQLite layer for messages, pubkeys, and dedup state across restarts
 - **Qt6/QML GUI** — Wayland-native desktop UI (PySide6), GPU-composited, animation-friendly
 - **Go + Bubble Tea TUI** — single static binary, cross-compiles to Linux + Windows
 - **Windows BT backend** — WinRT bindings for both the Python and Go clients
