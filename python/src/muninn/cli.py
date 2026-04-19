@@ -46,7 +46,7 @@ def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
             upper = text.upper()
             with conn_mgr.peers_lock:
                 known = set(conn_mgr.peers.keys())
-            known.update(group_store.pubkeys.keys())
+            known.update(a for a in group_store.pubkeys if a != conn_mgr.local_mac)
             known.update(group_store.names.keys())
             known.update(group_store.overrides.keys())
             options = [a for a in known if a.startswith(upper)]

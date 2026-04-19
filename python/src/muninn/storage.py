@@ -80,7 +80,6 @@ class Storage:
                 return
             if current < 1:
                 self._conn.executescript(_SCHEMA_V1)
-            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # --- Identity ---
 
@@ -348,33 +347,33 @@ class Storage:
 
 
 _SCHEMA_V1 = """
-CREATE TABLE identity (
+CREATE TABLE IF NOT EXISTS identity (
     id           INTEGER PRIMARY KEY CHECK (id = 0),
     privkey      BLOB NOT NULL,
     display_name TEXT,
     created_at   INTEGER NOT NULL
 );
 
-CREATE TABLE peers (
+CREATE TABLE IF NOT EXISTS peers (
     mac               TEXT PRIMARY KEY,
     pubkey            BLOB NOT NULL,
     self_chosen_name  TEXT,
     local_override    TEXT
 );
 
-CREATE TABLE groups (
+CREATE TABLE IF NOT EXISTS groups (
     group_id   BLOB PRIMARY KEY,
     name       TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
 
-CREATE TABLE group_members (
+CREATE TABLE IF NOT EXISTS group_members (
     group_id BLOB NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
     mac      TEXT NOT NULL,
     PRIMARY KEY (group_id, mac)
 );
 
-CREATE TABLE messages (
+CREATE TABLE IF NOT EXISTS messages (
     msg_id   BLOB PRIMARY KEY,
     group_id BLOB NOT NULL,
     sender   TEXT NOT NULL,
@@ -382,7 +381,7 @@ CREATE TABLE messages (
     ts       INTEGER NOT NULL
 );
 
-CREATE TABLE message_recipients (
+CREATE TABLE IF NOT EXISTS message_recipients (
     msg_id    BLOB NOT NULL REFERENCES messages(msg_id) ON DELETE CASCADE,
     recipient TEXT NOT NULL,
     acked_at  INTEGER,
@@ -390,11 +389,13 @@ CREATE TABLE message_recipients (
     PRIMARY KEY (msg_id, recipient)
 );
 
-CREATE TABLE seen (
+CREATE TABLE IF NOT EXISTS seen (
     msg_id BLOB PRIMARY KEY
 );
 
-CREATE INDEX idx_messages_group_ts ON messages(group_id, ts);
-CREATE INDEX idx_recipients_unacked
+CREATE INDEX IF NOT EXISTS idx_messages_group_ts ON messages(group_id, ts);
+CREATE INDEX IF NOT EXISTS idx_recipients_unacked
     ON message_recipients(recipient) WHERE acked_at IS NULL;
+
+PRAGMA user_version = 1;
 """

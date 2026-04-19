@@ -78,6 +78,11 @@ class GroupStore:
         if self.storage is not None:
             self.storage.set_peer_name(addr, name)
 
+    def clear_name(self, addr: str) -> None:
+        self.names.pop(addr, None)
+        if self.storage is not None:
+            self.storage.set_peer_name(addr, "")
+
     def set_override(self, addr: str, name: str) -> None:
         self.overrides[addr] = name
         if self.storage is not None:

@@ -547,8 +547,9 @@ class ConnectionManager:
         # The MAC check handles peers running pre-fix code that broadcast
         # their own MAC as a default name.
         if not name or name == from_addr:
-            removed = self.group_store.names.pop(from_addr, None)
-            if removed is not None and self.on_profile:
+            had_name = from_addr in self.group_store.names
+            self.group_store.clear_name(from_addr)
+            if had_name and self.on_profile:
                 self.on_profile(from_addr, "")
             return
         self.group_store.set_name(from_addr, name)
@@ -599,7 +600,7 @@ class ConnectionManager:
         if name:
             self.group_store.set_name(self.local_mac, name)
         else:
-            self.group_store.names.pop(self.local_mac, None)
+            self.group_store.clear_name(self.local_mac)
         if self.storage is not None:
             self.storage.set_display_name(name)
         frame = protocol.encode_profile(name)
