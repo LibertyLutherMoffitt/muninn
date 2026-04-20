@@ -1,11 +1,17 @@
 import os
 import queue
-import readline
 import shlex
 import shutil
 import sys
 import threading
 import time
+
+try:
+    import readline
+
+    _HAS_READLINE = True
+except ImportError:
+    _HAS_READLINE = False
 
 from muninn import bt
 from muninn.crypto import generate_keypair, privkey_from_bytes
@@ -31,6 +37,9 @@ HISTORY_MAX = 500
 
 
 def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
+    if not _HAS_READLINE:
+        return
+
     def completer(text, state):
         buf = readline.get_line_buffer().lstrip()
         if (
@@ -134,6 +143,10 @@ class ChatUI:
         input() is not currently blocking (e.g. between commands) to avoid
         spurious blank prompt lines.
         """
+        if not _HAS_READLINE:
+            with self._display_lock:
+                print(msg)
+            return
         buf = readline.get_line_buffer()
         prompt = self._prompt()
         with self._display_lock:
