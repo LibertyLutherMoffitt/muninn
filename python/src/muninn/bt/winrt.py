@@ -47,6 +47,7 @@ that the BlueZ backend uses. Instead we call
 get the socket back synchronously. Much simpler than the BlueZ path.
 """
 
+import array
 import asyncio
 import queue
 import re
@@ -233,11 +234,13 @@ class _StreamSocketAdapter:
 
     def setblocking(self, flag: bool) -> None:
         # Core always uses blocking mode (with optional timeout). Non-blocking
-        # would require polling semantics we don't implement.
+        # maps to a minimal timeout so _recv_async doesn't silently block —
+        # if a caller ever passes False, they get poll-like semantics instead
+        # of an infinite wait.
         if flag:
             self._timeout = None
         else:
-            self._timeout = 0
+            self._timeout = 0.0
 
     def recv(self, n: int) -> bytes:
         if self._closed or n <= 0:
@@ -261,16 +264,24 @@ class _StreamSocketAdapter:
     # --- async implementations (run on the background loop) ---
 
     async def _recv_async(self, n: int) -> bytes:
-        async def do_load() -> int:
-            return int(await self._reader.load_async(n))
-
+        # Hold the IAsyncOperation directly so we can cancel it on timeout —
+        # asyncio.wait_for only cancels the awaiting task, not the underlying
+        # WinRT op, which would otherwise keep running and conflict with the
+        # next load_async call on the same DataReader.
+        op = self._reader.load_async(n)
         try:
-            if self._timeout is not None and self._timeout > 0:
-                got = await asyncio.wait_for(do_load(), timeout=self._timeout)
+            if self._timeout is None:
+                got = int(await op)
             else:
-                got = await do_load()
-        except asyncio.TimeoutError as e:
-            raise TimeoutError("recv timed out") from e
+                effective = max(float(self._timeout), 0.001)
+                try:
+                    got = int(await asyncio.wait_for(op, timeout=effective))
+                except asyncio.TimeoutError as e:
+                    try:
+                        op.cancel()
+                    except Exception:
+                        pass
+                    raise TimeoutError("recv timed out") from e
         except OSError as e:
             raise ConnectionError(str(e)) from e
 
@@ -278,19 +289,19 @@ class _StreamSocketAdapter:
             # Peer closed the stream cleanly — mirror socket EOF semantics.
             return b""
 
-        # read_bytes() fills a pre-sized buffer. Some winrt binding versions
-        # return the filled bytes object directly; handle both shapes.
-        buf = bytearray(got)
-        result = self._reader.read_bytes(buf)
-        if result is None:
-            return bytes(buf)
-        return bytes(result)
+        # read_bytes wants a winrt.system.Array[Byte]-shaped buffer. An
+        # `array.array('B', ...)` is the most portable stand-in across
+        # winrt-python versions (bytearray is rejected by some builds).
+        buf = array.array("B", b"\x00" * got)
+        self._reader.read_bytes(buf)
+        return buf.tobytes()
 
     async def _sendall_async(self, data: bytes) -> None:
         try:
-            # write_bytes accepts a sequence of ints (0..255) in the winrt-*
-            # bindings; converting via list(data) is portable.
-            self._writer.write_bytes(list(data))
+            # write_bytes needs a winrt.system.Array[Byte]-shaped value.
+            # array.array('B', ...) is the portable path; passing list[int]
+            # silently works on some bindings and TypeErrors on others.
+            self._writer.write_bytes(array.array("B", data))
             await self._writer.store_async()
         except OSError as e:
             raise ConnectionError(str(e)) from e
@@ -319,7 +330,7 @@ def _publish_service_name_sdp(provider: RfcommServiceProvider) -> None:
         writer.write_byte(_SDP_SERVICE_NAME_ATTRIBUTE_TYPE)
         name_bytes = SERVICE_NAME.encode("utf-8")
         writer.write_byte(len(name_bytes))
-        writer.write_bytes(list(name_bytes))
+        writer.write_bytes(array.array("B", name_bytes))
         provider.sdp_raw_attributes.insert(
             _SDP_SERVICE_NAME_ATTRIBUTE_ID, writer.detach_buffer()
         )
@@ -422,9 +433,13 @@ async def _discover_async() -> list[tuple[str, str]]:
 
 
 def discover() -> list[tuple[str, str]]:
+    # RfcommDeviceService.get_device_selector only matches *paired* devices
+    # on Windows — unpaired peers' SDP records aren't queryable without a
+    # prior pairing. Users should pair via scan_devices/pair first.
     try:
         return _run_async(_discover_async())
-    except Exception:
+    except Exception as e:
+        print(f"Discover error: {e}")
         return []
 
 
@@ -435,7 +450,10 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
     BlueZ; enumeration is event-driven. Run a watcher for `duration` seconds
     and collect whatever it emits.
     """
-    selector = BluetoothDevice.get_device_selector()
+    # Default get_device_selector() returns paired-only, so the watcher
+    # never fires for new devices. Filtering on pairing_state=False makes
+    # this an actual inquiry for nearby unpaired peers.
+    selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
     watcher = DeviceInformation.create_watcher(selector)
     found: dict[str, str] = {}
     completed = asyncio.Event()
