@@ -40,17 +40,50 @@
             mainProgram = "muninn";
           };
         };
+        pythonGuiPkgs = pkgs.python3.withPackages (ps: [
+          ps.pynacl
+          ps.dbus-python
+          ps.pygobject3
+          ps.pyside6
+        ]);
+
+        muninn-gui = pkgs.python3Packages.buildPythonApplication {
+          pname = "muninn-gui";
+          version = "0.1.0";
+          src = ./python;
+          pyproject = true;
+
+          build-system = [pkgs.python3Packages.setuptools];
+
+          dependencies = [
+            pkgs.python3Packages.pynacl
+            pkgs.python3Packages.dbus-python
+            pkgs.python3Packages.pygobject3
+            pkgs.python3Packages.pyside6
+          ];
+
+          meta = {
+            description = "Muninn GUI — encrypted P2P chat over Bluetooth";
+            mainProgram = "muninn-gui";
+          };
+        };
       in {
         packages = {
           default = muninn-linux;
           muninn-linux = muninn-linux;
+          muninn-gui = muninn-gui;
+          cli = muninn-linux;
+          gui = muninn-gui;
         };
 
         devShells.default = pkgs.mkShell {
           packages = [
-            pythonPkgs
+            pythonGuiPkgs
             pkgs.bluez
             pkgs.pkg-config
+            pkgs.qt6.qtbase
+            pkgs.qt6.qtdeclarative
+            pkgs.qt6.qtwayland
 
             # Tooling
             pkgs.ruff

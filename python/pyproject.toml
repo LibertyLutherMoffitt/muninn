@@ -27,8 +27,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = ["PySide6"]
 # Bundle a standalone .exe on Windows (see python/README.md).
 windows-build = ["pyinstaller"]
 
 [project.scripts]
-muninn = "muninn.cli:main"
+muninn     = "muninn.cli:main"
+muninn-gui = "muninn.gui.main:main"
