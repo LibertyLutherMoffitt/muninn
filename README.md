@@ -65,7 +65,7 @@ send Message(encrypted)   ──────────►  decrypt → display
 
 | Client | Language | Targets | BT Stack | UI | Status |
 |--------|----------|---------|----------|----|--------|
-| Desktop — CLI | Python 3 | Linux, Windows | BlueZ / WinRT | readline | **Working (Linux)** |
+| Desktop — CLI | Python 3 | Linux, Windows | BlueZ / WinRT | readline | **Working (Linux); Windows backend written, not HW-tested** |
 | Desktop — GUI | Python 3 | Linux, Windows | BlueZ / WinRT | Qt6/QML (PySide6) | Planned |
 | Terminal | Go | Linux, Windows | BlueZ / WinRT | Bubble Tea | Planned |
 | Android | Kotlin | Android | Android Bluetooth API | Jetpack Compose | Planned |
@@ -106,8 +106,8 @@ No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pub
 ## Roadmap
 
 - **Qt6/QML GUI** — Wayland-native desktop UI (PySide6), GPU-composited, animation-friendly
+- **Windows BT backend hardware validation** — `bt/winrt.py` exists but needs real-hardware testing
 - **Go + Bubble Tea TUI** — single static binary, cross-compiles to Linux + Windows
-- **Windows BT backend** — WinRT bindings for both the Python and Go clients
 - **Android client** — Kotlin + Jetpack Compose
 - **WearOS thin client** — tethered to Android phone via Wearable Data Layer
 

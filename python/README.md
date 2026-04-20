@@ -1,13 +1,13 @@
-# Muninn — Linux Client
+# Muninn — Desktop Client (CLI)
 
 Encrypted peer-to-peer chat over Bluetooth Classic (RFCOMM). No internet required.
 
-## Prerequisites
+Runs on Linux (BlueZ) and Windows (WinRT). A single Python package, two BT
+backends — the right one is picked at import time via `sys.platform`.
 
-- Two Linux devices with Bluetooth
-- Nix package manager
+## Linux — quick start
 
-## Run
+**Prerequisites:** Two Linux devices with Bluetooth; Nix package manager.
 
 ```
 nix run .#muninn-linux
@@ -16,6 +16,38 @@ nix run .#muninn-linux
 No flags. Every device both listens and scans continuously. Each discovers nearby Muninn
 peers, connects to all of them simultaneously, and maintains independent sessions.
 Pairing is handled on first connect; no OS-level pairing setup required.
+
+## Windows — quick start
+
+**Status:** backend written (`muninn/bt/winrt.py`) but not yet hardware-tested.
+Treat this as beta — report what breaks.
+
+**Prerequisites:** Python 3.11+; Bluetooth adapter; peer device discoverable
+in **Settings → Bluetooth & devices** (Windows has no programmatic
+discoverability toggle, unlike Linux).
+
+```powershell
+# From the python/ directory
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install .
+muninn
+```
+
+`pip install .` picks up the `winrt-*` dependency group automatically via
+`sys_platform == 'win32'` markers in `pyproject.toml`.
+
+### Standalone .exe (optional)
+
+Bundle everything into one executable for distribution:
+
+```powershell
+pip install .[windows-build]
+pyinstaller --onefile --name muninn -c python/src/muninn/cli.py
+# Output: dist\muninn.exe
+```
+
+Ship `muninn.exe` — no Python install required on the target machine.
 
 ## Usage
 
@@ -68,10 +100,12 @@ Outbound messages show status icons as they progress:
 
 ```
 [DM:AA:BB:CC:DD:EE:FF] > hello
-  ⧗ sent
-  ✓ AA:BB:CC:DD:EE:FF       ← delivered (recipient ACKed)
-  ✓✓ AA:BB:CC:DD:EE:FF      ← read (recipient viewed the conversation)
+                                                                         ⧗
+                                                          ✓ AA:BB:CC:DD:EE:FF
+                                                         ✓✓ AA:BB:CC:DD:EE:FF
 ```
+
+(`⧗` = pending; `✓` = delivered/ACKed; `✓✓` = read; each status line is right-aligned)
 
 Ctrl+C to quit.
 
@@ -84,8 +118,11 @@ python -m muninn.cli --help
 
 ## What works today
 
-- RFCOMM connect/listen via BlueZ D-Bus (`org.bluez.ProfileManager1`)
-- Automatic pairing via `org.bluez.Device1.Pair()` — no OS UI needed
+- RFCOMM connect/listen via BlueZ D-Bus (`org.bluez.ProfileManager1`) — Linux
+- RFCOMM connect/listen via WinRT (`RfcommServiceProvider` / `StreamSocket`) — Windows
+- Automatic pairing — `org.bluez.Device1.Pair()` on Linux,
+  `DeviceInformation.Pairing.Custom.PairAsync()` on Windows; both use Just Works /
+  NoInputNoOutput and require no OS pairing UI
 - X25519 key exchange + XSalsa20-Poly1305 encryption (NaCl Box)
 - Simultaneous multi-peer connections — each peer has independent socket/box/recv thread
 - Continuous scan + acceptor threads — peers find and reconnect to each other automatically
@@ -101,18 +138,27 @@ python -m muninn.cli --help
 - MAC tiebreaker (higher MAC defers 10s) to avoid simultaneous `ConnectProfile` deadlocks
 - **SQLite persistence** — messages, pubkeys, groups, display names, unacked state, and
   dedup table survive restarts. Keypair persisted to identity table (same shared secret
-  with each peer across restarts). DB stored at `~/.local/share/muninn/muninn.db`.
+  with each peer across restarts). DB stored at `~/.local/share/muninn/muninn.db` on
+  Linux, `%APPDATA%\muninn\muninn.db` on Windows.
 - Message history via `/history [N]`
 
 ## What doesn't exist yet
 
 - GUI (Qt6/QML planned)
 - Android client
+- Windows backend hardware-tested (`bt/winrt.py` is written but not yet validated on
+  real Windows hardware — expect rough edges)
 
 ## Troubleshooting
 
-**`No Muninn service found`** — the other device isn't running Muninn yet, or BlueZ
-hasn't cached its SDP record. Start Muninn on both devices; they will find each other.
+**`No Muninn service found`** — the other device isn't running Muninn yet, or the OS
+BT stack hasn't cached its SDP record. Start Muninn on both devices; they will find each
+other. On Windows, ensure the peer is discoverable in **Settings → Bluetooth & devices**.
 
-**`No Bluetooth adapter found`** — check `bluetoothctl show` to verify adapter exists
-and is powered on.
+**`No Bluetooth adapter found`** — Linux: `bluetoothctl show` to verify adapter is
+present and powered on. Windows: check Device Manager and confirm Bluetooth is enabled
+in Settings.
+
+**Windows pairing hangs** — Windows requires the peer to be either discoverable or
+already in its known-devices list. Make the peer discoverable (Settings) before first
+connect; subsequent connects work in the background.

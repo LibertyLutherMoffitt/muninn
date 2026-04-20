@@ -23,8 +23,14 @@ ecosystems.
 **BT Stack:**
 - **Linux** — BlueZ via D-Bus (`dbus-python`, `pygobject3`); RFCOMM profile registered
   via `org.bluez.ProfileManager1`. Lives in `python/src/muninn/bt/bluez.py`.
-- **Windows** — WinRT Bluetooth APIs (`winsdk` / `pywinrt`). Will live in
-  `python/src/muninn/bt/winrt.py`. Not yet written.
+- **Windows** — WinRT Bluetooth APIs via the `winrt-*` namespace packages
+  (`winrt-Windows.Devices.Bluetooth`, `winrt-Windows.Networking.Sockets`, etc.).
+  Lives in `python/src/muninn/bt/winrt.py`. Written but not yet hardware-tested;
+  pairing uses `DeviceInformation.Pairing.Custom.PairAsync()` with a
+  `PairingRequested` handler that auto-accepts (Just Works / NoInputNoOutput).
+  A `_StreamSocketAdapter` wraps WinRT's async `StreamSocket` in a synchronous
+  Python-socket shim so `peers.py` doesn't need a platform branch — all WinRT
+  calls hop through a single background asyncio loop.
 
 The `muninn.bt` package dispatches on `sys.platform` at import time. Everything above
 (`crypto.py`, `protocol.py`, `peers.py`, `groups.py`) is platform-agnostic.
@@ -91,21 +97,21 @@ muninn/
 ├── DESIGN.md                ← architecture + decisions (this file)
 ├── README.md
 ├── flake.nix                ← Nix dev shell, builds all desktop clients
-├── python/                  ← Desktop client: CLI + Qt6 GUI (Linux + Windows)
+├── python/                  ← Desktop client: CLI + Qt6 GUI (Linux + Windows) [working]
 │   ├── pyproject.toml
 │   └── src/muninn/
 │       ├── bt/
 │       │   ├── __init__.py  ← dispatches on sys.platform
 │       │   ├── bluez.py     ← Linux backend (working)
-│       │   └── winrt.py     ← Windows backend (future)
+│       │   └── winrt.py     ← Windows backend (written, untested on HW)
 │       ├── crypto.py        ┐
 │       ├── protocol.py      │  platform-agnostic core,
 │       ├── peers.py         │  shared by CLI and GUI
 │       ├── groups.py        │
 │       ├── storage.py       ┘
 │       ├── cli.py           ← readline frontend (working)
-│       └── gui.py           ← Qt6/QML frontend (future)
-├── tui/                     ← Go Bubble Tea TUI (Linux + Windows)
+│       └── gui.py           ← Qt6/QML frontend (planned)
+├── tui/                     ← Go Bubble Tea TUI (Linux + Windows) [planned — not yet created]
 │   ├── go.mod
 │   ├── cmd/muninn-tui/
 │   │   └── main.go
@@ -118,9 +124,9 @@ muninn/
 │       ├── protocol/
 │       ├── peers/
 │       └── ui/              ← bubbletea model/update/view
-├── android/                 ← Kotlin + Jetpack Compose (future)
+├── android/                 ← Kotlin + Jetpack Compose [planned — not yet created]
 │   └── …                    ← standard Gradle/Android Studio layout
-└── wearos/                  ← Compose-for-Wear, tethered to android/ (future)
+└── wearos/                  ← Compose-for-Wear, tethered to android/ [planned — not yet created]
 ```
 
 ### Structural rules
@@ -162,9 +168,10 @@ and connects; the other accepts. Works regardless of platform combination
 **Simultaneous connect:** to avoid both sides calling `ConnectProfile` at the same time
 (which deadlocks bluetoothd), the device with the higher MAC address waits up to 10 seconds
 for the lower-MAC device to initiate. If an incoming connection arrives during that wait, it
-is used directly. If both sides do end up connecting simultaneously anyway, two sockets form:
-the socket initiated by the higher-MAC device is closed. Both sides apply this rule
-deterministically, leaving exactly one connection.
+is used directly. This deferral prevents simultaneous connects in practice. If two sockets
+do form despite the deferral, the Python client uses last-wins replacement in `add_peer` —
+the newer incoming socket replaces the stale one. (See `PROTOCOL.md` for the ideal
+MAC-based tiebreak that other clients should implement.)
 
 ### Reconnection
 
@@ -340,11 +347,12 @@ Profile frame payload:
 ```
 
 Sent immediately after handshake, and re-sent to all connected peers when the local user
-changes their name via `/nick <name>`. Profile frames are not forwarded directly — but
-when a relay node (B) receives a Profile from A, it re-announces A's updated name to all
-other connected peers via a Peer Annc frame. This causes name updates to propagate to
-indirect peers. Local users may override a peer's self-chosen name with `/nick <peer>
-<name>`; overrides win on display.
+changes their name via `/nick <name>`. Profile frames are not forwarded directly — but when a relay node (B) receives a
+non-empty Profile from A, it re-announces A's updated name to all other connected peers via
+a Peer Annc frame. This causes name updates to propagate to indirect peers. Name clearances
+(empty Profile) are not re-announced; indirect peers learn of them on their next reconnect.
+Local users may override a peer's self-chosen name with `/nick <peer> <name>`; overrides
+win on display.
 
 Handshake frames are sent in plaintext (before shared secret exists). After both sides
 exchange pubkeys and derive the shared secret, message text is Box-encrypted. ACK and

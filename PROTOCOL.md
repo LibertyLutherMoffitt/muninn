@@ -153,8 +153,10 @@ Total payload: 22 bytes.
 
 ## Profile Frame (`0x06`)
 
-Sent by each peer immediately after the handshake, and re-broadcast to all connected peers
-whenever the user changes their self-chosen display name. Plaintext metadata.
+Sent by each peer immediately after the handshake **if the device has a self-chosen display
+name** (an empty Profile frame is legal but the Python client skips it rather than sending
+an empty payload). Re-broadcast to all connected peers whenever the user changes their
+display name. Plaintext metadata.
 
 **Payload:**
 
@@ -167,17 +169,21 @@ store the announcement as the peer's self-chosen name; the local user may still 
 it, and overrides win over the self-chosen name on display and command resolution.
 
 Profile frames are **not** forwarded directly. However, when a relay node (B) receives a
-Profile from peer A, B immediately sends a Peer Annc to all other connected peers
+non-empty Profile from peer A, B immediately sends a Peer Annc to all other connected peers
 advertising A's updated name. This causes name changes to propagate one hop at a time to
-indirect peers without requiring a direct connection.
+indirect peers without requiring a direct connection. Name clearances (empty Profile) are
+**not** propagated — indirect peers will only learn of a cleared name when they reconnect
+and receive a fresh Peer Annc from a relay that has already processed the clearance.
 
 ---
 
 ## Peer Announcement Frame (`0x07`)
 
-Sent by each peer immediately after the handshake (after Profile). Lists the sender's
-currently-known peers (MAC + pubkey + name) so the receiver can learn about devices not
-yet in range. Also sent in two other cases:
+Sent by each peer immediately after the handshake (after Profile), **if the device has
+any known peers to announce** (an empty Peer Annc is legal but the Python client omits the
+frame if there is nothing to include). Lists the sender's currently-known peers
+(MAC + pubkey + name) so the receiver can learn about devices not yet in range.
+Also sent in two other cases:
 - When a new peer joins: existing connected peers receive a Peer Annc advertising the
   newcomer's MAC + pubkey + name.
 - When a connected peer changes their name (Profile received): the intermediary re-announces
@@ -264,13 +270,18 @@ On socket error or EOF:
 
 To reduce the chance of both devices initiating at the same time, the device with the higher
 MAC address defers: it waits up to 10 seconds for the lower-MAC device to initiate before
-calling `ConnectProfile` itself.
+calling `ConnectProfile` itself. This deferral is the primary mechanism — simultaneous
+connects are rare in practice.
 
-If two sockets do form anyway:
+If two sockets do form anyway, the recommended tiebreak is:
 
 - Compare local BT MAC addresses (as 6-byte unsigned integers)
 - The socket initiated by the device with the **higher** MAC address is closed
 - Both sides apply this rule independently — result is deterministic
+
+**Current Python client behavior:** the 10-second deferral prevents most simultaneous
+connects. If two sockets still form, the Python client uses last-wins replacement (the
+newer `add_peer` call replaces the stale entry) rather than a strict MAC-based tiebreak.
 
 ---
 
