@@ -452,21 +452,7 @@ def discover() -> list[tuple[str, str]]:
 
 
 async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
-    """Broad BT Classic inquiry via a DeviceWatcher.
-
-    Windows doesn't expose a direct `StartDiscovery`/`StopDiscovery` like
-    BlueZ; enumeration is event-driven. Run a watcher for `duration` seconds
-    and collect whatever it emits.
-    """
-    # Default get_device_selector() returns paired-only, so the watcher
-    # never fires for new devices. Filtering on pairing_state=False makes
-    # this an actual inquiry for nearby unpaired peers.
-    selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
-    # Python winrt wrappers have buggy overload resolution for single-string arguments.
-    # Passing an explicit list of properties forces it to match the 2-argument
-    # overload (String, IIterable<String>) successfully.
-    properties = ["System.Devices.Aep.DeviceAddress"]
-    watcher = DeviceInformation.create_watcher(selector, properties)
+    """Broad BT Classic inquiry via a DeviceWatcher."""
     found: dict[str, str] = {}
     completed = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -479,14 +465,29 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
         pass
 
     def on_enum_completed(_sender: Any, _args: Any) -> None:
-        # This fires on a background thread — schedule the asyncio.Event
-        # through the loop to stay single-threaded.
         loop.call_soon_threadsafe(completed.set)
+
+    watcher = None
+    try:
+        selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
+        properties = ["System.Devices.Aep.DeviceAddress"]
+        watcher = DeviceInformation.create_watcher(selector, properties)
+    except Exception:
+        # Fallback to zero-argument create_watcher which has no overloads to confuse Python
+        try:
+            watcher = DeviceInformation.create_watcher()
+        except Exception as e:
+            print(f"Fatal watcher error: {e}")
+            return []
+
+    if watcher is None:
+        return []
 
     watcher.add_added(on_added)
     watcher.add_updated(on_updated)
     watcher.add_enumeration_completed(on_enum_completed)
     watcher.start()
+
     try:
         try:
             await asyncio.wait_for(completed.wait(), timeout=duration)
@@ -498,17 +499,12 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
         except Exception:
             pass
 
-    # BT device ids encode the peer MAC as a trailing hex blob. We don't need
-    # perfect fidelity here — scan_devices exists only to prime BlueZ's SDP
-    # cache on Linux; on Windows the equivalent happens via DeviceWatcher
-    # and this result is purely informational.
     results: list[tuple[str, str]] = []
 
     async def _prime_sdp(did: str) -> None:
         try:
             device = await BluetoothDevice.from_id_async(did)
             if device:
-                # Query SDP with a timeout to avoid hanging if peer disappears
                 await asyncio.wait_for(
                     device.get_rfcomm_services_for_id_async(_RFCOMM_SERVICE_ID),
                     timeout=5.0,
@@ -517,7 +513,10 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
             pass
 
     tasks = []
+    # Filter for Bluetooth devices if we fell back to the global watcher
     for did, name in found.items():
+        if "BTHENUM" not in did.upper() and "BLUETOOTH" not in did.upper():
+            continue
         mac = _parse_mac_from_device_id(did)
         if mac:
             results.append((mac, name or mac))
