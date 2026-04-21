@@ -535,6 +535,9 @@ def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str,
     try:
         return _run_async(_scan_devices_async(duration))
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         if not quiet:
             print(f"Scan error: {e}")
         return []
