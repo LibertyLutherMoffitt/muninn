@@ -410,40 +410,23 @@ def accept() -> tuple:
 
 async def _discover_async() -> list[tuple[str, str]]:
     """Enumerate Bluetooth devices advertising the Muninn RFCOMM service."""
-    selector = RfcommDeviceService.get_device_selector(_RFCOMM_SERVICE_ID)
-
-    # Python winrt wrappers have notoriously buggy overload resolution for
-    # single-string FindAllAsync/CreateWatcher. Passing a concrete list of strings
-    # forces it to match the (String, IIterable<String>) overload successfully.
-    properties = ["System.Devices.Aep.DeviceAddress"]
-    try:
-        devices = list(await DeviceInformation.find_all_async(selector, properties))
-    except Exception:
-        # Fallback to watcher approach
-        watcher = DeviceInformation.create_watcher(selector, properties)
-        found_devices = []
-        completed = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
-        def on_added(_sender: Any, info: Any) -> None:
-            found_devices.append(info)
-
-        def on_enum_completed(_sender: Any, _args: Any) -> None:
-            loop.call_soon_threadsafe(completed.set)
-
-        watcher.add_added(on_added)
-        watcher.add_enumeration_completed(on_enum_completed)
-        watcher.start()
-        await completed.wait()
-        watcher.stop()
-        devices = found_devices
-
+    # Calling FindAllAsync() with 0 arguments guarantees we bypass any Python WinRT
+    # overload resolution bugs (which cause 'invalid parameter count' exceptions).
+    devices = list(await DeviceInformation.find_all_async())
     results: list[tuple[str, str]] = []
+
+    uuid_str = SERVICE_UUID.lower()
     for di in devices:
+        if uuid_str not in di.id.lower():
+            continue
         try:
             service = await RfcommDeviceService.from_id_async(di.id)
         except OSError:
             continue
+        except Exception:
+            # Catch any other random WinRT exceptions to prevent breaking the loop
+            continue
+
         if service is None:
             continue
         addr = _addr_from_host_name(service.connection_host_name)
@@ -461,6 +444,9 @@ def discover() -> list[tuple[str, str]]:
     try:
         return _run_async(_discover_async())
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         print(f"Discover error: {e}")
         return []
 
@@ -476,10 +462,7 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
     # never fires for new devices. Filtering on pairing_state=False makes
     # this an actual inquiry for nearby unpaired peers.
     selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
-
-    # Pass properties to hit the correct 2-arg Python wrapper overload reliably
-    properties = ["System.Devices.Aep.DeviceAddress"]
-    watcher = DeviceInformation.create_watcher(selector, properties)
+    watcher = DeviceInformation.create_watcher(selector)
     found: dict[str, str] = {}
     completed = asyncio.Event()
     loop = asyncio.get_running_loop()
