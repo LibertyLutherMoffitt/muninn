@@ -7,19 +7,13 @@
   };
 
   outputs = {
-    self,
     nixpkgs,
     flake-utils,
+    ...
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
         pkgs = nixpkgs.legacyPackages.${system};
-
-        pythonPkgs = pkgs.python3.withPackages (ps: [
-          ps.pynacl
-          ps.dbus-python
-          ps.pygobject3
-        ]);
 
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn";

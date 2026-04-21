@@ -72,7 +72,6 @@ from winrt.windows.devices.enumeration import (  # type: ignore[import-not-found
     DevicePairingResultStatus,
 )
 from winrt.windows.networking.sockets import (  # type: ignore[import-not-found]
-    SocketProtectionLevel,
     StreamSocket,
     StreamSocketListener,
 )
@@ -357,10 +356,7 @@ async def _create_server_async() -> None:
 
     # Binding with the provider's service_id.as_string() makes this an RFCOMM
     # listener (not TCP). SocketProtectionLevel.PLAIN_SOCKET = no SSL/etc.
-    await _listener.bind_service_name_async(
-        _provider.service_id.as_string(),
-        SocketProtectionLevel.PLAIN_SOCKET,
-    )
+    await _listener.bind_service_name_async(_provider.service_id.as_string())
     _provider.start_advertising(_listener)
 
 
@@ -598,9 +594,7 @@ async def _connect_async(addr: str) -> _StreamSocketAdapter:
     sock = StreamSocket()
     try:
         await sock.connect_async(
-            service.connection_host_name,
-            service.connection_service_name,
-            SocketProtectionLevel.PLAIN_SOCKET,
+            service.connection_host_name, service.connection_service_name
         )
     except OSError as e:
         try:
