@@ -462,7 +462,11 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
     # never fires for new devices. Filtering on pairing_state=False makes
     # this an actual inquiry for nearby unpaired peers.
     selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
-    watcher = DeviceInformation.create_watcher(selector)
+    # Python winrt wrappers have buggy overload resolution for single-string arguments.
+    # Passing an explicit list of properties forces it to match the 2-argument
+    # overload (String, IIterable<String>) successfully.
+    properties = ["System.Devices.Aep.DeviceAddress"]
+    watcher = DeviceInformation.create_watcher(selector, properties)
     found: dict[str, str] = {}
     completed = asyncio.Event()
     loop = asyncio.get_running_loop()
