@@ -411,7 +411,7 @@ def accept() -> tuple:
 async def _discover_async() -> list[tuple[str, str]]:
     """Enumerate Bluetooth devices advertising the Muninn RFCOMM service."""
     selector = RfcommDeviceService.get_device_selector(_RFCOMM_SERVICE_ID)
-    devices = list(await DeviceInformation.find_all_async(selector))
+    devices = list(await DeviceInformation.find_all_async(selector, []))
     results: list[tuple[str, str]] = []
     for di in devices:
         try:
@@ -487,10 +487,29 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
     # cache on Linux; on Windows the equivalent happens via DeviceWatcher
     # and this result is purely informational.
     results: list[tuple[str, str]] = []
+
+    async def _prime_sdp(did: str) -> None:
+        try:
+            device = await BluetoothDevice.from_id_async(did)
+            if device:
+                # Query SDP with a timeout to avoid hanging if peer disappears
+                await asyncio.wait_for(
+                    device.get_rfcomm_services_for_id_async(_RFCOMM_SERVICE_ID),
+                    timeout=5.0,
+                )
+        except Exception:
+            pass
+
+    tasks = []
     for did, name in found.items():
         mac = _parse_mac_from_device_id(did)
         if mac:
             results.append((mac, name or mac))
+        tasks.append(asyncio.create_task(_prime_sdp(did)))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     return results
 
 
