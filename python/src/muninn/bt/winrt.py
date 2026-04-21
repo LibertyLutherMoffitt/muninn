@@ -411,7 +411,31 @@ def accept() -> tuple:
 async def _discover_async() -> list[tuple[str, str]]:
     """Enumerate Bluetooth devices advertising the Muninn RFCOMM service."""
     selector = RfcommDeviceService.get_device_selector(_RFCOMM_SERVICE_ID)
-    devices = list(await DeviceInformation.find_all_async(selector, []))
+
+    # Python winrt wrappers often have broken overload resolution for FindAllAsync(String).
+    # We try passing None as the second argument, and if that fails, fall back to a watcher.
+    try:
+        devices = list(await DeviceInformation.find_all_async(selector, None))
+    except Exception:
+        # Fallback to watcher approach which works reliably with a single selector arg
+        watcher = DeviceInformation.create_watcher(selector)
+        found_devices = []
+        completed = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def on_added(_sender: Any, info: Any) -> None:
+            found_devices.append(info)
+
+        def on_enum_completed(_sender: Any, _args: Any) -> None:
+            loop.call_soon_threadsafe(completed.set)
+
+        watcher.add_added(on_added)
+        watcher.add_enumeration_completed(on_enum_completed)
+        watcher.start()
+        await completed.wait()
+        watcher.stop()
+        devices = found_devices
+
     results: list[tuple[str, str]] = []
     for di in devices:
         try:
