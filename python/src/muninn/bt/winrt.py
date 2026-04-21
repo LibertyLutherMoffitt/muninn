@@ -412,13 +412,15 @@ async def _discover_async() -> list[tuple[str, str]]:
     """Enumerate Bluetooth devices advertising the Muninn RFCOMM service."""
     selector = RfcommDeviceService.get_device_selector(_RFCOMM_SERVICE_ID)
 
-    # Python winrt wrappers often have broken overload resolution for FindAllAsync(String).
-    # We try passing None as the second argument, and if that fails, fall back to a watcher.
+    # Python winrt wrappers have notoriously buggy overload resolution for
+    # single-string FindAllAsync/CreateWatcher. Passing a concrete list of strings
+    # forces it to match the (String, IIterable<String>) overload successfully.
+    properties = ["System.Devices.Aep.DeviceAddress"]
     try:
-        devices = list(await DeviceInformation.find_all_async(selector, None))
+        devices = list(await DeviceInformation.find_all_async(selector, properties))
     except Exception:
-        # Fallback to watcher approach which works reliably with a single selector arg
-        watcher = DeviceInformation.create_watcher(selector)
+        # Fallback to watcher approach
+        watcher = DeviceInformation.create_watcher(selector, properties)
         found_devices = []
         completed = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -474,7 +476,10 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
     # never fires for new devices. Filtering on pairing_state=False makes
     # this an actual inquiry for nearby unpaired peers.
     selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
-    watcher = DeviceInformation.create_watcher(selector)
+
+    # Pass properties to hit the correct 2-arg Python wrapper overload reliably
+    properties = ["System.Devices.Aep.DeviceAddress"]
+    watcher = DeviceInformation.create_watcher(selector, properties)
     found: dict[str, str] = {}
     completed = asyncio.Event()
     loop = asyncio.get_running_loop()
