@@ -45,7 +45,7 @@ Rectangle {
                 color: Theme.bg
                 radius: 6
 
-                TextInput {
+                TextField {
                     id: searchInput
                     anchors {
                         left: parent.left; leftMargin: 10
@@ -55,6 +55,7 @@ Rectangle {
                     color: Theme.textPrimary
                     font.pixelSize: 14
                     placeholderText: "Search peers, commands…"
+                    background: null
                     Keys.onEscapePressed: root.close()
                     Keys.onReturnPressed: activateItem()
                     Keys.onDownPressed: {

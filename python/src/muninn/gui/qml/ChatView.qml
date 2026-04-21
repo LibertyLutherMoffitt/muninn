@@ -5,174 +5,162 @@ import QtQuick.Layouts
 Item {
     id: root
     property string convId: bridge.activeConvId
+    clip: true
+    
+    // Pass focus down to composer
+    onActiveFocusChanged: if (activeFocus) composer.forceActiveFocus()
 
-    // Fade + slide on conv switch
-    Behavior on opacity {
-        NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
-    }
-
-    // Header
+    // Background
     Rectangle {
-        id: header
-        anchors.top: parent.top
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 48
-        color: Theme.surfaceRaised
-
-        Text {
-            anchors.left: parent.left
-            anchors.leftMargin: 16
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.convId
-                    ? (root.convId.startsWith("dm:")
-                        ? bridge.displayName(root.convId.substring(3))
-                        : root.convId.substring(6))
-                    : "— no conversation —"
-            color: Theme.textPrimary
-            font.pixelSize: 15
-            font.bold: true
-        }
-
-        Text {
-            anchors.right: parent.right
-            anchors.rightMargin: 16
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.convId && root.convId.startsWith("dm:")
-                        ? root.convId.substring(3)
-                        : ""
-            color: Theme.textMuted
-            font.pixelSize: 11
-            font.family: "monospace"
-        }
+        anchors.fill: parent
+        color: Theme.bg
     }
 
-    // Scrollback
-    ListView {
-        id: msgList
-        anchors.top: header.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: composer.top
-        anchors.bottomMargin: 0
-        clip: true
-        model: msgModel
-        spacing: 4
-        verticalLayoutDirection: ListView.BottomToTop
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
 
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        // Header
+        Rectangle {
+            id: header
+            Layout.fillWidth: true
+            Layout.preferredHeight: 48
+            color: Theme.surfaceRaised
+            z: 2
 
-        // Scroll-to-bottom on new message
-        onCountChanged: {
-            if (atYEnd || count <= 1) positionViewAtEnd()
-        }
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.convId
+                        ? (root.convId.startsWith("dm:")
+                            ? bridge.displayName(root.convId.substring(3))
+                            : root.convId.substring(6))
+                        : "— no conversation —"
+                color: Theme.textPrimary
+                font.pixelSize: 15
+                font.bold: true
+            }
 
-        Connections {
-            target: vimEditor
-            function onScrollRequested(fraction) {
-                var delta = fraction * msgList.height
-                msgList.contentY = Math.max(
-                    msgList.originY,
-                    Math.min(msgList.contentY + delta,
-                             msgList.originY + msgList.contentHeight
-                             - msgList.height))
+            Text {
+                anchors.right: parent.right
+                anchors.rightMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.convId && root.convId.startsWith("dm:")
+                            ? root.convId.substring(3)
+                            : ""
+                color: Theme.textMuted
+                font.pixelSize: 11
+                font.family: "monospace"
             }
         }
 
-        delegate: Item {
-            id: bubble
-            width: msgList.width
-            height: bubbleRect.height + 8
+        // Scrollback
+        ListView {
+            id: msgList
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: msgModel
+            spacing: 12
+            verticalLayoutDirection: ListView.BottomToTop
+            z: 1
 
-            property bool outbound: model.isOutbound
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            // Fade + slide-up on arrival
-            opacity: 0
-            y: 10
-            Component.onCompleted: appearAnim.start()
-            ParallelAnimation {
-                id: appearAnim
-                NumberAnimation {
-                    target: bubble; property: "opacity"
-                    from: 0; to: 1
-                    duration: 120; easing.type: Easing.OutQuad
-                }
-                NumberAnimation {
-                    target: bubble; property: "y"
-                    from: 10; to: 0
-                    duration: 120; easing.type: Easing.OutQuad
+            Connections {
+                target: vimEditor
+                function onScrollRequested(fraction) {
+                    var delta = fraction * msgList.height
+                    msgList.contentY = Math.max(
+                        msgList.originY,
+                        Math.min(msgList.contentY + delta,
+                                 msgList.originY + msgList.contentHeight
+                                 - msgList.height))
                 }
             }
 
-            Rectangle {
-                id: bubbleRect
-                anchors.right: outbound ? parent.right : undefined
-                anchors.left: outbound ? undefined : parent.left
-                anchors.margins: 12
-                width: Math.min(bubbleContent.implicitWidth + 20,
-                                bubble.width * 0.75)
-                height: bubbleContent.implicitHeight + 14
-                color: outbound ? Theme.outgoingBubble : Theme.incomingBubble
-                radius: 10
+            delegate: Item {
+                id: bubble
+                width: msgList.width
+                height: bubbleRect.height + 4
+                
+                property bool outbound: model.isOutbound
 
-                Column {
-                    id: bubbleContent
-                    anchors {
-                        left: parent.left; leftMargin: 10
-                        right: parent.right; rightMargin: 10
-                        top: parent.top; topMargin: 7
-                    }
-                    spacing: 2
+                Rectangle {
+                    id: bubbleRect
+                    anchors.right: outbound ? parent.right : undefined
+                    anchors.left: outbound ? undefined : parent.left
+                    anchors.rightMargin: 12
+                    anchors.leftMargin: 12
+                    
+                    width: Math.min(msgList.width * 0.75, contentColumn.implicitWidth + 24)
+                    height: contentColumn.implicitHeight + 16
+                    
+                    color: outbound ? Theme.outgoingBubble : Theme.incomingBubble
+                    radius: 12
 
-                    Text {
-                        visible: !outbound
-                        text: model.senderName || model.senderMac
-                        color: Theme.accent
-                        font.pixelSize: 11
-                        font.bold: true
-                        width: parent.width
-                        elide: Text.ElideRight
-                    }
-
-                    Text {
-                        text: model.text
-                        color: Theme.textPrimary
-                        font.pixelSize: 13
-                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-                        width: parent.width
-                    }
-
-                    Row {
-                        spacing: 6
-                        anchors.right: parent.right
+                    Column {
+                        id: contentColumn
+                        width: Math.min(msgList.width * 0.75 - 24, bodyText.implicitWidth)
+                        anchors.centerIn: parent
+                        spacing: 4
 
                         Text {
-                            text: Qt.formatTime(new Date(model.timestamp * 1000), "HH:mm")
-                            color: Theme.textMuted
-                            font.pixelSize: 10
+                            visible: !outbound
+                            text: model.senderName || model.senderMac
+                            color: Theme.accent
+                            font.pixelSize: 11
+                            font.bold: true
+                            width: parent.width
+                            elide: Text.ElideRight
                         }
 
                         Text {
-                            visible: outbound
-                            text: model.ackState === "read"  ? "✓✓"
-                                : model.ackState === "acked" ? "✓"
-                                                             : "◑"
-                            color: model.ackState === "read" ? Theme.success
-                                                              : Theme.textMuted
-                            font.pixelSize: 10
+                            id: bodyText
+                            text: model.text
+                            color: Theme.textPrimary
+                            font.pixelSize: 13
+                            wrapMode: Text.Wrap
+                            width: parent.width
+                            lineHeight: 1.1
+                        }
+
+                        Row {
+                            spacing: 6
+                            anchors.right: parent.right
+
+                            Text {
+                                text: Qt.formatTime(new Date(model.timestamp * 1000), "HH:mm")
+                                color: Theme.textMuted
+                                font.pixelSize: 10
+                            }
+
+                            Text {
+                                visible: outbound
+                                text: model.ackState === "read"  ? "✓✓"
+                                    : model.ackState === "acked" ? "✓"
+                                                                 : "◑"
+                                color: model.ackState === "read" ? Theme.success
+                                                                  : Theme.textMuted
+                                font.pixelSize: 10
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    // Composer
-    Composer {
-        id: composer
-        anchors.bottom: parent.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        convId: root.convId
+        // Composer (fixed at bottom)
+        Composer {
+            id: composer
+            Layout.fillWidth: true
+            Layout.preferredHeight: height
+            convId: root.convId
+            z: 2
+            
+            // Pass focus down to its own internal editor
+            onActiveFocusChanged: if (activeFocus) forceActiveFocus()
+        }
     }
 }

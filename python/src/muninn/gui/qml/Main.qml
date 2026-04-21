@@ -7,113 +7,135 @@ ApplicationWindow {
     title: "Muninn"
     width: 960
     height: 640
-    minimumWidth: 600
-    minimumHeight: 400
+    minimumWidth: 800
+    minimumHeight: 500
     visible: true
-    color: Theme.bg
+    color: "#0f1115"
+
+    // Helper to check if we are in navigation mode
+    property bool isNormalMode: vimEditor && vimEditor.mode === "NORMAL"
+
+    // Initial focus on the chat pane so Vim commands work immediately
+    Component.onCompleted: {
+        chatPane.forceActiveFocus()
+    }
 
     // ------------------------------------------------------------------
-    // Layout
+    // Main Layout
     // ------------------------------------------------------------------
 
-    RowLayout {
-        id: mainLayout
-        anchors {
-            top: parent.top
-            left: parent.left
-            right: parent.right
-            bottom: statusBar.top
-        }
+    ColumnLayout {
+        anchors.fill: parent
         spacing: 0
 
-        // Left rail: peer list
-        PeerList {
-            id: peerList
-            Layout.preferredWidth: 220
-            Layout.fillHeight: true
-
-            onConvSelected: function(convId) {
-                bridge.setActiveConv(convId)
-                chatPane.opacity = 1
-            }
-        }
-
-        // Divider
-        Rectangle {
-            Layout.preferredWidth: 1
-            Layout.fillHeight: true
-            color: Theme.surfaceRaised
-        }
-
-        // Right pane: chat
-        ChatView {
-            id: chatPane
+        RowLayout {
+            id: mainLayout
             Layout.fillWidth: true
             Layout.fillHeight: true
+            spacing: 0
 
-            Behavior on opacity {
-                NumberAnimation { duration: 80; easing.type: Easing.OutQuad }
+            PeerList {
+                id: peerList
+                Layout.preferredWidth: 240
+                Layout.fillHeight: true
+                onConvSelected: (cid) => {
+                    bridge.setActiveConv(cid)
+                    chatPane.forceActiveFocus()
+                }
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 1
+                Layout.fillHeight: true
+                color: Theme.surfaceRaised
+            }
+
+            ChatView {
+                id: chatPane
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                
+                // Clicking the chat area always restores Vim command focus
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: chatPane.forceActiveFocus()
+                    z: -1 // Behind messages
+                }
+            }
+        }
+
+        Rectangle {
+            id: statusBar
+            Layout.fillWidth: true
+            Layout.preferredHeight: 24
+            color: Theme.surfaceRaised
+            z: 5
+
+            Row {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 20
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: bridge.localName ? "nick: " + bridge.localName : "nick: (none)"
+                    color: Theme.textMuted
+                    font.pixelSize: 11
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "peers: " + bridge.connectedPeerCount + " connected"
+                    color: Theme.textMuted
+                    font.pixelSize: 11
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "mode: " + (bridge.isWriter ? "WRITER" : "READER")
+                    color: bridge.isWriter ? Theme.success : Theme.textMuted
+                    font.pixelSize: 11
+                    font.bold: bridge.isWriter
+                }
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // Status bar
+    // Global Shortcuts
     // ------------------------------------------------------------------
 
-    Rectangle {
-        id: statusBar
-        anchors.bottom: parent.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 24
-        color: Theme.surfaceRaised
-
-        Row {
-            anchors.fill: parent
-            anchors.leftMargin: 12
-            anchors.rightMargin: 12
-            spacing: 20
-
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: bridge.localName ? "nick: " + bridge.localName : "nick: (none)"
-                color: Theme.textMuted
-                font.pixelSize: 11
-            }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: "peers: " + bridge.connectedPeerCount + " connected"
-                color: Theme.textMuted
-                font.pixelSize: 11
-            }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: "mode: " + (bridge.isWriter ? "WRITER" : "READER")
-                color: bridge.isWriter ? Theme.success : Theme.textMuted
-                font.pixelSize: 11
-                font.bold: bridge.isWriter
-            }
+    Shortcut { sequence: "Ctrl+P"; onActivated: cmdPalette.open() }
+    
+    Shortcut { 
+        sequence: "Esc"
+        onActivated: {
+            vimEditor.handleKey("", Qt.Key_Escape, false, false, false)
+            chatPane.forceActiveFocus()
         }
     }
 
+    Shortcut {
+        sequence: "Ctrl+H"
+        onActivated: peerList.forceActiveFocus()
+    }
+    Shortcut {
+        sequence: "Ctrl+L"
+        onActivated: chatPane.forceActiveFocus()
+    }
+
     // ------------------------------------------------------------------
-    // Overlays (scan dialog, command palette)
+    // Overlays
     // ------------------------------------------------------------------
 
-    ScanDialog {
-        id: scanDialog
-        anchors.fill: parent
-        z: 10
-    }
+    ScanDialog { id: scanDialog; anchors.fill: parent; z: 10 }
 
     CommandPalette {
         id: cmdPalette
         anchors.fill: parent
         z: 10
-        onConvSelected: function(convId) {
+        onConvSelected: (convId) => {
             bridge.setActiveConv(convId)
-            chatPane.opacity = 1
+            chatPane.forceActiveFocus()
         }
     }
 
@@ -121,26 +143,10 @@ ApplicationWindow {
     Rectangle {
         id: errorToast
         visible: false
-        anchors.bottom: statusBar.top
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottomMargin: 8
-        width: errorLabel.implicitWidth + 24
-        height: 32; radius: 6
-        color: Theme.error
-        z: 20
-
-        Text {
-            id: errorLabel
-            anchors.centerIn: parent
-            color: "white"
-            font.pixelSize: 12
-        }
-
-        Timer {
-            id: toastTimer
-            interval: 3000
-            onTriggered: errorToast.visible = false
-        }
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 32; anchors.horizontalCenter: parent.horizontalCenter
+        width: errorLabel.implicitWidth + 24; height: 32; radius: 6; color: Theme.error; z: 20
+        Text { id: errorLabel; anchors.centerIn: parent; color: "white"; font.pixelSize: 12 }
+        Timer { id: toastTimer; interval: 3000; onTriggered: errorToast.visible = false }
     }
 
     Connections {
@@ -150,95 +156,13 @@ ApplicationWindow {
             errorToast.visible = true
             toastTimer.restart()
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Global key handling
-    // ------------------------------------------------------------------
-
-    // Focus main window for global keys when overlays are hidden
-    focus: !scanDialog.visible && !cmdPalette.visible
-
-    Keys.onPressed: function(event) {
-        // Ctrl-P → command palette
-        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_P) {
-            cmdPalette.open()
-            event.accepted = true
-            return
-        }
-        // gs → scan dialog (when composer not in INSERT/CMDLINE)
-        if (event.key === Qt.Key_G && !event.modifiers) {
-            pendingG = true
-            event.accepted = true
-            return
-        }
-        if (pendingG) {
-            pendingG = false
-            if (event.key === Qt.Key_S) {
-                scanDialog.open()
-                event.accepted = true
-                return
-            }
-            if (event.key === Qt.Key_N) {
-                cmdPalette.open()
-                event.accepted = true
-                return
-            }
-        }
-        // j / k → peer list nav
-        if (event.key === Qt.Key_J && !event.modifiers) {
-            peerList.listView.selectNext()
-            event.accepted = true; return
-        }
-        if (event.key === Qt.Key_K && !event.modifiers) {
-            peerList.listView.selectPrev()
-            event.accepted = true; return
-        }
-        // Ctrl-h / Ctrl-l → focus peer list / chat
-        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_H) {
-            peerList.forceActiveFocus()
-            event.accepted = true; return
-        }
-        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
+        function onActiveConvChanged(convId) {
             chatPane.forceActiveFocus()
-            event.accepted = true; return
-        }
-        // Ctrl-n / Ctrl-Shift-N → next/prev unread (no-op scaffold)
-        // i → focus composer in insert
-        if (event.key === Qt.Key_I && !event.modifiers) {
-            chatPane.forceActiveFocus()
-            vimEditor.handleKey("i", Qt.Key_I, false, false, false)
-            event.accepted = true; return
-        }
-        // Esc → focus peer list
-        if (event.key === Qt.Key_Escape) {
-            peerList.forceActiveFocus()
-            event.accepted = true; return
-        }
-        // ZZ quit
-        if (event.key === Qt.Key_Z && !event.modifiers) {
-            if (pendingZ) { Qt.quit(); return }
-            pendingZ = true
-            zTimer.restart()
-            event.accepted = true; return
         }
     }
-
-    property bool pendingG: false
-    property bool pendingZ: false
-
-    Timer { id: zTimer; interval: 1000; onTriggered: root.pendingZ = false }
 
     Connections {
         target: vimEditor
         function onQuitRequested() { Qt.quit() }
-    }
-
-    // Auto-select first conv when peers appear
-    Connections {
-        target: bridge
-        function onActiveConvChanged(convId) {
-            chatPane.opacity = 1
-        }
     }
 }

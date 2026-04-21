@@ -5,34 +5,29 @@ import QtQuick.Layouts
 Rectangle {
     id: root
     color: Theme.surface
-    height: Math.max(56, edit.implicitHeight + 20)
+    height: Math.max(64, edit.implicitHeight + 24)
+    
+    // Explicitly pass focus down when we receive it
+    onActiveFocusChanged: {
+        if (activeFocus) {
+            edit.forceActiveFocus()
+        }
+    }
+
+    border.color: Theme.surfaceRaised
+    border.width: 1
 
     property bool writerMode: bridge.isWriter
     property string convId: bridge.activeConvId
 
-    // Border color animates on Vim mode change
-    border.width: 1
-    border.color: {
-        switch (vimEditor.mode) {
-            case "INSERT":      return Theme.accent
-            case "VISUAL":
-            case "VISUAL_LINE": return Theme.success
-            case "CMDLINE":     return "#f59e0b"
-            default:            return Qt.darker(Theme.surfaceRaised, 1.5)
-        }
-    }
-    Behavior on border.color {
-        ColorAnimation { duration: 60; easing.type: Easing.OutQuad }
-    }
-
-    // Mode badge (top-right)
+    // Vim mode highlight
     Rectangle {
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: 4
-        width: modeLabel.implicitWidth + 12
-        height: 18; radius: 4
-        color: {
+        anchors.fill: parent
+        anchors.margins: 1
+        color: "transparent"
+        border.width: 2
+        border.color: {
+            if (!vimEditor) return "transparent"
             switch (vimEditor.mode) {
                 case "INSERT":      return Theme.accent
                 case "VISUAL":
@@ -41,52 +36,57 @@ Rectangle {
                 default:            return "transparent"
             }
         }
-        visible: vimEditor.mode !== "NORMAL"
+    }
+
+    // Mode badge
+    Rectangle {
+        anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 6
+        width: modeLabel.implicitWidth + 24; height: 28; radius: 4
+        color: {
+            if (!vimEditor) return "transparent"
+            switch (vimEditor.mode) {
+                case "INSERT":      return Theme.accent
+                case "VISUAL":
+                case "VISUAL_LINE": return Theme.success
+                case "CMDLINE":     return "#f59e0b"
+                default:            return "transparent"
+            }
+        }
+        visible: vimEditor && vimEditor.mode !== "NORMAL"
+        z: 10 
 
         Text {
             id: modeLabel
             anchors.centerIn: parent
-            text: vimEditor.mode
+            text: vimEditor ? "-- " + vimEditor.mode + " --" : ""
             color: "white"
-            font.pixelSize: 10
+            font.pixelSize: 12
             font.bold: true
         }
     }
 
-    // Cmd-line bar (shown when CMDLINE)
+    // Command line
     Rectangle {
         id: cmdLine
-        anchors.bottom: parent.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 24
-        color: Theme.bg
-        visible: vimEditor.mode === "CMDLINE"
-
+        anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
+        height: 24; color: Theme.bg; z: 4
+        visible: vimEditor && vimEditor.mode === "CMDLINE"
         Text {
-            anchors.left: parent.left
-            anchors.leftMargin: 8
-            anchors.verticalCenter: parent.verticalCenter
-            text: vimEditor.cmdLine || ""
-            color: Theme.textPrimary
-            font.pixelSize: 13
-            font.family: "monospace"
+            anchors.left: parent.left; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter
+            text: (vimEditor && vimEditor.cmdLine) || ""; color: Theme.textPrimary; font.pixelSize: 13; font.family: "monospace"
         }
     }
 
-    // Read-only TextEdit driven by VimEditor state machine
     Flickable {
         id: flickable
         anchors {
-            left: parent.left; leftMargin: 10
-            right: parent.right; rightMargin: 10
-            top: parent.top; topMargin: 8
-            bottom: cmdLine.visible ? cmdLine.top : parent.bottom
-            bottomMargin: 8
+            left: parent.left; leftMargin: 12
+            right: parent.right; rightMargin: 12
+            top: parent.top; topMargin: 10
+            bottom: (cmdLine && cmdLine.visible) ? cmdLine.top : parent.bottom
+            bottomMargin: 10
         }
-        contentWidth: edit.implicitWidth
-        contentHeight: edit.implicitHeight
-        clip: true
+        contentWidth: edit.implicitWidth; contentHeight: edit.implicitHeight; clip: true
 
         TextEdit {
             id: edit
@@ -94,12 +94,35 @@ Rectangle {
             readOnly: true
             wrapMode: TextEdit.Wrap
             color: root.writerMode ? Theme.textPrimary : Theme.textMuted
-            selectionColor: Qt.rgba(0.49, 0.23, 0.93, 0.4)
-            font.pixelSize: 14
-            font.family: "monospace"
-            cursorVisible: vimEditor.mode !== "CMDLINE" && root.activeFocus
+            font.pixelSize: 14; font.family: "monospace"
+            
+            // Custom Block Cursor
+            cursorVisible: false // Hide default thin line
+            
+            Rectangle {
+                id: blockCursor
+                width: 8
+                height: 16
+                color: root.activeFocus || edit.activeFocus ? (vimEditor && vimEditor.mode === "INSERT" ? Theme.accent : "white") : Theme.textMuted
+                opacity: 0.7
+                visible: true // Always visible in the box
+                x: edit.cursorRectangle.x
+                y: edit.cursorRectangle.y
+                
+                // Blink animation
+                Timer {
+                    interval: 500; running: true; repeat: true
+                    onTriggered: blockCursor.visible = !blockCursor.visible
+                }
+            }
 
-            Keys.onPressed: function(event) {
+            Text {
+                visible: edit.text === "" && vimEditor && vimEditor.mode === "NORMAL"
+                text: "Press 'i' to type..."
+                color: Theme.textMuted; font: edit.font; opacity: 0.5
+            }
+
+            Keys.onPressed: (event) => {
                 if (!root.writerMode) { event.accepted = true; return }
                 vimEditor.handleKey(
                     event.text,
@@ -110,45 +133,31 @@ Rectangle {
                 )
                 event.accepted = true
             }
-            Keys.forwardTo: [root]
         }
     }
 
-    // Apply buffer updates from Python
     Connections {
         target: vimEditor
         function onBufferUpdated(text, pos) {
             edit.text = text
             edit.cursorPosition = pos
-            // Auto-scroll to cursor
             var rect = edit.cursorRectangle
-            flickable.contentY = Math.max(0, rect.y + rect.height
-                - flickable.height + 4)
+            flickable.contentY = Math.max(0, rect.y + rect.height - flickable.height + 4)
+            // Ensure cursor is visible after movement
+            blockCursor.visible = true
         }
-        function onSelectionChanged(start, end) {
-            edit.select(start, end)
-        }
-        function onSelectionCleared() {
-            edit.deselect()
-        }
-    }
-
-    // Send from QML side (triggered by vimEditor.sendRequested)
-    Connections {
-        target: vimEditor
         function onSendRequested(text) {
-            if (root.convId)
+            if (root.convId) {
+                bridge.setActiveConv(root.convId)
                 bridge.sendMessage(root.convId, text)
+            }
         }
     }
 
-    // Read-only tooltip
     ToolTip {
         visible: !root.writerMode
         text: "Another Muninn instance holds the writer lock."
-        delay: 800
-        parent: root
-        anchors.centerIn: parent
+        delay: 800; parent: root; anchors.centerIn: parent
     }
 
     MouseArea {
@@ -158,6 +167,6 @@ Rectangle {
             root.forceActiveFocus()
         }
         propagateComposedEvents: true
-        onPressed: function(mouse) { mouse.accepted = false }
+        onPressed: (mouse) => { mouse.accepted = false }
     }
 }

@@ -47,6 +47,10 @@
           src = ./python;
           pyproject = true;
 
+          nativeBuildInputs = [
+            pkgs.qt6.wrapQtAppsHook
+          ];
+
           build-system = [pkgs.python3Packages.setuptools];
 
           dependencies = [
@@ -55,6 +59,18 @@
             pkgs.python3Packages.pygobject3
             pkgs.python3Packages.pyside6
           ];
+
+          buildInputs = [
+            pkgs.qt6.qtbase
+            pkgs.qt6.qtdeclarative
+            pkgs.qt6.qtsvg
+          ];
+
+          dontWrapQtApps = true;
+
+          preFixup = ''
+            makeWrapperArgs+=("''${qtWrapperArgs[@]}")
+          '';
 
           meta = {
             description = "Muninn GUI — encrypted P2P chat over Bluetooth";

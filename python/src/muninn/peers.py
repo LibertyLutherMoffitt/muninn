@@ -257,12 +257,12 @@ class ConnectionManager:
 
     def send_message(
         self, group_id: bytes, text: str, dest_addrs: list[str]
-    ) -> tuple[bytes, list[str], list[str]] | None:
+    ) -> tuple[bytes, list[str], list[str]]:
         """Encrypt and send message to all dests.
 
-        Returns (msg_id, sent_addrs, skipped_addrs), or None if no dest has a
-        known pubkey. `skipped_addrs` are dests without a pubkey. Raises
-        protocol.FrameTooLarge if the text exceeds the wire frame limit.
+        Returns (msg_id, sent_addrs, skipped_addrs). `skipped_addrs` are
+        dests without a pubkey. Raises protocol.FrameTooLarge if the text
+        exceeds the wire frame limit.
         """
         msg_id = protocol.new_msg_id()
         plaintext = text.encode("utf-8")
@@ -298,22 +298,29 @@ class ConnectionManager:
             )
             unacked_entry[dest_addr] = frame
 
-        if not unacked_entry:
-            return None
-
-        self.unacked[msg_id] = unacked_entry
-
         # Persist before sending so a crash mid-send still gives us a chance
         # to retransmit on restart (we rebuild self.unacked from storage).
+        # We record ALL intended recipients (except self) so history shows
+        # the message.
         if self.storage is not None:
-            self.storage.save_outgoing_message(
-                msg_id,
-                group_id,
-                self.local_mac,
-                text,
-                int(time.time()),
-                list(unacked_entry.keys()),
-            )
+            db_recipients = [
+                a.upper() for a in dest_addrs if a.upper() != self.local_mac
+            ]
+            if db_recipients:
+                self.storage.save_outgoing_message(
+                    msg_id,
+                    group_id,
+                    self.local_mac,
+                    text,
+                    int(time.time()),
+                    db_recipients,
+                )
+
+        if not unacked_entry:
+            # We skip network send but return msg_id so UI can show it.
+            return msg_id, [], skipped
+
+        self.unacked[msg_id] = unacked_entry
 
         for dest_addr, frame in unacked_entry.items():
             self._route_frame(dest_addr, frame)

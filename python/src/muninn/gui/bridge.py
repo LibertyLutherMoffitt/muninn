@@ -217,11 +217,12 @@ class ChatBridge(QObject):
             self.errorOccurred.emit(str(e))
             return
 
-        if result is None:
+        msg_id, sent, skipped = result
+        if not sent:
             self.errorOccurred.emit("No reachable recipient (no pubkey)")
-            return
+        elif skipped:
+            self.errorOccurred.emit(f"Skipped {len(skipped)} recipients (no pubkey)")
 
-        msg_id, _sent, _skipped = result
         ts = int(time.time())
         self._msg_model.add_message(
             msg_id.hex(),

@@ -290,19 +290,17 @@ class Storage:
     ) -> list[tuple[bytes, str, str, int]]:
         """Recent DM history with `peer`, oldest-first.
 
-        Returns [(msg_id, sender, body, ts), ...]. Covers both directions:
-        inbound msgs (sender = peer) and outbound msgs (sender = local_mac
         AND peer listed in message_recipients).
         """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT msg_id, sender, body, ts FROM ("
-                "  SELECT msg_id, sender, body, ts FROM messages "
-                "  WHERE group_id = ? AND ("
-                "    sender = ? OR "
-                "    (sender = ? AND msg_id IN "
+                "  SELECT m.msg_id, m.sender, m.body, m.ts FROM messages m "
+                "  WHERE m.group_id = ? AND ("
+                "    m.sender = ? OR "
+                "    (m.sender = ? AND m.msg_id IN "
                 "      (SELECT msg_id FROM message_recipients WHERE recipient = ?))"
-                "  ) ORDER BY ts DESC LIMIT ?"
+                "  ) ORDER BY m.ts DESC LIMIT ?"
                 ") ORDER BY ts ASC",
                 (_GROUP_ZERO, peer, local_mac, peer, limit),
             ).fetchall()
