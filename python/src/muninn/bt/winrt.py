@@ -49,9 +49,12 @@ get the socket back synchronously. Much simpler than the BlueZ path.
 
 import array
 import asyncio
+import os
 import queue
 import re
+import tempfile
 import threading
+import time as _time
 import uuid
 from typing import Any
 
@@ -80,6 +83,24 @@ from winrt.windows.storage.streams import (  # type: ignore[import-not-found]
     DataWriter,
     InputStreamOptions,
 )
+
+_LOG_PATH = os.environ.get(
+    "MUNINN_WINRT_LOG", os.path.join(tempfile.gettempdir(), "muninn-winrt.log")
+)
+_log_lock = threading.Lock()
+
+
+def _log(msg: str) -> None:
+    line = f"{_time.strftime('%H:%M:%S')} {msg}\n"
+    try:
+        with _log_lock:
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception:
+        pass
+
+
+_log(f"--- winrt module loaded, log={_LOG_PATH} ---")
 
 SERVICE_UUID = "320bcf9c-94fe-46f4-b9bf-83535cafcd55"
 SERVICE_NAME = "Muninn"
@@ -341,6 +362,7 @@ def _publish_service_name_sdp(provider: RfcommServiceProvider) -> None:
 async def _create_server_async() -> None:
     global _provider, _listener, _connection_token
     _provider = await RfcommServiceProvider.create_async(_RFCOMM_SERVICE_ID)
+    _log(f"[server] provider created, service_id={_provider.service_id.as_string()!r}")
     _publish_service_name_sdp(_provider)
     _listener = StreamSocketListener()
 
@@ -349,6 +371,7 @@ async def _create_server_async() -> None:
         # acceptor thread (cli.acceptor) will pick it up and drive the handshake.
         sock = args.socket
         peer = _addr_from_host_name(sock.information.remote_host_name)
+        _log(f"[server] incoming connection from {peer!r}")
         adapter = _StreamSocketAdapter(sock, peer)
         _incoming_queue.put((adapter, peer))
 
@@ -358,6 +381,7 @@ async def _create_server_async() -> None:
     # listener (not TCP). SocketProtectionLevel.PLAIN_SOCKET = no SSL/etc.
     await _listener.bind_service_name_async(_provider.service_id.as_string())
     _provider.start_advertising(_listener)
+    _log("[server] advertising started")
 
 
 def create_server() -> None:
@@ -413,27 +437,77 @@ async def _discover_async() -> list[tuple[str, str]]:
     # Calling FindAllAsync() with 0 arguments guarantees we bypass any Python WinRT
     # overload resolution bugs (which cause 'invalid parameter count' exceptions).
     devices = list(await DeviceInformation.find_all_async())
+    _log(f"[discover] find_all_async returned {len(devices)} devices")
     results: list[tuple[str, str]] = []
 
     uuid_str = SERVICE_UUID.lower()
+    uuid_matches = 0
     for di in devices:
-        if uuid_str not in di.id.lower():
+        did_lower = di.id.lower()
+        if uuid_str not in did_lower:
+            # Log candidates that look bluetooth-related to see what we DO get
+            if (
+                "bluetooth" in did_lower
+                or "bthenum" in did_lower
+                or "rfcomm" in did_lower
+            ):
+                _log(f"[discover]   BT-ish non-match id={di.id!r} name={di.name!r}")
             continue
+        uuid_matches += 1
+        _log(f"[discover]   UUID match id={di.id!r} name={di.name!r}")
         try:
             service = await RfcommDeviceService.from_id_async(di.id)
-        except OSError:
+        except OSError as e:
+            _log(f"[discover]   from_id_async OSError: {e}")
             continue
-        except Exception:
-            # Catch any other random WinRT exceptions to prevent breaking the loop
+        except Exception as e:
+            _log(f"[discover]   from_id_async Exception: {type(e).__name__}: {e}")
             continue
 
         if service is None:
+            _log("[discover]   from_id_async returned None")
             continue
         addr = _addr_from_host_name(service.connection_host_name)
         if not addr:
             addr = _parse_mac_from_device_id(di.id) or ""
+        _log(f"[discover]   resolved addr={addr!r}")
         if addr:
             results.append((addr, (di.name or addr)))
+
+    _log(f"[discover] {uuid_matches} id-uuid matches, {len(results)} final results")
+
+    # Fallback path: explicitly query RFCOMM devices by our service selector.
+    # find_all_async() with no args enumerates a default AEP class that may
+    # not include RFCOMM service endpoints at all. Try the selector API too.
+    try:
+        selector = RfcommDeviceService.get_device_selector(_RFCOMM_SERVICE_ID)
+        _log(f"[discover] rfcomm selector={selector!r}")
+        rfcomm_devices = list(await DeviceInformation.find_all_async(selector))
+        _log(f"[discover] rfcomm selector returned {len(rfcomm_devices)} devices")
+        seen = {a for a, _ in results}
+        for di in rfcomm_devices:
+            _log(f"[discover]   rfcomm id={di.id!r} name={di.name!r}")
+            try:
+                service = await RfcommDeviceService.from_id_async(di.id)
+            except Exception as e:
+                _log(f"[discover]   rfcomm from_id_async err: {type(e).__name__}: {e}")
+                continue
+            if service is None:
+                _log(
+                    "[discover]   rfcomm service None (likely not paired or no access)"
+                )
+                continue
+            addr = _addr_from_host_name(service.connection_host_name)
+            if not addr:
+                addr = _parse_mac_from_device_id(di.id) or ""
+            _log(f"[discover]   rfcomm resolved addr={addr!r}")
+            if addr and addr not in seen:
+                results.append((addr, (di.name or addr)))
+                seen.add(addr)
+    except Exception as e:
+        _log(f"[discover] rfcomm selector path error: {type(e).__name__}: {e}")
+
+    _log(f"[discover] returning {len(results)} results: {results}")
     return results
 
 
@@ -460,21 +534,26 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
     def on_added(_sender: Any, info: Any) -> None:
         if info and info.id:
             found[info.id] = info.name or ""
+            _log(f"[scan] added id={info.id!r} name={info.name!r}")
 
     def on_updated(_sender: Any, _info: Any) -> None:
         pass
 
     def on_enum_completed(_sender: Any, _args: Any) -> None:
+        _log("[scan] enumeration completed")
         loop.call_soon_threadsafe(completed.set)
 
     watcher = None
     try:
         selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
         properties = ["System.Devices.Aep.DeviceAddress"]
+        _log(f"[scan] creating watcher with BT-unpaired selector={selector!r}")
         watcher = DeviceInformation.create_watcher(selector, properties)
-    except Exception:
+    except Exception as e:
+        _log(f"[scan] selector create_watcher failed: {type(e).__name__}: {e}")
         # Fallback to zero-argument create_watcher which has no overloads to confuse Python
         try:
+            _log("[scan] falling back to zero-arg create_watcher")
             watcher = DeviceInformation.create_watcher()
         except Exception as e:
             print(f"Fatal watcher error: {e}")
@@ -504,20 +583,27 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
     async def _prime_sdp(did: str) -> None:
         try:
             device = await BluetoothDevice.from_id_async(did)
-            if device:
-                await asyncio.wait_for(
-                    device.get_rfcomm_services_for_id_async(_RFCOMM_SERVICE_ID),
-                    timeout=5.0,
-                )
-        except Exception:
-            pass
+            if device is None:
+                _log(f"[prime_sdp] from_id_async None for {did!r}")
+                return
+            result = await asyncio.wait_for(
+                device.get_rfcomm_services_for_id_async(_RFCOMM_SERVICE_ID),
+                timeout=5.0,
+            )
+            svc_count = len(list(result.services)) if result else 0
+            err = getattr(result, "error", "?")
+            _log(f"[prime_sdp] {did!r} err={err} services={svc_count}")
+        except Exception as e:
+            _log(f"[prime_sdp] {did!r} exception: {type(e).__name__}: {e}")
 
     tasks = []
+    _log(f"[scan] {len(found)} total devices found; filtering for BT")
     # Filter for Bluetooth devices if we fell back to the global watcher
     for did, name in found.items():
         if "BTHENUM" not in did.upper() and "BLUETOOTH" not in did.upper():
             continue
         mac = _parse_mac_from_device_id(did)
+        _log(f"[scan]   BT device mac={mac!r} name={name!r} id={did!r}")
         if mac:
             results.append((mac, name or mac))
         tasks.append(asyncio.create_task(_prime_sdp(did)))
@@ -615,8 +701,11 @@ def ensure_paired(addr: str) -> None:
 
 
 async def _connect_async(addr: str) -> _StreamSocketAdapter:
+    _log(f"[connect] starting connect to {addr}")
     device = await _get_device(addr)
+    _log(f"[connect] got device, paired={device.device_information.pairing.is_paired}")
     services_result = await device.get_rfcomm_services_for_id_async(_RFCOMM_SERVICE_ID)
+    _log(f"[connect] services_result err={services_result.error}")
 
     if services_result.error != BluetoothError.SUCCESS:
         raise ConnectionError(
@@ -624,6 +713,7 @@ async def _connect_async(addr: str) -> _StreamSocketAdapter:
         )
 
     service_list = list(services_result.services)
+    _log(f"[connect] {len(service_list)} Muninn services found")
     if not service_list:
         raise ConnectionError(f"No Muninn service advertised by {addr}")
 
