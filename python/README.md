@@ -1,19 +1,22 @@
-# Muninn — Desktop Client (CLI)
+# Muninn — Desktop Client (CLI + GUI)
 
 Encrypted peer-to-peer chat over Bluetooth Classic (RFCOMM). No internet required.
 
 Runs on Linux (BlueZ) and Windows (WinRT). A single Python package, two BT
-backends — the right one is picked at import time via `sys.platform`.
+backends — the right one is picked at import time via `sys.platform`. Two
+frontends share the full core: a readline CLI and a Qt6/QML GUI with Vim-modal
+editing.
 
 ## Linux — quick start
 
 **Prerequisites:** Two Linux devices with Bluetooth; Nix package manager.
 
 ```
-nix run .#muninn-linux
+nix run .#muninn-linux     # CLI
+nix run .#muninn-gui       # GUI
 ```
 
-No flags. Every device both listens and scans continuously. Each discovers nearby Muninn
+No flags needed for CLI. Every device both listens and scans continuously. Each discovers nearby Muninn
 peers, connects to all of them simultaneously, and maintains independent sessions.
 Pairing is handled on first connect; no OS-level pairing setup required.
 
@@ -144,7 +147,6 @@ python -m muninn.cli --help
 
 ## What doesn't exist yet
 
-- GUI (Qt6/QML planned)
 - Android client
 - Windows backend hardware-tested (`bt/winrt.py` is written but not yet validated on
   real Windows hardware — expect rough edges)

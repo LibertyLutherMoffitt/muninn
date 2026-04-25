@@ -51,11 +51,10 @@ Item {
                             : ""
                 color: Theme.textMuted
                 font.pixelSize: 11
-                font.family: "monospace"
             }
         }
 
-        // Scrollback
+        // Scrollback (top-to-bottom: oldest at top, newest at bottom).
         ListView {
             id: msgList
             Layout.fillWidth: true
@@ -63,8 +62,21 @@ Item {
             clip: true
             model: msgModel
             spacing: 12
-            verticalLayoutDirection: ListView.BottomToTop
             z: 1
+
+            // Auto-scroll to bottom on new messages or model reset, but only
+            // when user is already near the bottom — otherwise leave their
+            // scroll position alone.
+            property bool _atBottom: true
+            onContentYChanged: {
+                if (visibleArea.heightRatio >= 1.0) {
+                    _atBottom = true
+                    return
+                }
+                _atBottom = (contentY + height) >= (contentHeight - 24)
+            }
+            onCountChanged: if (_atBottom) Qt.callLater(positionViewAtEnd)
+            Component.onCompleted: Qt.callLater(positionViewAtEnd)
 
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
@@ -84,8 +96,20 @@ Item {
                 id: bubble
                 width: msgList.width
                 height: bubbleRect.height + 4
-                
+
                 property bool outbound: model.isOutbound
+                readonly property real maxBubbleWidth: msgList.width * 0.75
+                readonly property real horizontalPadding: 24
+                // Floor for content width: whichever of the header / footer
+                // rows is widest must fit without elision.
+                readonly property real headerWidth:
+                    outbound ? 0 : senderText.implicitWidth
+                readonly property real footerWidth:
+                    timeText.implicitWidth
+                    + (outbound ? ackText.implicitWidth + footerRow.spacing : 0)
+                readonly property real contentMin:
+                    Math.min(maxBubbleWidth - horizontalPadding,
+                             Math.max(headerWidth, footerWidth))
 
                 Rectangle {
                     id: bubbleRect
@@ -93,27 +117,30 @@ Item {
                     anchors.left: outbound ? undefined : parent.left
                     anchors.rightMargin: 12
                     anchors.leftMargin: 12
-                    
-                    width: Math.min(msgList.width * 0.75, contentColumn.implicitWidth + 24)
+
+                    width: Math.min(
+                        bubble.maxBubbleWidth,
+                        Math.max(bubble.contentMin, bodyText.implicitWidth)
+                            + bubble.horizontalPadding)
                     height: contentColumn.implicitHeight + 16
-                    
+
                     color: outbound ? Theme.outgoingBubble : Theme.incomingBubble
                     radius: 12
 
                     Column {
                         id: contentColumn
-                        width: Math.min(msgList.width * 0.75 - 24, bodyText.implicitWidth)
+                        width: bubbleRect.width - bubble.horizontalPadding
                         anchors.centerIn: parent
                         spacing: 4
 
                         Text {
+                            id: senderText
                             visible: !outbound
                             text: model.senderName || model.senderMac
                             color: Theme.accent
                             font.pixelSize: 11
                             font.bold: true
-                            width: parent.width
-                            elide: Text.ElideRight
+                            wrapMode: Text.NoWrap
                         }
 
                         Text {
@@ -127,16 +154,19 @@ Item {
                         }
 
                         Row {
+                            id: footerRow
                             spacing: 6
                             anchors.right: parent.right
 
                             Text {
+                                id: timeText
                                 text: Qt.formatTime(new Date(model.timestamp * 1000), "HH:mm")
                                 color: Theme.textMuted
                                 font.pixelSize: 10
                             }
 
                             Text {
+                                id: ackText
                                 visible: outbound
                                 text: model.ackState === "read"  ? "✓✓"
                                     : model.ackState === "acked" ? "✓"

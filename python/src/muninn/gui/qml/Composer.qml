@@ -20,7 +20,7 @@ Rectangle {
     property bool writerMode: bridge.isWriter
     property string convId: bridge.activeConvId
 
-    // Vim mode highlight
+    // Vim mode highlight (fades smoothly between modes)
     Rectangle {
         anchors.fill: parent
         anchors.margins: 1
@@ -36,10 +36,14 @@ Rectangle {
                 default:            return "transparent"
             }
         }
+        Behavior on border.color {
+            ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+        }
     }
 
-    // Mode badge
+    // Mode badge (fades in/out with mode change)
     Rectangle {
+        id: modeBadge
         anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 6
         width: modeLabel.implicitWidth + 24; height: 28; radius: 4
         color: {
@@ -52,8 +56,16 @@ Rectangle {
                 default:            return "transparent"
             }
         }
-        visible: vimEditor && vimEditor.mode !== "NORMAL"
-        z: 10 
+        opacity: (vimEditor && vimEditor.mode !== "NORMAL") ? 1 : 0
+        visible: opacity > 0
+        z: 10
+
+        Behavior on opacity {
+            NumberAnimation { duration: 120; easing.type: Easing.OutQuad }
+        }
+        Behavior on color {
+            ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
+        }
 
         Text {
             id: modeLabel
@@ -73,7 +85,7 @@ Rectangle {
         visible: vimEditor && vimEditor.mode === "CMDLINE"
         Text {
             anchors.left: parent.left; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter
-            text: (vimEditor && vimEditor.cmdLine) || ""; color: Theme.textPrimary; font.pixelSize: 13; font.family: "monospace"
+            text: (vimEditor && vimEditor.cmdLine) || ""; color: Theme.textPrimary; font.pixelSize: 13
         }
     }
 
@@ -94,7 +106,7 @@ Rectangle {
             readOnly: true
             wrapMode: TextEdit.Wrap
             color: root.writerMode ? Theme.textPrimary : Theme.textMuted
-            font.pixelSize: 14; font.family: "monospace"
+            font.pixelSize: 14
             
             // Custom Block Cursor
             cursorVisible: false // Hide default thin line
@@ -124,6 +136,14 @@ Rectangle {
 
             Keys.onPressed: (event) => {
                 if (!root.writerMode) { event.accepted = true; return }
+                // Tab in CMDLINE = command/argument completion via bridge.
+                if (event.key === Qt.Key_Tab && vimEditor.mode === "CMDLINE") {
+                    const next = bridge.completeCommand(vimEditor.cmdLine)
+                    if (next && next !== vimEditor.cmdLine)
+                        vimEditor.setCmdLine(next)
+                    event.accepted = true
+                    return
+                }
                 vimEditor.handleKey(
                     event.text,
                     event.key,

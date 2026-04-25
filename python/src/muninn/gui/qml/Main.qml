@@ -104,10 +104,14 @@ ApplicationWindow {
     // Global Shortcuts
     // ------------------------------------------------------------------
 
-    Shortcut { sequence: "Ctrl+P"; onActivated: cmdPalette.open() }
-    
-    Shortcut { 
+    // Overlays handle their own Esc — gate global Esc so palette/scan/info
+    // can close themselves first.
+    property bool overlayOpen:
+        cmdPalette.visible || scanDialog.visible || infoMenu.visible
+
+    Shortcut {
         sequence: "Esc"
+        enabled: !root.overlayOpen
         onActivated: {
             vimEditor.handleKey("", Qt.Key_Escape, false, false, false)
             chatPane.forceActiveFocus()
@@ -116,11 +120,27 @@ ApplicationWindow {
 
     Shortcut {
         sequence: "Ctrl+H"
+        enabled: !root.overlayOpen
         onActivated: peerList.forceActiveFocus()
     }
     Shortcut {
         sequence: "Ctrl+L"
+        enabled: !root.overlayOpen
         onActivated: chatPane.forceActiveFocus()
+    }
+    // Cycle conversations regardless of focus. Disabled while the palette is
+    // open so it can use Ctrl-N/Ctrl-P to navigate its own list.
+    Shortcut {
+        sequence: "Ctrl+N"
+        context: Qt.ApplicationShortcut
+        enabled: !root.overlayOpen
+        onActivated: bridge.cycleConv(1)
+    }
+    Shortcut {
+        sequence: "Ctrl+P"
+        context: Qt.ApplicationShortcut
+        enabled: !root.overlayOpen
+        onActivated: bridge.cycleConv(-1)
     }
 
     // ------------------------------------------------------------------
@@ -139,30 +159,105 @@ ApplicationWindow {
         }
     }
 
-    // Error toast
+    InfoMenu {
+        id: infoMenu
+        anchors.fill: parent
+        z: 11
+        onConvSelected: (convId) => {
+            bridge.setActiveConv(convId)
+            chatPane.forceActiveFocus()
+        }
+    }
+
+    // Toast (errors red, info neutral). Fades in/out for smoothness.
     Rectangle {
-        id: errorToast
-        visible: false
-        anchors.bottom: parent.bottom; anchors.bottomMargin: 32; anchors.horizontalCenter: parent.horizontalCenter
-        width: errorLabel.implicitWidth + 24; height: 32; radius: 6; color: Theme.error; z: 20
-        Text { id: errorLabel; anchors.centerIn: parent; color: "white"; font.pixelSize: 12 }
-        Timer { id: toastTimer; interval: 3000; onTriggered: errorToast.visible = false }
+        id: toast
+        property bool isError: true
+        visible: opacity > 0
+        opacity: 0
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 40
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(parent.width - 80, toastLabel.implicitWidth + 32)
+        height: 34; radius: 8
+        color: isError ? Theme.error : Theme.surfaceRaised
+        border.color: isError ? Theme.error : Theme.accent
+        border.width: 1
+        z: 20
+
+        Behavior on opacity {
+            NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+        }
+
+        Text {
+            id: toastLabel
+            anchors.centerIn: parent
+            color: "white"
+            font.pixelSize: 12
+            elide: Text.ElideRight
+            width: Math.min(parent.parent.width - 80, implicitWidth)
+        }
+
+        Timer {
+            id: toastTimer
+            interval: 3000
+            onTriggered: toast.opacity = 0
+        }
+
+        function show(text, error) {
+            toastLabel.text = text
+            isError = error
+            opacity = 1
+            toastTimer.restart()
+        }
     }
 
     Connections {
         target: bridge
-        function onErrorOccurred(msg) {
-            errorLabel.text = msg
-            errorToast.visible = true
-            toastTimer.restart()
-        }
+        function onErrorOccurred(msg) { toast.show(msg, true) }
+        function onNotify(msg) { toast.show(msg, false) }
         function onActiveConvChanged(convId) {
             chatPane.forceActiveFocus()
+        }
+        function onQuitRequested() { Qt.quit() }
+        function onScanRequested() { scanDialog.open() }
+        function onPaletteRequested() {
+            if (!cmdPalette.visible) cmdPalette.open()
+        }
+        function onInfoMenuRequested(title, items) {
+            // If the palette is still open (raw `:` command path), close it
+            // first so the info menu owns focus cleanly.
+            if (cmdPalette.visible) cmdPalette.close()
+            infoMenu.show(title, items)
         }
     }
 
     Connections {
         target: vimEditor
         function onQuitRequested() { Qt.quit() }
+        function onConvCycleRequested(d) { bridge.cycleConv(d) }
+        function onPaletteRequested() { cmdPalette.open() }
+        function onScanRequested() { scanDialog.open() }
+        function onCommandRequested(cmd) { bridge.runCommand(cmd) }
+    }
+
+    // Restore focus to the chat pane whenever an overlay closes.
+    Connections {
+        target: cmdPalette
+        function onVisibleChanged() {
+            if (!cmdPalette.visible && !infoMenu.visible)
+                chatPane.forceActiveFocus()
+        }
+    }
+    Connections {
+        target: scanDialog
+        function onVisibleChanged() {
+            if (!scanDialog.visible) chatPane.forceActiveFocus()
+        }
+    }
+    Connections {
+        target: infoMenu
+        function onVisibleChanged() {
+            if (!infoMenu.visible) chatPane.forceActiveFocus()
+        }
     }
 }

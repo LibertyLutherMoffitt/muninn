@@ -17,7 +17,7 @@ class VimMode(enum.Enum):
     VISUAL = "VISUAL"
     VISUAL_LINE = "VISUAL_LINE"
     OP_PENDING = "OP_PENDING"
-    CMD_LINE = "CMDLINE"
+    CMDLINE = "CMDLINE"
 
 
 # Qt key codes (int values)
@@ -51,6 +51,10 @@ class VimEditor(QObject):
     scrollRequested = Signal(float)  # 0.0–1.0
     sendRequested = Signal(str)  # text to send
     quitRequested = Signal()
+    convCycleRequested = Signal(int)  # +1 / -1
+    paletteRequested = Signal()
+    scanRequested = Signal()
+    commandRequested = Signal(str)  # raw command line w/o leading :
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,6 +65,8 @@ class VimEditor(QObject):
         self._count: int | None = None
         self._reg = '"'  # active register name
         self._registers: dict[str, str] = {}
+        # Whether each register holds a linewise (yy/dd) chunk vs charwise.
+        self._reg_linewise: dict[str, bool] = {}
         self._visual_anchor = 0
         self._last_find: tuple[str, str] | None = None  # (op, char): f/F/t/T + char
         self._search_pat = ""
@@ -117,7 +123,7 @@ class VimEditor(QObject):
             return
 
         if key_code == _K["Escape"]:
-            if self._mode == VimMode.CMD_LINE:
+            if self._mode == VimMode.CMDLINE:
                 self._cmd_buf = ""
                 self.cmdLineChanged.emit("")
             self._enter_mode(VimMode.NORMAL)
@@ -129,12 +135,22 @@ class VimEditor(QObject):
 
         if self._mode == VimMode.INSERT:
             self._handle_insert(key_text, key_code, ctrl, shift)
-        elif self._mode == VimMode.CMD_LINE:
+        elif self._mode == VimMode.CMDLINE:
             self._handle_cmdline(key_text, key_code, ctrl)
         elif self._mode in (VimMode.VISUAL, VimMode.VISUAL_LINE):
             self._handle_visual(key_text, key_code, ctrl, shift)
         else:
             self._handle_normal(key_text, key_code, ctrl, shift)
+
+    @Slot(str)
+    def setCmdLine(self, text: str) -> None:
+        """Replace the command-line buffer (used for tab completion)."""
+        if self._mode != VimMode.CMDLINE:
+            return
+        if not text.startswith(":"):
+            text = ":" + text.lstrip(":")
+        self._cmd_buf = text
+        self.cmdLineChanged.emit(self._cmd_buf)
 
     @Slot()
     def clear(self) -> None:
@@ -307,10 +323,17 @@ class VimEditor(QObject):
                     self.quitRequested.emit()
                 return
 
-            # <space> leader — <space>y = yank to system clipboard
+            # <space> leader: <space>y = yank to clipboard, <space>f = palette,
+            # <space>s = scan dialog
             if p == " ":
                 if key_text == "y":
                     self._pending = "\x00"  # clipboard-yank operator
+                elif key_text == "f":
+                    self.paletteRequested.emit()
+                    self._pending = ""
+                elif key_text == "s":
+                    self.scanRequested.emit()
+                    self._pending = ""
                 else:
                     self._pending = ""
                 return
@@ -530,39 +553,65 @@ class VimEditor(QObject):
             self._enter_mode(VimMode.INSERT)
             self._emit()
 
-        # Y = yank line
+        # Y = yank line(s); count extends across N lines
         elif key_text == "Y":
             ls = self._line_start(self._pos)
-            le = self._line_end(self._pos)
+            end_pos = self._pos
+            for _ in range(max(1, count) - 1):
+                le_step = self._line_end(end_pos)
+                if le_step >= len(self._buf):
+                    break
+                end_pos = le_step + 1
+            le = self._line_end(end_pos)
             nl = "\n" if le < len(self._buf) else ""
-            self._store_reg(self._buf[ls:le] + nl)
+            self._store_reg(self._buf[ls:le] + nl, linewise=True)
 
-        # Paste — always line-wise (paste on next/prev line)
+        # Paste — linewise vs charwise based on register type. Counts repeat.
         elif key_text == "p":
-            txt = self._get_reg()
+            txt, linewise = self._get_reg()
             if txt:
                 self._push_undo()
-                content = txt.rstrip("\n")
-                le = self._line_end(self._pos)
-                if le >= len(self._buf):
-                    self._buf = self._buf + "\n" + content
-                    self._pos = le + 1
+                if linewise:
+                    content = txt.rstrip("\n")
+                    le = self._line_end(self._pos)
+                    repeated = "\n".join([content] * max(1, count))
+                    if le >= len(self._buf):
+                        self._buf = self._buf + "\n" + repeated
+                        new_pos = le + 1
+                    else:
+                        self._buf = (
+                            self._buf[: le + 1] + repeated + "\n" + self._buf[le + 1 :]
+                        )
+                        new_pos = le + 1
+                    self._pos = self._line_first_nonws(new_pos)
                 else:
-                    self._buf = (
-                        self._buf[: le + 1] + content + "\n" + self._buf[le + 1 :]
+                    repeated = txt * max(1, count)
+                    insert_at = (
+                        self._pos + 1
+                        if self._buf
+                        and self._pos < len(self._buf)
+                        and self._buf[self._pos] != "\n"
+                        else self._pos
                     )
-                    self._pos = le + 1
-                self._pos = self._line_first_nonws(self._pos)
+                    self._buf = self._buf[:insert_at] + repeated + self._buf[insert_at:]
+                    self._pos = insert_at + len(repeated) - 1 if repeated else insert_at
                 self._clamp_normal()
                 self._emit()
         elif key_text == "P":
-            txt = self._get_reg()
+            txt, linewise = self._get_reg()
             if txt:
                 self._push_undo()
-                content = txt.rstrip("\n")
-                ls = self._line_start(self._pos)
-                self._buf = self._buf[:ls] + content + "\n" + self._buf[ls:]
-                self._pos = self._line_first_nonws(ls)
+                if linewise:
+                    content = txt.rstrip("\n")
+                    repeated = "\n".join([content] * max(1, count))
+                    ls = self._line_start(self._pos)
+                    self._buf = self._buf[:ls] + repeated + "\n" + self._buf[ls:]
+                    self._pos = self._line_first_nonws(ls)
+                else:
+                    repeated = txt * max(1, count)
+                    insert_at = self._pos
+                    self._buf = self._buf[:insert_at] + repeated + self._buf[insert_at:]
+                    self._pos = insert_at + len(repeated) - 1 if repeated else insert_at
                 self._clamp_normal()
                 self._emit()
 
@@ -643,17 +692,23 @@ class VimEditor(QObject):
             self._count = count  # preserve count for next key
             return
 
-        # dd, cc, yy = line-wise
+        # dd, cc, yy = line-wise; counts extend across N consecutive lines
         if motion == op:
             ls = self._line_start(self._pos)
-            le = self._line_end(self._pos)
+            end_pos = self._pos
+            for _ in range(max(1, count) - 1):
+                le_step = self._line_end(end_pos)
+                if le_step >= len(self._buf):
+                    break
+                end_pos = le_step + 1
+            le = self._line_end(end_pos)
             # include trailing newline if present
             end = le + 1 if le < len(self._buf) and self._buf[le] == "\n" else le
             text = self._buf[ls:end]
 
             if op == "d":
                 self._push_undo()
-                self._store_reg(text, clipboard=clipboard)
+                self._store_reg(text, linewise=True, clipboard=clipboard)
                 self._buf = self._buf[:ls] + self._buf[end:]
                 self._pos = self._line_first_nonws(min(ls, max(0, len(self._buf) - 1)))
                 self._clamp_normal()
@@ -661,14 +716,14 @@ class VimEditor(QObject):
                 self._emit()
             elif op == "c":
                 self._push_undo()
-                self._store_reg(text, clipboard=clipboard)
+                self._store_reg(text, linewise=True, clipboard=clipboard)
                 self._buf = self._buf[:ls] + self._buf[le:]
                 self._pos = ls
                 self._enter_mode(VimMode.INSERT)
                 self._last_change = ("cc", count)
                 self._emit()
             elif op == "y":
-                self._store_reg(text, clipboard=clipboard)
+                self._store_reg(text, linewise=True, clipboard=clipboard)
                 # yy: don't move cursor
                 self._emit()
             return
@@ -859,10 +914,11 @@ class VimEditor(QObject):
 
         # Actions on selection
         start, end = self._visual_range()
+        linewise = self._mode == VimMode.VISUAL_LINE
 
         if key_text == "d" or key_text == "x":
             self._push_undo()
-            self._store_reg(self._buf[start:end])
+            self._store_reg(self._buf[start:end], linewise=linewise)
             self._buf = self._buf[:start] + self._buf[end:]
             self._pos = start
             self._enter_mode(VimMode.NORMAL)
@@ -871,14 +927,14 @@ class VimEditor(QObject):
             self._emit()
         elif key_text == "c":
             self._push_undo()
-            self._store_reg(self._buf[start:end])
+            self._store_reg(self._buf[start:end], linewise=linewise)
             self._buf = self._buf[:start] + self._buf[end:]
             self._pos = start
             self._enter_mode(VimMode.INSERT)
             self.selectionCleared.emit()
             self._emit()
         elif key_text == "y":
-            self._store_reg(self._buf[start:end])
+            self._store_reg(self._buf[start:end], linewise=linewise)
             self._pos = start
             self._enter_mode(VimMode.NORMAL)
             self.selectionCleared.emit()
@@ -961,13 +1017,20 @@ class VimEditor(QObject):
             self.cmdLineChanged.emit(self._cmd_buf)
 
     def _exec_cmd(self, cmd: str) -> None:
-        cmd = cmd.lstrip(":")
-        if cmd in ("q", "q!", "qa", "qa!"):
-            self.quitRequested.emit()
-        elif cmd in ("w", "wq", "x"):
+        cmd = cmd.lstrip(":").strip()
+        if not cmd:
+            return
+        head = cmd.split(None, 1)[0].lower()
+        # `:wq` / `:x` flush the editor buffer first (the rest of the command
+        # will tear down the app via bridge.runCommand).
+        if head in ("wq", "x"):
             self._do_send()
-            if cmd in ("wq", "x"):
-                self.quitRequested.emit()
+        if head == "send":
+            self._do_send()
+            return
+        # Everything else (including q, w, scan, palette, data commands)
+        # routes through the bridge so : and <space>f share one dispatcher.
+        self.commandRequested.emit(cmd)
 
     # ------------------------------------------------------------------
     # Undo / Redo
@@ -1006,20 +1069,25 @@ class VimEditor(QObject):
     # Register helpers
     # ------------------------------------------------------------------
 
-    def _store_reg(self, text: str, *, clipboard: bool = False) -> None:
+    def _store_reg(
+        self, text: str, *, linewise: bool = False, clipboard: bool = False
+    ) -> None:
         self._registers[self._reg] = text
+        self._reg_linewise[self._reg] = linewise
         if self._reg != '"':
             self._registers['"'] = text
+            self._reg_linewise['"'] = linewise
         self._reg = '"'
         if clipboard:
             cb = QGuiApplication.clipboard()
             if cb is not None:
                 cb.setText(text, QClipboard.Mode.Clipboard)
 
-    def _get_reg(self) -> str:
+    def _get_reg(self) -> tuple[str, bool]:
         txt = self._registers.get(self._reg, "")
+        linewise = self._reg_linewise.get(self._reg, False)
         self._reg = '"'
-        return txt
+        return txt, linewise
 
     # ------------------------------------------------------------------
     # Indent / Dedent
@@ -1059,7 +1127,7 @@ class VimEditor(QObject):
             self.modeChanged.emit(mode.name)
 
     def _enter_cmdline(self, prefix: str) -> None:
-        self._mode = VimMode.CMD_LINE
+        self._mode = VimMode.CMDLINE
         self._cmd_buf = prefix
         self.modeChanged.emit(self._mode.name)
         self.cmdLineChanged.emit(self._cmd_buf)

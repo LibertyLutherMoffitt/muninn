@@ -125,7 +125,10 @@ Rationale: correctness > slickness. Shared `ConnectionManager` across processes 
 | success          | `#10b981`  |
 | error            | `#ef4444`  |
 
-- UI chrome + message body: system default fonts only. No bundled fonts — keep the artifact lean and let the OS pick a sane native choice.
+- **Font:** default UI font is **JetBrains Mono** (set globally via
+  `QGuiApplication::setFont`). Falls back to whatever the OS picks for the
+  Monospace style hint when JetBrains Mono is not installed. Not bundled —
+  keeps the artifact lean.
 
 ## Vim keybindings
 
@@ -204,33 +207,43 @@ Rationale: keeps composition Vim-idiomatic (never accidentally send mid-paragrap
 
 ### Command-line (`:`)
 
-| Command           | Action                                   |
-|-------------------|------------------------------------------|
-| `:send` / `Enter` (Normal/Visual) / `<C-Enter>` | Send composer buffer                 |
-| `:scan`           | Open scan dialog                         |
-| `:nick <name>`    | Set display name                         |
-| `:peers`          | Open peer list palette                   |
-| `:group <name> <peers...>` | Create group                    |
-| `:quit` / `ZZ`    | Exit app                                 |
+The vim cmdline and the `<space>f` palette (raw `:` mode) share one dispatcher
+in `ChatBridge.runCommand`. Tab-completes commands, peer names, and group
+names. Action commands toast; data commands pop an `InfoMenu`.
+
+| Command                         | Action                                                         |
+|---------------------------------|----------------------------------------------------------------|
+| `:send` / `Enter` (Normal/Visual) / `<C-Enter>` | Send composer buffer                           |
+| `:dm <peer>`                    | Switch to a DM                                                 |
+| `:group <name>`                 | Switch to a named group                                        |
+| `:new <name> <peer1> [peer2…]`  | Create a group                                                 |
+| `:nick <name>`                  | Set your display name                                          |
+| `:nick <peer> <name>`           | Local override for a peer                                      |
+| `:list` / `:peers` / `:known`   | Pop info menu — click-through opens the conversation           |
+| `:history [N]`                  | Reload last N messages of the active conversation              |
+| `:scan`                         | Open the scan dialog                                           |
+| `:clear`                        | Clear visible messages (does not delete from DB)               |
+| `:next` / `:prev`               | Cycle conversations (also `Ctrl-N` / `Ctrl-P`)                 |
+| `:palette` / `:find` / `:f`     | Open the command palette (also `<space>f`)                     |
+| `:help`                         | Pop info menu listing every command                            |
+| `:w`                            | No-op (no save concept)                                        |
+| `:wq` / `:x`                    | Send pending buffer, then quit                                 |
+| `:q` / `:qa` / `ZZ`             | Exit app                                                       |
 
 ### Global nav — outside composer
 
-When focus is on peer list, scrollback, or command palette:
+| Keys                         | Action                                                |
+|------------------------------|-------------------------------------------------------|
+| `Ctrl-N` / `Ctrl-P`          | Cycle to next / previous conversation                 |
+| `<space>f`                   | Open command palette (peers + commands)               |
+| `<space>s`                   | Open scan dialog                                      |
+| `Ctrl-H` / `Ctrl-L`          | Focus peer list / chat pane                           |
+| `Esc`                        | Close any open overlay; otherwise leave Insert        |
 
-| Keys                         | Action                              |
-|------------------------------|-------------------------------------|
-| `j` / `k`                    | Next / prev peer                    |
-| `gg` / `G`                   | First / last peer                   |
-| `Enter`                      | Open selected conversation          |
-| `Ctrl-p`                     | Command palette (fuzzy)             |
-| `Ctrl-n` / `Ctrl-Shift-n`    | Next / prev unread                  |
-| `Ctrl-h` / `Ctrl-l`          | Focus peer list / chat pane         |
-| `Ctrl-j` / `Ctrl-k`          | Scroll chat down / up (1 line)      |
-| `gs`                         | Open scan dialog                    |
-| `gn`                         | New DM (scoped palette)             |
-| `gg` `G`                     | Top / bottom of scrollback          |
-| `i` on composer              | Focus composer in Insert            |
-| `Esc`                        | Focus peer list                     |
+Inside the palette / info menu / scan dialog: `Ctrl-N` / `Ctrl-P`, `j` / `k`,
+or `Up` / `Down` to move selection; `Tab` to complete; `Enter` to activate;
+`Esc` to close. Global shortcuts (`Ctrl-N/P`, `Ctrl-H/L`, `Esc`) are gated
+while an overlay is open, so the overlay's local handlers always win.
 
 ### Implementation
 
@@ -266,17 +279,17 @@ CLI-only installs stay lean. `pip install muninn[gui]` (or the nix gui app) pull
 
 Two derivations sharing one `python/` source tree:
 
-- `muninn-cli` — renamed from current `muninn-linux`; unchanged deps.
-- `muninn-gui` — same pyproject plus `pyside6`, `qt6.qtdeclarative`, `qt6.qtwayland`, `qt6.qtbase`.
+- `muninn-linux` (alias `cli`) — CLI-only; unchanged deps.
+- `muninn-gui` (alias `gui`) — same pyproject plus `pyside6`, `qt6.qtbase`, `qt6.qtdeclarative`, `qt6.qtsvg`.
 
 Apps:
 
 ```
-nix run .#cli -- --help
-nix run .#gui
+nix run .#muninn-linux -- --help   # or .#cli
+nix run .#muninn-gui               # or .#gui
 ```
 
-Dev shell gains: `pyside6`, `qt6.qtdeclarative`, `qt6.qtwayland`, `qt6.qtbase`. Enough to `import PySide6` and launch a QML app under `nix develop`.
+Dev shell includes: `pyside6`, `qt6.qtbase`, `qt6.qtdeclarative`, `qt6.qtwayland`. Enough to `import PySide6` and launch a QML app under `nix develop`.
 
 ## License compliance
 
@@ -319,15 +332,20 @@ When we co-distribute Qt binaries alongside our code, we must:
 
 ### Deliverables (MVP)
 
-- **NEW** `THIRD_PARTY_LICENSES.md` at repo root — the library matrix above.
-- **NEW** `licenses/LGPL-3.0.txt` — full LGPL-3.0 text verbatim.
-- **UPDATE** `README.md` — add a short "Licenses" section pointing to `THIRD_PARTY_LICENSES.md`.
-- **UPDATE** `LICENSE` — copyright holder `Joshua Hammer`.
-- **About dialog** in GUI — version, LGPL-3.0 notice for Qt + PySide6, links to their source, link to `THIRD_PARTY_LICENSES.md`.
+- ✅ `THIRD_PARTY_LICENSES.md` at repo root — the library matrix above and
+  the LGPL compliance notes for Qt 6 + PySide6.
+- ✅ `LICENSE` — MIT, copyright **Joshua Hammer** (2026).
+- ✅ `README.md` — has a `Licenses` section pointing to `THIRD_PARTY_LICENSES.md`.
+- 🔲 `licenses/LGPL-3.0.txt` — full LGPL-3.0 text. Skipped while we ship
+  source-only; required if we ever cut a bundle (PyInstaller / AppImage /
+  `nix bundle`).
+- 🔲 About dialog in the GUI — version + LGPL notice + source links.
 
 ### Deferred until we ship a bundle
 
-- `licenses/BUNDLE-NOTICE.md` — prepended to PyInstaller / AppImage artifacts with the 1–6 bullets above. Only needed once we start releasing non-source artifacts.
+- `licenses/BUNDLE-NOTICE.md` — prepended to PyInstaller / AppImage artifacts
+  with the 1–6 bullets above. Only needed once we start releasing non-source
+  artifacts.
 
 ## App icon
 
@@ -347,37 +365,39 @@ Windows `.ico` bundle later. Loaded via `QIcon("assets/muninn.svg")` — Qt has 
 ```
 python/src/muninn/gui/
 ├── __init__.py
-├── main.py              # entrypoint: QGuiApplication + QQmlApplicationEngine + bridge wiring
-├── bridge.py            # ChatBridge(QObject): signals + slots bridging core ↔ QML
+├── main.py              # entrypoint: QGuiApplication + default font + QML engine + theme dict
+├── bridge.py            # ChatBridge: signals/slots, runCommand dispatcher, completeCommand
 ├── vim.py               # VimEditor state machine + key dispatcher
 ├── writer_lock.py       # advisory lock + reader polling
 ├── models.py            # PeerListModel, MessageListModel (QAbstractListModel)
-├── qml/
-│   ├── Main.qml
-│   ├── PeerList.qml
-│   ├── ChatView.qml
-│   ├── Composer.qml
-│   ├── ScanDialog.qml
-│   ├── CommandPalette.qml
-│   ├── Theme.qml        # Color palette singleton
-│   └── Transitions.qml  # reusable animation primitives
-└── assets/
-    ├── muninn.svg
-    └── fonts/           # optional bundled fonts
+└── qml/
+    ├── Main.qml         # window + status bar + global shortcuts
+    ├── PeerList.qml
+    ├── ChatView.qml     # top-to-bottom message list, auto-scroll, bubble delegate
+    ├── Composer.qml     # vim-edited composer + cmdline strip
+    ├── ScanDialog.qml
+    ├── CommandPalette.qml  # <space>f — fuzzy + raw `:` mode
+    ├── InfoMenu.qml     # popup for :list / :peers / :known / :help
+    └── Transitions.qml  # reusable animation primitives (singleton)
 ```
+
+Note: Theme colors are defined as a Python dict in `main.py` and exposed to
+QML as context properties, not as a separate `Theme.qml` singleton.
 
 ## Implementation milestones
 
-1. **Scaffold** — skeleton `main.py` brings up an empty dark window; Theme singleton wired. `gui` extra installs. Flake dev shell runs `muninn-gui` end-to-end.
-2. **ChatBridge** — expose peers + currently-selected-chat message list to QML. Hook ConnectionManager callbacks via QueuedConnection. Read-only of existing Storage. No sending yet.
-3. **Basic chat view** — PeerList, ChatView, bubble delegate. Plain `TextEdit` composer (non-Vim). Send on `Ctrl-Enter`.
-4. **VimEditor** — modal composer. Motions, operators, text objects, registers, `.` repeat.
-5. **Global nav keymaps** — j/k peer nav, Ctrl-p palette, gs scan, etc.
-6. **Animations** — chat-switch transitions, bubble fade-in, status pulse.
-7. **Scan dialog** — discover / scan / pair flow; integrates with existing `bt.discover`, `bt.scan_devices`, `bt.pair`.
-8. **Writer lock + reader poll** — second-instance detection, disabled UI, `PRAGMA data_version` polling.
-9. **Packaging + license** — flake outputs, `THIRD_PARTY_LICENSES.md`, icon, About dialog.
-10. **Polish + manual QA pass.**
+1. ✅ **Scaffold** — skeleton `main.py` brings up an empty dark window; Theme singleton wired. `gui` extra installs. Flake dev shell runs `muninn-gui` end-to-end.
+2. ✅ **ChatBridge** — expose peers + currently-selected-chat message list to QML. Hook ConnectionManager callbacks via QueuedConnection. Read-only of existing Storage.
+3. ✅ **Basic chat view** — PeerList, ChatView, bubble delegate. Composer.
+4. ✅ **VimEditor** — modal composer. Motions, operators, text objects, registers (linewise/charwise), counts, `.` repeat, cmdline with tab completion.
+5. ✅ **Global nav keymaps** — `Ctrl-N/P` cycle, `<space>f` palette, `<space>s` scan, `Ctrl-H/L` focus.
+6. ✅ **Animations** — palette/scan/info fade+scale, mode-border transitions, peer-row pulse, scroll-to-bottom on new message.
+7. ✅ **Scan dialog** — discover / scan / pair flow; keyboard navigable.
+8. ✅ **Writer lock + reader poll** — second-instance detection, disabled UI, `PRAGMA data_version` polling.
+9. ✅ **Command palette + InfoMenu** — fuzzy peers/commands, raw `:` mode, tab completion via shared `bridge.runCommand` / `bridge.completeCommand`. Data commands open `InfoMenu` with click-through to a conversation.
+10. ✅ **Packaging + license** — flake outputs, `THIRD_PARTY_LICENSES.md`, README license section. About dialog + icon still TODO.
+11. 🔲 **Icon + About dialog.**
+12. 🔲 **Polish + manual QA pass.**
 
 ## Resolved decisions
 

@@ -45,10 +45,14 @@ Rectangle {
                      : del.hovered     ? Qt.lighter(Theme.surface, 1.12)
                                        : "transparent"
 
+                Behavior on color {
+                    ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                }
+
                 // peer-connect/disconnect pulse
                 ColorAnimation on color {
                     id: pulseAnim
-                    duration: 200
+                    duration: 240
                     easing.type: Easing.OutQuad
                 }
             }

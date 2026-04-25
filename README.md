@@ -29,12 +29,17 @@ Step 3 — 1:1 messaging + CLI    ✅  done
 Step 4 — Groups (up to 6)       ✅  done
 Step 5 — Relay + delivery       ✅  done
 Step 5b— SQLite persistence     ✅  done
-Step 6 — Qt6/QML GUI               planned
+Step 6 — Qt6/QML GUI            ✅  done
 ```
 
-**The Linux CLI client is functional today.** Multi-peer simultaneous connections, group
-messaging, relay through intermediaries, delivery + read receipts, message history, all
-encrypted and persisted across restarts. Step 6 (GUI) is on the roadmap but not yet built.
+**Both the Linux CLI and Qt6/QML GUI are functional today.** Multi-peer
+simultaneous connections, group messaging, relay through intermediaries,
+delivery + read receipts, message history, Vim-modal composer with full
+text-object / register / dot-repeat / count support, command palette
+(`<space>f`), `:`-prefixed commands with tab completion, conversation cycling
+(`Ctrl-N` / `Ctrl-P`), info popups for `:list` / `:peers` / `:known` / `:help`,
+animated chat / palette / scan dialog transitions — all encrypted and
+persisted across restarts.
 
 ---
 
@@ -66,7 +71,7 @@ send Message(encrypted)   ──────────►  decrypt → display
 | Client | Language | Targets | BT Stack | UI | Status |
 |--------|----------|---------|----------|----|--------|
 | Desktop — CLI | Python 3 | Linux, Windows | BlueZ / WinRT | readline | **Working (Linux); Windows backend written, not HW-tested** |
-| Desktop — GUI | Python 3 | Linux, Windows | BlueZ / WinRT | Qt6/QML (PySide6) | Planned |
+| Desktop — GUI | Python 3 | Linux, Windows | BlueZ / WinRT | Qt6/QML (PySide6) | **Working (Linux)** |
 | Terminal | Go | Linux, Windows | BlueZ / WinRT | Bubble Tea | Planned |
 | Android | Kotlin | Android | Android Bluetooth API | Jetpack Compose | Planned |
 | WearOS | Kotlin | WearOS | via Android phone relay | Compose for Wear | Future |
@@ -85,8 +90,11 @@ Requires NixOS or a system with Nix + flakes.
 # Enter dev shell
 nix develop
 
-# Run
+# Run CLI
 nix run .#muninn-linux -- --help
+
+# Run GUI
+nix run .#muninn-gui
 ```
 
 First connection pairs devices automatically via `org.bluez.Device1.Pair()` — no OS pairing dialog needed. Subsequent connects are fast.
@@ -103,9 +111,21 @@ No PKI. Vulnerable to MITM on first connect if an attacker can intercept the pub
 
 ---
 
+## Licenses
+
+Muninn is **MIT** (see [`LICENSE`](LICENSE)). It dynamically links Qt 6 and
+PySide6, both **LGPL-3.0**. The full third-party attribution and LGPL
+compliance notes live in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+
+The GUI's default UI font is [JetBrains Mono](https://www.jetbrains.com/lp/mono/)
+(SIL OFL-1.1). Muninn does not bundle it — Qt loads it from the system if
+present and falls back to whatever the OS provides for the Monospace style
+hint.
+
+---
+
 ## Roadmap
 
-- **Qt6/QML GUI** — Wayland-native desktop UI (PySide6), GPU-composited, animation-friendly
 - **Windows BT backend hardware validation** — `bt/winrt.py` exists but needs real-hardware testing
 - **Go + Bubble Tea TUI** — single static binary, cross-compiles to Linux + Windows
 - **Android client** — Kotlin + Jetpack Compose

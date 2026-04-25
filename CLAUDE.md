@@ -3,11 +3,18 @@
 ## Build & Dev
 
 ```bash
-nix develop          # enter dev shell (installs prek hook automatically)
-nix run .#muninn-linux -- --help
+nix develop                       # enter dev shell (installs prek hook automatically)
+nix run .#muninn-linux -- --help  # CLI
+nix run .#muninn-gui              # Qt6/QML GUI
 ```
 
 Use `nix run` not `nix build` — avoids creating `result/` symlink in repo root.
+
+**Untracked files are excluded from the nix build.** Flakes only see the git
+tree; new QML files (or any new source) must be `git add`-ed before
+`nix build`/`nix run` will pick them up. Bump `version` in both
+`python/pyproject.toml` and `flake.nix` whenever you need to invalidate the
+build cache.
 
 ### Linting
 
@@ -38,6 +45,7 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 
 - `DESIGN.md` — motivation, decisions, architecture, implementation steps
 - `PROTOCOL.md` — wire spec only (the cross-platform contract)
+- `GUI_PLAN.md` — GUI design, Vim keybindings, layout, milestones
 
 ## Key files (Python client)
 
@@ -47,3 +55,7 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 - `protocol.py` — wire encoding/decoding
 - `cli.py` — readline CLI + `ChatUI`
 - `bt/bluez.py` — BlueZ D-Bus backend
+- `gui/main.py` — GUI entrypoint, QML engine, theme
+- `gui/bridge.py` — `ChatBridge`: Qt signals ↔ `ConnectionManager` callbacks
+- `gui/vim.py` — `VimEditor`: modal text editor state machine
+- `gui/models.py` — `PeerListModel`, `MessageListModel`

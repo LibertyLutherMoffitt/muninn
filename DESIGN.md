@@ -39,15 +39,30 @@ The `muninn.bt` package dispatches on `sys.platform` at import time. Everything 
 
 **Frontends — both in the same Python package, sharing the full core:**
 - **CLI** (`cli.py`) — readline-based terminal UI. Working today on Linux.
-- **Qt6/QML GUI** (`gui.py`, planned) — PySide6 + QML. GPU-composited, animation-friendly,
-  flexible theming. Chosen over GTK4 for better keybinding support, superior animation
-  story, and scalability to image sending and embedded widgets (future). Wayland-native
-  on Linux (tested on Hyprland), native on Windows.
+  Commands are `/`-prefixed (`/dm`, `/group`, `/nick`, …).
+- **Qt6/QML GUI** (`gui/`) — PySide6 + QML. GPU-composited, animation-friendly,
+  flexible theming, Vim-modal composer with full text-object, register,
+  dot-repeat, and count-prefix support. Working today on Linux. Chosen over
+  GTK4 for better keybinding support, superior animation story, and
+  scalability to image sending and embedded widgets (future). Wayland-native
+  on Linux (tested on Hyprland), native on Windows. Default UI font is
+  JetBrains Mono with a monospace fallback.
+
+  Commands in the GUI are `:`-prefixed (vim cmdline) — `:dm`, `:group`,
+  `:nick`, `:list`, `:peers`, `:known`, `:history`, `:scan`, `:clear`,
+  `:next`, `:prev`, `:help`, `:q`, `:wq`, `:w` (no-op). The same set is
+  reachable through the `<space>f` fuzzy command palette. Data commands
+  (`:list`, `:peers`, `:known`, `:help`) open a structured info popup with
+  click-through to a conversation; action commands emit a toast.
+
+  Other navigation: `Ctrl-N` / `Ctrl-P` cycle conversations, `Ctrl-H` /
+  `Ctrl-L` jump focus between peer list and chat pane, `<space>s` opens the
+  scan dialog, `Esc` cancels overlays / leaves Insert.
 
 CLI and GUI import the same `ConnectionManager`, the same protocol, the same BT backend.
 The only difference is the layer that talks to the user. Splitting them into separate
 projects would duplicate 100% of the non-UI code, so they ship as one package with two
-entry points (`muninn-cli`, `muninn-gui`).
+entry points (`muninn`, `muninn-gui`).
 
 ### 2. Terminal Client — Go + Bubble Tea
 
@@ -110,7 +125,17 @@ muninn/
 │       ├── groups.py        │
 │       ├── storage.py       ┘
 │       ├── cli.py           ← readline frontend (working)
-│       └── gui.py           ← Qt6/QML frontend (planned)
+│       └── gui/             ← Qt6/QML frontend (working)
+│           ├── main.py      ← entrypoint: QGuiApplication + QML engine + default font
+│           ├── bridge.py    ← ChatBridge: signals/slots, command dispatcher (runCommand,
+│           │                   completeCommand), info-menu emitter
+│           ├── vim.py       ← VimEditor modal state machine — motions, operators,
+│           │                   text objects, registers (linewise/charwise),
+│           │                   counts, dot repeat, cmdline
+│           ├── models.py    ← PeerListModel, MessageListModel
+│           ├── writer_lock.py ← advisory lock for single-writer mode
+│           └── qml/         ← QML views: Main, PeerList, ChatView, Composer,
+│                              ScanDialog, CommandPalette, InfoMenu, Transitions
 ├── tui/                     ← Go Bubble Tea TUI (Linux + Windows) [planned — not yet created]
 │   ├── go.mod
 │   ├── cmd/muninn-tui/
@@ -423,7 +448,7 @@ everything built on top.
 ---
 
 ## UI Polish (any point after Step 4)
-- Linux Qt6/QML GUI (PySide6)
+- ~~Linux Qt6/QML GUI (PySide6)~~ ✅ done
 - Android Compose UI polish
 - Key fingerprint display for manual MITM verification
 

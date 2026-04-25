@@ -7,7 +7,7 @@ import pathlib
 import sys
 import threading
 
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtCore import QUrl
 
@@ -101,6 +101,13 @@ def main() -> None:
     app = QGuiApplication(sys.argv)
     app.setApplicationName("Muninn")
     app.setOrganizationName("Muninn")
+
+    # Default to JetBrains Mono everywhere; fall back to whatever the system
+    # picks for the Monospace style hint if it isn't installed.
+    default_font = QFont("JetBrains Mono")
+    default_font.setStyleHint(QFont.StyleHint.Monospace)
+    default_font.setPointSize(11)
+    QGuiApplication.setFont(default_font)
 
     local_mac = bt.get_local_mac()
     storage = Storage()

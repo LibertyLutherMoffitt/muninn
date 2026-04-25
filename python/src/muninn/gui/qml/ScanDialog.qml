@@ -2,17 +2,24 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Modal BT scan / pair dialog. Toggle with gs or :scan.
+// Modal BT scan / pair dialog. Toggle with <space>s or :scan.
 Rectangle {
     id: root
-    visible: false
-    color: Qt.rgba(0, 0, 0, 0.6)
+    visible: opacity > 0
+    opacity: 0
+    color: Qt.rgba(0, 0, 0, 0.55)
     anchors.fill: parent
 
+    property bool _open: false
+
+    Behavior on opacity {
+        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+    }
+
     // Scale-in animation on open
-    property real _scale: visible ? 1.0 : 0.9
+    property real _scale: _open ? 1.0 : 0.92
     Behavior on _scale {
-        NumberAnimation { duration: 100; easing.type: Easing.OutBack }
+        NumberAnimation { duration: 200; easing.type: Easing.OutBack }
     }
 
     MouseArea {
@@ -21,12 +28,15 @@ Rectangle {
     }
 
     Rectangle {
+        id: panel
         anchors.centerIn: parent
         width: Math.min(480, parent.width - 40)
         height: Math.min(420, parent.height - 40)
         color: Theme.surfaceRaised
         radius: 10
-        transform: Scale { origin.x: width / 2; origin.y: height / 2; xScale: root._scale; yScale: root._scale }
+        border.color: Theme.accent
+        border.width: 1
+        transform: Scale { origin.x: panel.width / 2; origin.y: panel.height / 2; xScale: root._scale; yScale: root._scale }
 
         MouseArea { anchors.fill: parent }  // block clicks reaching background
 
@@ -44,11 +54,23 @@ Rectangle {
                     Layout.fillWidth: true
                 }
                 Button {
+                    id: closeBtn
                     text: "✕"
                     flat: true
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: root.close()
+                    Keys.onEnterPressed: root.close()
                     onClicked: root.close()
-                    contentItem: Text { text: parent.text; color: Theme.textMuted }
-                    background: Rectangle { color: "transparent" }
+                    contentItem: Text {
+                        text: closeBtn.text
+                        color: closeBtn.activeFocus ? Theme.textPrimary : Theme.textMuted
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        color: closeBtn.activeFocus ? Theme.bg : "transparent"
+                        radius: 4
+                    }
                 }
             }
 
@@ -59,17 +81,31 @@ Rectangle {
                     property bool scanning: false
                     text: scanning ? "Scanning…" : "Scan (5 s)"
                     enabled: !scanning
+                    focus: true
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: clicked()
+                    Keys.onEnterPressed: clicked()
                     onClicked: {
                         scanning = true
                         statusText.text = ""
                         deviceModel.clear()
                         bridge.startScan()
                     }
-                    contentItem: Text { text: parent.text; color: Theme.textPrimary }
+                    contentItem: Text {
+                        text: scanBtn.text
+                        color: Theme.textPrimary
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
                     background: Rectangle {
-                        color: parent.enabled ? Theme.accent : Theme.textMuted
+                        color: scanBtn.enabled ? Theme.accent : Theme.textMuted
                         radius: 6
-                        opacity: parent.enabled ? 1.0 : 0.5
+                        opacity: scanBtn.enabled ? 1.0 : 0.5
+                        border.color: scanBtn.activeFocus ? "white" : "transparent"
+                        border.width: 1
+                        Behavior on color {
+                            ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
+                        }
                     }
                 }
                 Text {
@@ -80,7 +116,8 @@ Rectangle {
                 }
             }
 
-            // Device list
+            // Device list — keyboard navigable. j/k or Up/Down moves selection,
+            // Enter pairs the highlighted device.
             ListView {
                 id: deviceList
                 Layout.fillWidth: true
@@ -88,10 +125,34 @@ Rectangle {
                 model: ListModel { id: deviceModel }
                 clip: true
                 spacing: 2
+                activeFocusOnTab: true
+                currentIndex: 0
+                keyNavigationEnabled: true
+                highlightMoveDuration: 120
+                Keys.onPressed: (event) => {
+                    if (event.key === Qt.Key_J) {
+                        if (currentIndex + 1 < count) currentIndex++
+                        event.accepted = true
+                    } else if (event.key === Qt.Key_K) {
+                        if (currentIndex > 0) currentIndex--
+                        event.accepted = true
+                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        if (currentIndex >= 0) {
+                            const item = deviceModel.get(currentIndex)
+                            if (item) {
+                                statusText.text = "Pairing " + item.mac + "…"
+                                bridge.pairDevice(item.mac)
+                            }
+                        }
+                        event.accepted = true
+                    }
+                }
 
                 delegate: ItemDelegate {
+                    id: devDel
                     width: deviceList.width
                     height: 44
+                    highlighted: ListView.isCurrentItem
                     contentItem: RowLayout {
                         spacing: 8
                         Column {
@@ -105,27 +166,44 @@ Rectangle {
                                 text: model.mac
                                 color: Theme.textMuted
                                 font.pixelSize: 11
-                                font.family: "monospace"
                                 visible: model.name !== model.mac
                             }
                         }
                         Item { Layout.fillWidth: true }
                         Button {
+                            id: pairBtn
                             text: "Pair"
+                            activeFocusOnTab: true
+                            Keys.onReturnPressed: clicked()
+                            Keys.onEnterPressed: clicked()
                             onClicked: {
                                 statusText.text = "Pairing " + model.mac + "…"
                                 bridge.pairDevice(model.mac)
                             }
-                            contentItem: Text { text: parent.text; color: "white" }
+                            contentItem: Text {
+                                text: pairBtn.text
+                                color: "white"
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
                             background: Rectangle {
                                 color: Theme.accent; radius: 5
-                                opacity: parent.hovered ? 0.85 : 1.0
+                                opacity: pairBtn.hovered ? 0.85 : 1.0
+                                border.color: pairBtn.activeFocus ? "white" : "transparent"
+                                border.width: 1
                             }
                         }
                     }
                     background: Rectangle {
-                        color: parent.hovered ? Theme.bg : "transparent"
+                        color: devDel.highlighted ? Qt.lighter(Theme.bg, 1.2)
+                             : devDel.hovered     ? Theme.bg
+                                                  : "transparent"
+                        radius: 4
+                        Behavior on color {
+                            ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
+                        }
                     }
+                    onClicked: deviceList.currentIndex = index
                 }
             }
 
@@ -140,8 +218,15 @@ Rectangle {
         }
     }
 
-    function open() { root.visible = true }
-    function close() { root.visible = false }
+    function open() {
+        root._open = true
+        root.opacity = 1
+        scanBtn.forceActiveFocus()
+    }
+    function close() {
+        root._open = false
+        root.opacity = 0
+    }
 
     Connections {
         target: bridge
@@ -157,5 +242,5 @@ Rectangle {
 
     // Keyboard: Esc closes
     Keys.onEscapePressed: root.close()
-    focus: visible
+    focus: _open
 }

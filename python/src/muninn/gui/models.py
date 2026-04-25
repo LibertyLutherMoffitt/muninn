@@ -99,10 +99,13 @@ class PeerListModel(QAbstractListModel):
                         _PEER_ROLE_BY_NAME[b"lastTs"],
                     ],
                 )
-                # Bubble to top (last-activity sort)
-                self.beginMoveRows(QModelIndex(), i, i, QModelIndex(), 0)
-                self._items.insert(0, self._items.pop(i))
-                self.endMoveRows()
+                # Bubble to top (last-activity sort). Qt rejects a move where
+                # destinationRow equals source or source+1 (no-op move) — skip
+                # when item is already at row 0.
+                if i > 0:
+                    self.beginMoveRows(QModelIndex(), i, i, QModelIndex(), 0)
+                    self._items.insert(0, self._items.pop(i))
+                    self.endMoveRows()
                 return
 
     def _build(self) -> list[dict]:
