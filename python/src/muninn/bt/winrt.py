@@ -544,22 +544,22 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
         loop.call_soon_threadsafe(completed.set)
 
     watcher = None
-    try:
-        selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
-        properties = ["System.Devices.Aep.DeviceAddress"]
-        _log(f"[scan] creating watcher with BT-unpaired selector={selector!r}")
-        watcher = DeviceInformation.create_watcher(selector, properties)
-    except Exception as e:
-        _log(f"[scan] selector create_watcher failed: {type(e).__name__}: {e}")
-        # Fallback to zero-argument create_watcher which has no overloads to confuse Python
+    selector = BluetoothDevice.get_device_selector_from_pairing_state(False)
+    properties = ["System.Devices.Aep.DeviceAddress"]
+    _log(f"[scan] creating watcher with BT-unpaired selector={selector!r}")
+    for attempt, args in [
+        ("selector+properties", (selector, properties)),
+        ("selector-only", (selector,)),
+        ("zero-arg", ()),
+    ]:
         try:
-            _log("[scan] falling back to zero-arg create_watcher")
-            watcher = DeviceInformation.create_watcher()
+            watcher = DeviceInformation.create_watcher(*args)
+            _log(f"[scan] create_watcher succeeded with {attempt}")
+            break
         except Exception as e:
-            print(f"Fatal watcher error: {e}")
-            return []
-
+            _log(f"[scan] create_watcher({attempt}) failed: {type(e).__name__}: {e}")
     if watcher is None:
+        print("Fatal watcher error: all create_watcher overloads failed")
         return []
 
     watcher.add_added(on_added)
