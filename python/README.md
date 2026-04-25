@@ -52,7 +52,7 @@ pyinstaller --onefile --name muninn -c python/src/muninn/cli.py
 
 Ship `muninn.exe` — no Python install required on the target machine.
 
-## Usage
+## Usage — CLI
 
 Once running, type `/help` for the full command list:
 
@@ -111,6 +111,74 @@ Outbound messages show status icons as they progress:
 (`⧗` = pending; `✓` = delivered/ACKed; `✓✓` = read; each status line is right-aligned)
 
 Ctrl+C to quit.
+
+## Usage — GUI
+
+`nix run .#muninn-gui` launches the Qt6/QML client. It speaks the same
+protocol as the CLI and shares the same SQLite database, so a CLI history is
+visible in the GUI and vice versa (one of them must be the *writer*; the
+other runs read-only).
+
+Default font is **JetBrains Mono** (the OS substitutes a monospace face if it
+isn't installed).
+
+### Vim modal composer
+
+The composer is a full Vim modal editor. Normal / Insert / Visual / Visual-line
+/ Operator-pending / Cmdline modes; motions (`hjkl wWbBeE 0^$ gg G fF tT ;,`),
+text objects (`iw aw i" a" i( a) i{ a} ` ` `…`), operators (`d c y > <` plus
+`dd cc yy D C Y x X s S`), registers (`"a`–`"z`, `""`, `"0`, `"+` for
+clipboard), `~`, `r{c}`, `J`, `.` for repeat, `u` / `Ctrl-R`, count prefixes
+on every operator/motion/paste. Yank/paste tracks **linewise vs charwise** so
+`p` after `yw` pastes inline, while `p` after `yy` opens a new line — like
+Vim.
+
+### Commands (`:` cmdline)
+
+Same set as the CLI but `:`-prefixed. Tab-completes commands, peer names, and
+group names.
+
+```
+:dm <peer>                 — switch DM
+:group <name>              — switch group
+:new <name> <p1> [p2…]     — create group
+:nick <name>               — set your display name
+:nick <peer> <name>        — local override for a peer
+:list / :peers / :known    — pop info menu (click-through to a conversation)
+:history [N]               — reload last N messages
+:scan                      — open the scan dialog
+:clear                     — clear the visible message buffer
+:next / :prev              — cycle conversations
+:palette / :find / :f      — open command palette
+:help                      — pop info menu listing every command
+:w                         — no-op
+:wq / :x                   — send pending buffer, then quit
+:q / :qa                   — quit (also ZZ)
+```
+
+`:list` / `:peers` / `:known` / `:help` open a popup menu; the rest emit a
+toast.
+
+### Navigation keys (outside Insert mode)
+
+| Keys                     | Action                                   |
+|--------------------------|------------------------------------------|
+| `Ctrl-N` / `Ctrl-P`      | Cycle to next / previous conversation    |
+| `<space>f`               | Open command palette (peers + commands)  |
+| `<space>s`               | Open scan dialog                         |
+| `Ctrl-H` / `Ctrl-L`      | Focus peer list / chat pane              |
+| `Esc`                    | Close any overlay; otherwise leave Insert|
+
+Inside the palette / info menu / scan dialog: `Ctrl-N` / `Ctrl-P`, `j` / `k`,
+or `Up` / `Down` to move selection; `Tab` to complete; `Enter` to activate;
+`Esc` to close.
+
+### Reader vs writer
+
+The first Muninn process to launch (CLI or GUI) acquires the writer lock and
+owns the BT stack. A second process opens read-only — it can browse history
+and watch live updates but cannot send, scan, pair, or change nick. The
+status bar shows the current mode.
 
 ## Dev Shell
 
