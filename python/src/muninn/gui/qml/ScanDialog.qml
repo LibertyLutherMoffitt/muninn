@@ -5,7 +5,9 @@ import QtQuick.Layouts
 // Modal BT scan / pair dialog. Toggle with <space>s or :scan.
 Rectangle {
     id: root
-    visible: opacity > 0
+    // Become visible eagerly when opening so child controls are focusable
+    // before the fade-in finishes; stay visible during the fade-out.
+    visible: _open || opacity > 0
     opacity: 0
     color: Qt.rgba(0, 0, 0, 0.55)
     anchors.fill: parent
@@ -79,18 +81,13 @@ Rectangle {
                 Button {
                     id: scanBtn
                     property bool scanning: false
-                    text: scanning ? "Scanning…" : "Scan (5 s)"
+                    text: scanning ? "Scanning…" : "Scan (5 s)  [Enter / s]"
                     enabled: !scanning
                     focus: true
                     activeFocusOnTab: true
-                    Keys.onReturnPressed: clicked()
-                    Keys.onEnterPressed: clicked()
-                    onClicked: {
-                        scanning = true
-                        statusText.text = ""
-                        deviceModel.clear()
-                        bridge.startScan()
-                    }
+                    Keys.onReturnPressed: root.startScan()
+                    Keys.onEnterPressed: root.startScan()
+                    onClicked: root.startScan()
                     contentItem: Text {
                         text: scanBtn.text
                         color: Theme.textPrimary
@@ -221,11 +218,21 @@ Rectangle {
     function open() {
         root._open = true
         root.opacity = 1
-        scanBtn.forceActiveFocus()
+        // Defer to next event loop tick so the visibility binding has
+        // settled — forceActiveFocus() silently fails on an item whose
+        // ancestor is still flagged invisible.
+        Qt.callLater(function() { scanBtn.forceActiveFocus() })
     }
     function close() {
         root._open = false
         root.opacity = 0
+    }
+    function startScan() {
+        if (!scanBtn.enabled) return
+        scanBtn.scanning = true
+        statusText.text = ""
+        deviceModel.clear()
+        bridge.startScan()
     }
 
     Connections {
@@ -240,7 +247,25 @@ Rectangle {
         }
     }
 
-    // Keyboard: Esc closes
+    // Keyboard: Esc closes; `s` triggers a (re-)scan from anywhere in the
+    // dialog, so the user never has to tab back to the Scan button.
+    // Enter/Return is also handled here as a fallback when focus has moved
+    // to the device list (where Enter normally pairs the highlighted item):
+    // if there are no devices yet, route Enter to the scan button.
     Keys.onEscapePressed: root.close()
+    Keys.onPressed: (event) => {
+        if (event.modifiers & Qt.ControlModifier) return
+        if (event.key === Qt.Key_S) {
+            root.startScan()
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (deviceModel.count === 0) {
+                root.startScan()
+                event.accepted = true
+            }
+        }
+    }
     focus: _open
 }

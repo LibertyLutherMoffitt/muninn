@@ -7,13 +7,20 @@ import QtQuick.Controls
 //            on Enter, tab-completes via bridge.completeCommand.
 Rectangle {
     id: root
-    visible: opacity > 0
+    // Eager visibility so child controls are focusable the instant open()
+    // runs (same fix as ScanDialog).
+    visible: _open || opacity > 0
     opacity: 0
     color: Qt.rgba(0, 0, 0, 0.55)
     anchors.fill: parent
 
     property bool _open: false
-    readonly property bool isRawCommand: searchInput.text.startsWith(":")
+    // `_cmdMode` is the modern-Vim-plugin "command palette" mode: a `:`
+    // is shown as a prompt prefix (NOT in the input), typing filters the
+    // command list, Enter dispatches via vimEditor.execCommand.
+    property bool _cmdMode: false
+    // Old name kept for the orange border binding that already references it.
+    readonly property bool isRawCommand: _cmdMode
 
     signal convSelected(string convId)
 
@@ -61,17 +68,34 @@ Rectangle {
                 border.color: root.isRawCommand ? "#f59e0b" : "transparent"
                 border.width: 1
 
+                // ":" prompt shown only in command mode. Sized so the
+                // TextField sits flush against it.
+                Text {
+                    id: cmdPrompt
+                    visible: root._cmdMode
+                    anchors.left: parent.left
+                    anchors.leftMargin: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: ":"
+                    color: "#f59e0b"
+                    font.pixelSize: 16
+                    font.bold: true
+                }
+
                 TextField {
                     id: searchInput
                     anchors {
-                        left: parent.left; leftMargin: 10
+                        left: root._cmdMode ? cmdPrompt.right : parent.left
+                        leftMargin: root._cmdMode ? 4 : 10
                         right: parent.right; rightMargin: 10
                         verticalCenter: parent.verticalCenter
                     }
                     color: Theme.textPrimary
                     font.pixelSize: 14
                     // Default font (JetBrains Mono) is monospace already.
-                    placeholderText: "search peers / commands  (or :cmd args)"
+                    placeholderText: root._cmdMode
+                        ? "command — Tab completes, Enter runs"
+                        : "search peers / commands  (or :cmd args)"
                     background: null
                     selectByMouse: true
                     Keys.onEscapePressed: root.close()
@@ -80,25 +104,42 @@ Rectangle {
                     Keys.onPressed: (event) => {
                         // Tab — complete the current command/argument.
                         if (event.key === Qt.Key_Tab) {
-                            if (root.isRawCommand) {
+                            if (root._cmdMode) {
+                                // bridge.completeCommand strips/preserves a
+                                // leading colon — pass plain body and use
+                                // the returned body unchanged.
                                 const next = bridge.completeCommand(text)
-                                if (next && next !== text) {
-                                    text = next
+                                const stripped = next.startsWith(":")
+                                    ? next.substring(1) : next
+                                if (stripped !== text) {
+                                    text = stripped
                                     cursorPosition = text.length
                                 }
                             } else if (resultList.currentIndex >= 0) {
                                 const item = filteredModel.get(resultList.currentIndex)
                                 if (item && item.label) {
-                                    // For command items (label starts ":"),
-                                    // dropping into raw mode lets the user
-                                    // keep typing args; for peer items, just
-                                    // fill the name.
-                                    text = item.label.startsWith(":")
-                                        ? item.label + " "
-                                        : item.label
-                                    cursorPosition = text.length
+                                    // For command items, drop into cmdMode
+                                    // with the cmd loaded so the user can
+                                    // append args.
+                                    if (item.label.startsWith(":")) {
+                                        root._cmdMode = true
+                                        text = (item.cmd || item.label.substring(1))
+                                        cursorPosition = text.length
+                                        root.filterModel()
+                                    } else {
+                                        text = item.label
+                                        cursorPosition = text.length
+                                    }
                                 }
                             }
+                            event.accepted = true
+                            return
+                        }
+                        // Backspace at empty input in cmdMode exits cmdMode.
+                        if (event.key === Qt.Key_Backspace
+                            && root._cmdMode && text.length === 0) {
+                            root._cmdMode = false
+                            root.filterModel()
                             event.accepted = true
                             return
                         }
@@ -118,27 +159,37 @@ Rectangle {
                             return
                         }
                     }
-                    onTextChanged: filterModel()
+                    onTextChanged: {
+                        // Auto-promote to cmd mode if the user types `:`
+                        // first thing while in fuzzy mode.
+                        if (!root._cmdMode && text.startsWith(":")) {
+                            root._cmdMode = true
+                            text = text.substring(1)
+                            cursorPosition = text.length
+                        }
+                        root.filterModel()
+                    }
                     Component.onCompleted: if (root.visible) forceActiveFocus()
                 }
             }
 
-            // Hint shown in raw-command mode (results hidden).
+            // Hint shown in cmd mode below the input.
             Text {
-                visible: root.isRawCommand
+                visible: root._cmdMode
                 width: parent.width
                 color: Theme.textMuted
-                font.pixelSize: 12
-                wrapMode: Text.Wrap
-                text: "Enter to run · Tab to complete · Esc to cancel"
+                font.pixelSize: 11
+                text: "Tab completes · Enter runs · Backspace at empty exits cmd mode · Esc closes"
             }
 
-            // Results
+            // Results — shown in BOTH modes. In cmd mode it lists matching
+            // commands; in fuzzy mode it lists peers + commands.
             ListView {
                 id: resultList
-                visible: !root.isRawCommand
+                visible: true
                 width: parent.width
-                height: parent.height - inputBg.height - 8
+                height: parent.height - inputBg.height
+                    - (root._cmdMode ? 24 : 8)
                 model: ListModel { id: filteredModel }
                 currentIndex: 0
                 clip: true
@@ -185,23 +236,43 @@ Rectangle {
         }
     }
 
-    function open() {
-        searchInput.text = ""
+    function open(initial) {
+        const wantsCmd = (initial || "").startsWith(":")
+        // Strip the literal `:` — it's shown as a prompt, not text.
+        const body = wantsCmd ? initial.substring(1) : (initial || "")
+        root._cmdMode = wantsCmd
+        searchInput.text = body
+        searchInput.cursorPosition = body.length
         filterModel()
         root._open = true
         root.opacity = 1
-        searchInput.forceActiveFocus()
+        // Defer focus so the visibility binding has settled — same fix as
+        // ScanDialog. Without this, `:` from Vim normal mode loses the focus
+        // race against the Composer's TextEdit.
+        Qt.callLater(function() { searchInput.forceActiveFocus() })
     }
 
     function close() {
         root._open = false
         root.opacity = 0
+        root._cmdMode = false
+    }
+
+    // Window-space center of the search input, used by the cursor-trail
+    // overlay so the trail anchors to where typing actually happens.
+    function inputPos(target) {
+        return searchInput.mapToItem(target,
+            searchInput.width / 2,
+            searchInput.height / 2)
     }
 
     function activate() {
-        if (root.isRawCommand) {
-            const cmd = searchInput.text.substring(1)
-            bridge.runCommand(cmd)
+        if (root._cmdMode) {
+            const cmd = searchInput.text.trim()
+            if (!cmd) { root.close(); return }
+            // Route through Vim's exec so :wq/:x/:send flush the composer
+            // buffer first. execCommand strips a leading colon if present.
+            vimEditor.execCommand(cmd)
             // Keep palette open for commands that pop their own info menu —
             // Main.qml closes us when infoMenuRequested fires.
             const head = cmd.split(/\s+/)[0]
@@ -222,15 +293,16 @@ Rectangle {
             return
         }
         if (item.action === "cmd" && item.cmd) {
-            // Commands ending in a space expect an argument — switch the
-            // input into raw mode rather than running incomplete commands.
+            // Commands ending in a space expect an argument — drop into
+            // cmd mode with the partial loaded so the user can type args.
             if (item.cmd.endsWith(" ")) {
-                searchInput.text = ":" + item.cmd
+                root._cmdMode = true
+                searchInput.text = item.cmd
                 searchInput.cursorPosition = searchInput.text.length
+                root.filterModel()
                 return
             }
-            bridge.runCommand(item.cmd)
-            // Same data-command rule as raw mode.
+            vimEditor.execCommand(item.cmd)
             const head = item.cmd.split(/\s+/)[0]
             const dataCmd = ["list", "peers", "known", "help"]
                 .indexOf(head) >= 0
@@ -240,10 +312,37 @@ Rectangle {
         root.close()
     }
 
+    readonly property var _cmds: [
+        { icon: "⚡", label: ":scan",     sub: "open the bluetooth scan dialog",   action: "cmd", convId: "", cmd: "scan" },
+        { icon: "≡",  label: ":list",     sub: "list conversations",               action: "cmd", convId: "", cmd: "list" },
+        { icon: "●",  label: ":peers",    sub: "show direct + relay peers",        action: "cmd", convId: "", cmd: "peers" },
+        { icon: "○",  label: ":known",    sub: "show every known peer",            action: "cmd", convId: "", cmd: "known" },
+        { icon: "↻",  label: ":next",     sub: "next conversation (Ctrl-N)",       action: "cmd", convId: "", cmd: "next" },
+        { icon: "↺",  label: ":prev",     sub: "previous conversation (Ctrl-P)",   action: "cmd", convId: "", cmd: "prev" },
+        { icon: "✎",  label: ":nick",     sub: "set your display name",            action: "cmd", convId: "", cmd: "nick " },
+        { icon: "+",  label: ":new",      sub: "create group",                     action: "cmd", convId: "", cmd: "new " },
+        { icon: "↺",  label: ":history",  sub: "reload last N messages",           action: "cmd", convId: "", cmd: "history " },
+        { icon: "⌫",  label: ":clear",    sub: "clear visible messages",           action: "cmd", convId: "", cmd: "clear" },
+        { icon: "i",  label: ":help",     sub: "list all commands",                action: "cmd", convId: "", cmd: "help" },
+        { icon: "✕",  label: ":quit",     sub: "exit Muninn",                      action: "cmd", convId: "", cmd: "quit" },
+    ]
+
     function filterModel() {
         filteredModel.clear()
-        if (root.isRawCommand) return  // results hidden in raw mode
         const q = searchInput.text.toLowerCase()
+        if (root._cmdMode) {
+            // In cmd mode the body is the command query (no leading `:`).
+            // Match against the command name and its description.
+            const head = q.split(/\s+/)[0]
+            for (let j = 0; j < _cmds.length; j++) {
+                const c = _cmds[j]
+                const name = c.label.startsWith(":") ? c.label.substring(1) : c.label
+                if (!head || name.startsWith(head) || c.sub.toLowerCase().includes(head))
+                    filteredModel.append(c)
+            }
+            resultList.currentIndex = filteredModel.count > 0 ? 0 : -1
+            return
+        }
         const peers = bridge.knownPeers()
         for (let i = 0; i < peers.length; i++) {
             const p = peers[i]
@@ -261,25 +360,11 @@ Rectangle {
                 })
             }
         }
-        const cmds = [
-            { icon: "⚡", label: ":scan",     sub: "open the bluetooth scan dialog",   action: "cmd", convId: "", cmd: "scan" },
-            { icon: "≡",  label: ":list",     sub: "list conversations",               action: "cmd", convId: "", cmd: "list" },
-            { icon: "●",  label: ":peers",    sub: "show direct + relay peers",        action: "cmd", convId: "", cmd: "peers" },
-            { icon: "○",  label: ":known",    sub: "show every known peer",            action: "cmd", convId: "", cmd: "known" },
-            { icon: "↻",  label: ":next",     sub: "next conversation (Ctrl-N)",       action: "cmd", convId: "", cmd: "next" },
-            { icon: "↺",  label: ":prev",     sub: "previous conversation (Ctrl-P)",   action: "cmd", convId: "", cmd: "prev" },
-            { icon: "✎",  label: ":nick",     sub: "set your display name",            action: "cmd", convId: "", cmd: "nick " },
-            { icon: "+",  label: ":new",      sub: "create group",                     action: "cmd", convId: "", cmd: "new " },
-            { icon: "↺",  label: ":history",  sub: "reload last N messages",           action: "cmd", convId: "", cmd: "history " },
-            { icon: "⌫",  label: ":clear",    sub: "clear visible messages",           action: "cmd", convId: "", cmd: "clear" },
-            { icon: "i",  label: ":help",     sub: "list all commands",                action: "cmd", convId: "", cmd: "help" },
-            { icon: "✕",  label: ":quit",     sub: "exit Muninn",                      action: "cmd", convId: "", cmd: "quit" },
-        ]
-        for (let j = 0; j < cmds.length; j++) {
-            if (!q || cmds[j].label.includes(q) || cmds[j].sub.toLowerCase().includes(q))
-                filteredModel.append(cmds[j])
+        for (let j = 0; j < _cmds.length; j++) {
+            if (!q || _cmds[j].label.includes(q) || _cmds[j].sub.toLowerCase().includes(q))
+                filteredModel.append(_cmds[j])
         }
-        resultList.currentIndex = 0
+        resultList.currentIndex = filteredModel.count > 0 ? 0 : -1
     }
 
     Keys.onEscapePressed: root.close()

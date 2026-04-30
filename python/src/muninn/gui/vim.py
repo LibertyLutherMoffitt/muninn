@@ -36,6 +36,14 @@ _K = {
     "PageUp": 0x01000016,
     "PageDown": 0x01000017,
     "Tab": 0x01000001,
+    # Letter keys — needed because Qt may deliver Ctrl+letter with an empty
+    # `text` field on Linux (depends on the input method), so dispatch must
+    # fall back to key_code.
+    "B": 0x42,
+    "D": 0x44,
+    "F": 0x46,
+    "R": 0x52,
+    "U": 0x55,
 }
 
 _WORD_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -52,7 +60,7 @@ class VimEditor(QObject):
     sendRequested = Signal(str)  # text to send
     quitRequested = Signal()
     convCycleRequested = Signal(int)  # +1 / -1
-    paletteRequested = Signal()
+    paletteRequested = Signal(str)  # initial palette text ("" = fuzzy, ":…" = raw)
     scanRequested = Signal()
     commandRequested = Signal(str)  # raw command line w/o leading :
 
@@ -63,6 +71,9 @@ class VimEditor(QObject):
         self._mode = VimMode.NORMAL
         self._pending = ""  # chord accumulation
         self._count: int | None = None
+        # Count typed BEFORE an operator (e.g. the `2` in `2d3w`). Multiplied
+        # with the post-operator count to get the effective range.
+        self._pre_count: int | None = None
         self._reg = '"'  # active register name
         self._registers: dict[str, str] = {}
         # Whether each register holds a linewise (yy/dd) chunk vs charwise.
@@ -76,6 +87,11 @@ class VimEditor(QObject):
         self._redo_stack: list[tuple[str, int]] = []
         self._last_change: tuple | None = None  # for dot repeat
         self._last_col = 0  # remembered column for j/k
+        # Per-conversation drafts: switching conv saves the current buffer
+        # under the previous conv id and restores any saved buffer for the
+        # new conv. (text, cursor_pos, was_in_insert).
+        self._drafts: dict[str, tuple[str, int, bool]] = {}
+        self._active_conv: str = ""
 
     # ------------------------------------------------------------------
     # Properties
@@ -133,6 +149,24 @@ class VimEditor(QObject):
             self._emit()
             return
 
+        # Scroll the message view. INSERT mode is excluded so the existing
+        # Ctrl-U (delete-to-line-start) and Ctrl-W behaviors keep working
+        # while typing. Dispatch on key_code, not key_text, since Qt often
+        # delivers Ctrl+letter with an empty text field.
+        if ctrl and self._mode != VimMode.INSERT:
+            if key_code == _K["D"]:
+                self.scrollRequested.emit(0.5)
+                return
+            if key_code == _K["U"]:
+                self.scrollRequested.emit(-0.5)
+                return
+            if key_code == _K["F"]:
+                self.scrollRequested.emit(1.0)
+                return
+            if key_code == _K["B"]:
+                self.scrollRequested.emit(-1.0)
+                return
+
         if self._mode == VimMode.INSERT:
             self._handle_insert(key_text, key_code, ctrl, shift)
         elif self._mode == VimMode.CMDLINE:
@@ -151,6 +185,57 @@ class VimEditor(QObject):
             text = ":" + text.lstrip(":")
         self._cmd_buf = text
         self.cmdLineChanged.emit(self._cmd_buf)
+
+    @Slot(str)
+    def swapDraft(self, conv_id: str) -> None:
+        """Save the current buffer under the previous conv id and load any
+        saved draft for `conv_id`. Empty drafts are not stored.
+
+        Called from QML when `bridge.activeConvId` changes so that a half-
+        typed message stays attached to its recipient.
+        """
+        if conv_id == self._active_conv:
+            return
+        # Stash current buffer under the conv we are leaving.
+        if self._active_conv:
+            if self._buf:
+                self._drafts[self._active_conv] = (
+                    self._buf,
+                    self._pos,
+                    self._mode == VimMode.INSERT,
+                )
+            else:
+                # Empty draft — drop any previous entry so we don't restore
+                # stale text after the user clears their composer.
+                self._drafts.pop(self._active_conv, None)
+        self._active_conv = conv_id
+        # Load the new conv's draft (or clear).
+        draft = self._drafts.get(conv_id)
+        # Reset transient chord state — any pending operator from the prior
+        # conv must not leak across the switch.
+        self._pending = ""
+        self._count = None
+        self._pre_count = None
+        if draft is not None:
+            text, pos, was_insert = draft
+            self._buf = text
+            self._pos = max(0, min(pos, len(text)))
+            target_mode = VimMode.INSERT if was_insert else VimMode.NORMAL
+        else:
+            self._buf = ""
+            self._pos = 0
+            target_mode = VimMode.NORMAL
+        if self._mode != target_mode:
+            self._mode = target_mode
+            self.modeChanged.emit(target_mode.name)
+        self._emit()
+
+    @Slot(str)
+    def execCommand(self, cmd: str) -> None:
+        """Run a colon command. Used by the palette's raw `:` mode so the
+        composer-buffer-flush rules for `:wq`/`:x`/`:send` live in one place.
+        """
+        self._exec_cmd(cmd)
 
     @Slot()
     def clear(self) -> None:
@@ -259,24 +344,29 @@ class VimEditor(QObject):
     def _handle_normal(
         self, key_text: str, key_code: int, ctrl: bool, shift: bool
     ) -> None:
-        # Ctrl combos
+        # Ctrl combos (use key_code — Qt may deliver empty `text` for Ctrl+R)
         if ctrl:
-            k = key_text.lower()
-            if k == "r":
+            if key_code == _K["R"]:
                 self._do_redo()
                 return
             return
 
-        # Count accumulation
-        if not self._pending and key_text.isdigit():
+        # Count accumulation. Allowed both before any chord and while an
+        # operator is pending (so `d2w`, `c3l`, `5~`, `2y$` all work).
+        if key_text.isdigit():
             digit = int(key_text)
-            if digit != 0 or self._count is not None:
+            mid_op = self._pending in ("d", "c", "y", ">", "<", "")
+            if (digit != 0 or self._count is not None) and mid_op:
                 self._count = (self._count or 0) * 10 + digit
                 return
 
-        # Operator-pending: d, c, y, >, <
+        # Operator-pending: d, c, y, >, <. Stash any pre-count and start
+        # a fresh post-count so `2d2w` multiplies (= 4 words).
         if not self._pending and key_text in 'dcyg><frFtTZ" ':
             self._pending = key_text
+            if key_text in "dcy><":
+                self._pre_count = self._count
+                self._count = None
             return
 
         # Register select
@@ -296,18 +386,20 @@ class VimEditor(QObject):
                 return
 
             if p == "r":
-                if (
-                    self._pos < len(self._buf)
-                    and key_text
-                    and self._buf[self._pos] != "\n"
-                ):
-                    self._push_undo()
-                    self._buf = (
-                        self._buf[: self._pos]
-                        + key_text[0]
-                        + self._buf[self._pos + 1 :]
-                    )
-                    self._emit()
+                if key_text and self._pos < len(self._buf):
+                    line_end = self._line_end(self._pos)
+                    n = min(count, line_end - self._pos)
+                    if n > 0:
+                        self._push_undo()
+                        self._buf = (
+                            self._buf[: self._pos]
+                            + key_text[0] * n
+                            + self._buf[self._pos + n :]
+                        )
+                        self._pos = self._pos + n - 1
+                        self._last_change = ("r", count, key_text[0])
+                        self._clamp_normal()
+                        self._emit()
                 return
 
             if p in "fFtT":
@@ -329,7 +421,7 @@ class VimEditor(QObject):
                 if key_text == "y":
                     self._pending = "\x00"  # clipboard-yank operator
                 elif key_text == "f":
-                    self.paletteRequested.emit()
+                    self.paletteRequested.emit("")
                     self._pending = ""
                 elif key_text == "s":
                     self.scanRequested.emit()
@@ -343,33 +435,45 @@ class VimEditor(QObject):
                 self._do_operator("y", key_text, count, clipboard=True)
                 return
 
-            # Text object completion: _di + char, _ca + char, etc.
+            # Three-char chord state from `_do_operator` deferral:
+            #   _<op><i|a>  → text object (waiting for object char)
+            #   _<op><f|F|t|T>  → find-char motion (waiting for target char)
+            #   _<op>g     → g-prefix motion (waiting for g/e/E)
             if len(p) == 3 and p[0] == "_":
                 op = p[1]
-                kind = p[2]  # "i" = inner, "a" = around
-                rng = self._text_object(kind, key_text)
-                if rng:
-                    start, end = rng
-                    text = self._buf[start:end]
-                    if op == "d":
-                        self._push_undo()
-                        self._store_reg(text)
-                        self._buf = self._buf[:start] + self._buf[end:]
-                        self._pos = start
-                        self._clamp_normal()
-                        self._last_change = ("d_obj", count, kind, key_text)
-                        self._emit()
-                    elif op == "c":
-                        self._push_undo()
-                        self._store_reg(text)
-                        self._buf = self._buf[:start] + self._buf[end:]
-                        self._pos = start
-                        self._enter_mode(VimMode.INSERT)
-                        self._last_change = ("c_obj", count, kind, key_text)
-                        self._emit()
-                    elif op == "y":
-                        self._store_reg(text)
-                        self._emit()
+                kind = p[2]
+                if kind in ("i", "a"):
+                    rng = self._text_object(kind, key_text)
+                    if rng:
+                        self._apply_op_range(
+                            op,
+                            rng[0],
+                            rng[1],
+                            change=("op_obj", op, count, kind, key_text),
+                        )
+                    return
+                if kind in ("f", "F", "t", "T"):
+                    if key_text:
+                        self._last_find = (kind, key_text)
+                        rng = self._find_motion_range(kind, key_text, count)
+                        if rng[0] is not None:
+                            self._apply_op_range(
+                                op,
+                                rng[0],
+                                rng[1],
+                                change=("op_find", op, count, kind, key_text),
+                            )
+                    return
+                if kind == "g":
+                    rng = self._g_motion_range(key_text, count)
+                    if rng[0] is not None:
+                        self._apply_op_range(
+                            op,
+                            rng[0],
+                            rng[1],
+                            change=("op_g", op, count, key_text),
+                        )
+                    return
                 return
 
             # Operators: d, c, y, >, <
@@ -632,18 +736,29 @@ class VimEditor(QObject):
                 self._pos = le
             self._emit()
 
-        # Toggle case
+        # Toggle case (count chars, bounded to current line)
         elif key_text == "~":
-            if self._pos < len(self._buf) and self._buf[self._pos] != "\n":
-                self._push_undo()
-                ch = self._buf[self._pos]
-                toggled = ch.lower() if ch.isupper() else ch.upper()
-                self._buf = (
-                    self._buf[: self._pos] + toggled + self._buf[self._pos + 1 :]
-                )
-                self._pos = min(self._pos + 1, self._line_end(self._pos) - 1)
-                self._clamp_normal()
-                self._emit()
+            if self._pos < len(self._buf):
+                line_end = self._line_end(self._pos)
+                n = min(count, line_end - self._pos)
+                if n > 0:
+                    self._push_undo()
+                    chars = []
+                    for i in range(n):
+                        ch = self._buf[self._pos + i]
+                        chars.append(ch.lower() if ch.isupper() else ch.upper())
+                    self._buf = (
+                        self._buf[: self._pos]
+                        + "".join(chars)
+                        + self._buf[self._pos + n :]
+                    )
+                    new_pos = self._pos + n
+                    if line_end > 0:
+                        new_pos = min(new_pos, line_end - 1)
+                    self._pos = new_pos
+                    self._last_change = ("~", count)
+                    self._clamp_normal()
+                    self._emit()
 
         # Repeat find
         elif key_text == ";":
@@ -675,9 +790,11 @@ class VimEditor(QObject):
             self._enter_mode(VimMode.VISUAL_LINE)
             self._emit_selection()
 
-        # Command line
+        # `:` opens the command palette in raw-command mode (modern-Vim
+        # plugin style) instead of a separate cmdline strip. The palette
+        # owns dispatch via `commandRequested`.
         elif key_text == ":":
-            self._enter_cmdline(":")
+            self.paletteRequested.emit(":")
 
     # ------------------------------------------------------------------
     # Operator handling (d, c, y, >, <)
@@ -686,10 +803,19 @@ class VimEditor(QObject):
     def _do_operator(
         self, op: str, motion: str, count: int, *, clipboard: bool = False
     ) -> None:
-        # Text object prefix: operator + i/a → wait for object char
+        # Two-key motions need a follow-up char. Defer and re-enter via
+        # `_handle_normal`'s chord-completion block.
         if motion in ("i", "a") and op in "dcy":
             self._pending = f"_{op}{motion}"  # e.g. "_di", "_ca"
-            self._count = count  # preserve count for next key
+            self._count = count
+            return
+        if motion in ("f", "F", "t", "T") and op in "dcy><":
+            self._pending = f"_{op}{motion}"  # e.g. "_df"
+            self._count = count
+            return
+        if motion == "g" and op in "dcy><":
+            self._pending = f"_{op}g"
+            self._count = count
             return
 
         # dd, cc, yy = line-wise; counts extend across N consecutive lines
@@ -829,8 +955,102 @@ class VimEditor(QObject):
                 target = self._move_up_col(target, 0)
             tls = self._line_start(target)
             return (tls, end)
+        elif motion == "G":
+            # Linewise: from current line start to end of buffer.
+            return (self._line_start(pos), len(self._buf))
+        elif motion in (";", ","):
+            if self._last_find is None:
+                return (None, None)
+            op_ch, ch = self._last_find
+            if motion == ",":
+                op_ch = {"f": "F", "F": "f", "t": "T", "T": "t"}.get(op_ch, op_ch)
+            return self._find_motion_range(op_ch, ch, count)
 
         return (None, None)
+
+    def _find_motion_range(
+        self, op_ch: str, ch: str, count: int
+    ) -> tuple[int | None, int | None]:
+        """Range covered by f/F/t/T<ch> from the cursor.
+
+        Forward variants extend to (or just before) the target char on the
+        current line; backward variants extend back to it.
+        """
+        pos = self._pos
+        target = pos
+        for _ in range(count):
+            target = self._do_find_char(op_ch, ch, target)
+        if target == pos:
+            return (None, None)  # no match this line
+        if op_ch == "f":
+            return (pos, target + 1)  # inclusive of found char
+        if op_ch == "t":
+            return (pos, target + 1)  # _do_find_char returned idx-1; +1 = idx
+        if op_ch == "F":
+            return (target, pos)  # cursor's char preserved
+        if op_ch == "T":
+            return (target, pos)  # _do_find_char returned idx+1
+        return (None, None)
+
+    def _g_motion_range(self, second: str, count: int) -> tuple[int | None, int | None]:
+        pos = self._pos
+        if second == "g":
+            # gg: linewise from start of buffer through end of current line.
+            le = self._line_end(pos)
+            end = le + 1 if le < len(self._buf) and self._buf[le] == "\n" else le
+            return (0, end)
+        if second == "e":
+            target = pos
+            for _ in range(count):
+                target = self._word_end_back(target, False)
+            return (target, pos + 1)
+        if second == "E":
+            target = pos
+            for _ in range(count):
+                target = self._word_end_back(target, True)
+            return (target, pos + 1)
+        return (None, None)
+
+    def _apply_op_range(
+        self,
+        op: str,
+        start: int | None,
+        end: int | None,
+        *,
+        change: tuple,
+        clipboard: bool = False,
+    ) -> None:
+        if start is None or end is None or start >= end:
+            return
+        text = self._buf[start:end]
+        if op == "d":
+            self._push_undo()
+            self._store_reg(text, clipboard=clipboard)
+            self._buf = self._buf[:start] + self._buf[end:]
+            self._pos = start
+            self._clamp_normal()
+            self._last_change = change
+            self._emit()
+        elif op == "c":
+            self._push_undo()
+            self._store_reg(text, clipboard=clipboard)
+            self._buf = self._buf[:start] + self._buf[end:]
+            self._pos = start
+            self._enter_mode(VimMode.INSERT)
+            self._last_change = change
+            self._emit()
+        elif op == "y":
+            self._store_reg(text, clipboard=clipboard)
+            # Cursor stays put on yank (vim).
+            self._emit()
+        elif op == ">":
+            self._push_undo()
+            self._indent_range(start, end, "    ")
+            self._emit()
+        elif op == "<":
+            self._push_undo()
+            self._dedent_range(start, end, "    ")
+            self._emit()
 
     # ------------------------------------------------------------------
     # g-commands
@@ -1058,12 +1278,36 @@ class VimEditor(QObject):
         if not self._last_change:
             return
         lc = self._last_change
-        if lc[0] == "dd":
+        tag = lc[0]
+        if tag == "dd":
             self._do_operator("d", "d", lc[1])
-        elif lc[0] == "cc":
+        elif tag == "cc":
             self._do_operator("c", "c", lc[1])
-        elif lc[0] in ("d", "c") and len(lc) >= 3:
+        elif tag in ("d", "c") and len(lc) >= 3:
             self._do_operator(lc[0], lc[2], lc[1])
+        elif tag == "op_obj":
+            _, op, _count, kind, ch = lc
+            rng = self._text_object(kind, ch)
+            if rng:
+                self._apply_op_range(op, rng[0], rng[1], change=lc)
+        elif tag == "op_find":
+            _, op, count, kind, ch = lc
+            rng = self._find_motion_range(kind, ch, count)
+            if rng[0] is not None:
+                self._apply_op_range(op, rng[0], rng[1], change=lc)
+        elif tag == "op_g":
+            _, op, count, second = lc
+            rng = self._g_motion_range(second, count)
+            if rng[0] is not None:
+                self._apply_op_range(op, rng[0], rng[1], change=lc)
+        elif tag == "r":
+            self._count = lc[1]
+            # Re-enter `r` chord, then feed the char.
+            self._pending = "r"
+            self.handleKey(lc[2], 0, False, False, False)
+        elif tag == "~":
+            self._count = lc[1]
+            self.handleKey("~", 0, False, False, False)
 
     # ------------------------------------------------------------------
     # Register helpers
@@ -1117,9 +1361,15 @@ class VimEditor(QObject):
     # ------------------------------------------------------------------
 
     def _pop_count(self) -> int:
-        c = self._count if self._count is not None else 1
+        """Combined pre- and post-operator count.
+
+        Vim semantics: `2d3w` ⇒ 6 words. `2dw` ⇒ 2. `d3w` ⇒ 3. `dw` ⇒ 1.
+        """
+        pre = self._pre_count if self._pre_count is not None else 1
+        post = self._count if self._count is not None else 1
         self._count = None
-        return c
+        self._pre_count = None
+        return pre * post
 
     def _enter_mode(self, mode: VimMode) -> None:
         if self._mode != mode:
@@ -1141,7 +1391,10 @@ class VimEditor(QObject):
             self.sendRequested.emit(text)
         self._buf = ""
         self._pos = 0
-        self._enter_mode(VimMode.NORMAL)
+        # Stay in INSERT after a send so the user can keep typing the next
+        # message without re-entering insert mode. Other modes drop to NORMAL.
+        if self._mode != VimMode.INSERT:
+            self._enter_mode(VimMode.NORMAL)
         self._emit()
 
     def _push_undo(self) -> None:

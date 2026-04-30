@@ -99,7 +99,7 @@ Rationale: correctness > slickness. Shared `ConnectionManager` across processes 
 - **Peer list (left rail)** — scrollable. Ordered **last-activity first** (most recent message in or out, direct or relayed, floats to top). Row shows initial-avatar, display name, last-msg preview, unread badge, connection dot (direct / indirect / offline).
 - **Chat pane (right)** — header (peer name, fingerprint, status), scrollback, composer.
 - **Status bar** — local nick, connected-peer count, writer/reader indicator.
-- **Command palette** — `Ctrl-p` fuzzy picker for peers / commands.
+- **Command palette** — `<space>f` fuzzy picker for peers / commands (also `:palette` / `:find` / `:f`).
 
 ### Animations (GPU-composited, budget ≤150 ms each)
 
@@ -405,3 +405,11 @@ QML as context properties, not as a separate `Theme.qml` singleton.
 - **Window geometry persistence** — **deferred.** Window opens at a sensible default size each run; revisit post-MVP.
 - **Render backend fallback** — **ship and ignore.** If the user has no GPU accel, animations degrade gracefully; no special "reduce motion" path.
 - **About-dialog placement** — both `:about` command and a menu entry.
+
+## TODO
+- cursor trail faster, more fps, smoother 
+    - trail to go to where the cursor is in the palette not the center of the palette
+- have the message preview under each chat work always (currently only has one if a message has been sent/received since opening the app)
+- desktop notifications
+- have a button to manually open the palette in addition to the keybinds
+- when switching to a next chat, start at the bottom instead of at the top (it's annoying to have to scroll down to the most recent message every time I go back to a dm)

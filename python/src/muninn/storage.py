@@ -24,6 +24,22 @@ SCHEMA_VERSION = 1
 _GROUP_ZERO = b"\x00" * 16
 
 
+def _row_ack_state(
+    sender: str,
+    local_mac: str,
+    acked_at: int | None,
+    read_at: int | None,
+) -> str:
+    """Map (sender, local_mac, acked_at, read_at) to a UI ack-state label."""
+    if sender != local_mac:
+        return "read"  # inbound — local user is reading it now
+    if read_at is not None:
+        return "read"
+    if acked_at is not None:
+        return "acked"
+    return "sent"
+
+
 def default_db_path() -> Path:
     """XDG-compliant on Linux; APPDATA on Windows; $HOME/.muninn fallback."""
     if os.name == "nt":
@@ -287,29 +303,53 @@ class Storage:
 
     def load_dm_history(
         self, local_mac: str, peer: str, limit: int
-    ) -> list[tuple[bytes, str, str, int]]:
+    ) -> list[tuple[bytes, str, str, int, str]]:
         """Recent DM history with `peer`, oldest-first.
 
-        AND peer listed in message_recipients).
+        Each row is `(msg_id, sender, body, ts, ack_state)`. For outbound
+        rows, `ack_state` reflects the per-recipient `acked_at` / `read_at`
+        timestamps. Inbound rows are always `"read"` — the local user is
+        looking at them right now.
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT msg_id, sender, body, ts FROM ("
-                "  SELECT m.msg_id, m.sender, m.body, m.ts FROM messages m "
-                "  WHERE m.group_id = ? AND ("
-                "    m.sender = ? OR "
-                "    (m.sender = ? AND m.msg_id IN "
+                "SELECT m.msg_id, m.sender, m.body, m.ts, "
+                "       r.acked_at, r.read_at "
+                "FROM messages m "
+                "LEFT JOIN message_recipients r "
+                "  ON r.msg_id = m.msg_id AND r.recipient = ? "
+                "WHERE m.msg_id IN ("
+                "  SELECT m2.msg_id FROM messages m2 "
+                "  WHERE m2.group_id = ? AND ("
+                "    m2.sender = ? OR "
+                "    (m2.sender = ? AND m2.msg_id IN "
                 "      (SELECT msg_id FROM message_recipients WHERE recipient = ?))"
-                "  ) ORDER BY m.ts DESC LIMIT ?"
-                ") ORDER BY ts ASC",
-                (_GROUP_ZERO, peer, local_mac, peer, limit),
+                "  ) ORDER BY m2.ts DESC LIMIT ?"
+                ") ORDER BY m.ts ASC",
+                (peer, _GROUP_ZERO, peer, local_mac, peer, limit),
             ).fetchall()
-        return [(bytes(r[0]), r[1], r[2], r[3]) for r in rows]
+        return [
+            (
+                bytes(r[0]),
+                r[1],
+                r[2],
+                r[3],
+                _row_ack_state(r[1], local_mac, r[4], r[5]),
+            )
+            for r in rows
+        ]
 
     def load_group_history(
-        self, group_id: bytes, limit: int
-    ) -> list[tuple[bytes, str, str, int]]:
-        """Recent group history, oldest-first."""
+        self, group_id: bytes, local_mac: str, limit: int
+    ) -> list[tuple[bytes, str, str, int, str]]:
+        """Recent group history, oldest-first.
+
+        Each row is `(msg_id, sender, body, ts, ack_state)`. For outbound
+        group messages, `ack_state` is the worst across recipients: `"sent"`
+        if any recipient hasn't acked, `"acked"` if all acked but not all
+        read, `"read"` if every recipient has read.
+        """
+        out: list[tuple[bytes, str, str, int, str]] = []
         with self._lock:
             rows = self._conn.execute(
                 "SELECT msg_id, sender, body, ts FROM ("
@@ -318,7 +358,36 @@ class Storage:
                 ") ORDER BY ts ASC",
                 (group_id, limit),
             ).fetchall()
-        return [(bytes(r[0]), r[1], r[2], r[3]) for r in rows]
+            for r in rows:
+                msg_id = bytes(r[0])
+                sender = r[1]
+                if sender != local_mac:
+                    state = "read"
+                else:
+                    state = self._aggregate_recipient_state(msg_id)
+                out.append((msg_id, sender, r[2], r[3], state))
+        return out
+
+    def _aggregate_recipient_state(self, msg_id: bytes) -> str:
+        rows = self._conn.execute(
+            "SELECT acked_at, read_at FROM message_recipients WHERE msg_id = ?",
+            (msg_id,),
+        ).fetchall()
+        if not rows:
+            return "sent"
+        all_acked = True
+        all_read = True
+        for acked_at, read_at in rows:
+            if acked_at is None:
+                all_acked = False
+                all_read = False
+            if read_at is None:
+                all_read = False
+        if all_read:
+            return "read"
+        if all_acked:
+            return "acked"
+        return "sent"
 
     def load_unacked_outbound(self, local_mac: str) -> list[UnackedMessage]:
         """Messages we sent that still have recipients without an ACK."""

@@ -20,6 +20,15 @@ Rectangle {
     property bool writerMode: bridge.isWriter
     property string convId: bridge.activeConvId
 
+    // Window-space position of the composer's text cursor, for the cursor
+    // trail overlay. Returns null when there is no cursor (empty buffer).
+    function cursorPos(target) {
+        const r = edit.cursorRectangle
+        return edit.mapToItem(target,
+            r.x + r.width / 2,
+            r.y + r.height / 2)
+    }
+
     // Vim mode highlight (fades smoothly between modes)
     Rectangle {
         anchors.fill: parent

@@ -204,7 +204,7 @@ class ChatUI:
         if storage is None:
             return
         conv_type, key = conv_key
-        msgs: list[tuple[bytes, str, str, int]]
+        msgs: list[tuple[bytes, str, str, int, str]]
         if conv_type == "dm":
             assert isinstance(key, str)
             peer_name = self._name(key)
@@ -213,7 +213,7 @@ class ChatUI:
                 return
             plural = "s" if len(msgs) != 1 else ""
             self._display(f"--- {len(msgs)} previous message{plural} ---")
-            for _msg_id, sender, body, ts in msgs:
+            for _msg_id, sender, body, ts, _ack in msgs:
                 t = time.strftime("%H:%M", time.localtime(ts))
                 arrow = ">" if sender == self.local_mac else "<"
                 self._display(f"  {t} [DM:{peer_name}] {arrow} {body}")
@@ -221,12 +221,12 @@ class ChatUI:
             assert isinstance(key, bytes)
             group = self.group_store.groups.get(key)
             gname = group.name if group else "?"
-            msgs = storage.load_group_history(key, limit)
+            msgs = storage.load_group_history(key, self.local_mac, limit)
             if not msgs:
                 return
             plural = "s" if len(msgs) != 1 else ""
             self._display(f"--- {len(msgs)} previous message{plural} ---")
-            for _msg_id, sender, body, ts in msgs:
+            for _msg_id, sender, body, ts, _ack in msgs:
                 t = time.strftime("%H:%M", time.localtime(ts))
                 if sender == self.local_mac:
                     self._display(f"  {t} [{gname}] > {body}")

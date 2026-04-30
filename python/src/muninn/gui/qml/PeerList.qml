@@ -10,6 +10,24 @@ Rectangle {
 
     signal convSelected(string convId)
 
+    // Window-space center of the row for `convId`, or null if the row is
+    // not currently realized (off-screen / unknown). Used by the cursor-
+    // trail overlay.
+    function rowPos(convId, target) {
+        for (let i = 0; i < listView.count; i++) {
+            const idx = listView.model.index(i, 0)
+            const conv = listView.model.data(idx, Qt.UserRole + 3)
+            if (conv === convId) {
+                const item = listView.itemAtIndex(i)
+                if (!item) return null
+                return listView.mapToItem(target,
+                    item.x + item.width / 2,
+                    item.y + item.height / 2)
+            }
+        }
+        return null
+    }
+
     ListView {
         id: listView
         anchors.fill: parent

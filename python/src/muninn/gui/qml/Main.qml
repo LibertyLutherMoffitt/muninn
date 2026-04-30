@@ -134,13 +134,21 @@ ApplicationWindow {
         sequence: "Ctrl+N"
         context: Qt.ApplicationShortcut
         enabled: !root.overlayOpen
-        onActivated: bridge.cycleConv(1)
+        onActivated: {
+            const prev = bridge.activeConvId
+            bridge.cycleConv(1)
+            root._trailConvCycle(prev, bridge.activeConvId)
+        }
     }
     Shortcut {
         sequence: "Ctrl+P"
         context: Qt.ApplicationShortcut
         enabled: !root.overlayOpen
-        onActivated: bridge.cycleConv(-1)
+        onActivated: {
+            const prev = bridge.activeConvId
+            bridge.cycleConv(-1)
+            root._trailConvCycle(prev, bridge.activeConvId)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -167,6 +175,39 @@ ApplicationWindow {
             bridge.setActiveConv(convId)
             chatPane.forceActiveFocus()
         }
+    }
+
+    // Top-most overlay: animated dots that fly along a polyline whenever
+    // focus jumps between the composer, the palette, or a peer-list row.
+    // Drawn above every dialog so trails are visible as overlays open.
+    CursorTrail {
+        id: cursorTrail
+        anchors.fill: parent
+        z: 100
+    }
+
+    // mapToItem requires a QQuickItem; ApplicationWindow's `root` is a
+    // Window, not an Item — so all coordinates are mapped into the trail
+    // overlay's own coord space (it already fills the content area).
+    function _trailComposerToPalette() {
+        const a = chatPane.cursorPos(cursorTrail)
+        const b = cmdPalette.inputPos(cursorTrail)
+        cursorTrail.trail([a, b])
+    }
+    function _trailPaletteToComposer() {
+        const a = cmdPalette.inputPos(cursorTrail)
+        const b = chatPane.cursorPos(cursorTrail)
+        cursorTrail.trail([a, b])
+    }
+    function _trailConvCycle(prevConv, nextConv) {
+        const composer = chatPane.cursorPos(cursorTrail)
+        const rowA = peerList.rowPos(prevConv, cursorTrail)
+        const rowB = peerList.rowPos(nextConv, cursorTrail)
+        const path = [composer]
+        if (rowA) path.push(rowA)
+        if (rowB) path.push(rowB)
+        path.push(composer)
+        cursorTrail.trail(path)
     }
 
     // Toast (errors red, info neutral). Fades in/out for smoothness.
@@ -216,12 +257,16 @@ ApplicationWindow {
         function onErrorOccurred(msg) { toast.show(msg, true) }
         function onNotify(msg) { toast.show(msg, false) }
         function onActiveConvChanged(convId) {
+            // Save the outgoing conv's draft and load this one's. Per-conv
+            // drafts let the user start a message in DM A, switch to DM B,
+            // then return to DM A and finish without losing anything.
+            vimEditor.swapDraft(convId)
             chatPane.forceActiveFocus()
         }
         function onQuitRequested() { Qt.quit() }
         function onScanRequested() { scanDialog.open() }
         function onPaletteRequested() {
-            if (!cmdPalette.visible) cmdPalette.open()
+            if (!cmdPalette.visible) cmdPalette.open("")
         }
         function onInfoMenuRequested(title, items) {
             // If the palette is still open (raw `:` command path), close it
@@ -235,17 +280,22 @@ ApplicationWindow {
         target: vimEditor
         function onQuitRequested() { Qt.quit() }
         function onConvCycleRequested(d) { bridge.cycleConv(d) }
-        function onPaletteRequested() { cmdPalette.open() }
+        function onPaletteRequested(initial) { cmdPalette.open(initial) }
         function onScanRequested() { scanDialog.open() }
         function onCommandRequested(cmd) { bridge.runCommand(cmd) }
     }
 
-    // Restore focus to the chat pane whenever an overlay closes.
+    // Restore focus to the chat pane whenever an overlay closes, and fire
+    // a cursor trail in/out of the palette as it opens/closes.
     Connections {
         target: cmdPalette
         function onVisibleChanged() {
-            if (!cmdPalette.visible && !infoMenu.visible)
-                chatPane.forceActiveFocus()
+            if (cmdPalette.visible) {
+                root._trailComposerToPalette()
+            } else {
+                if (!infoMenu.visible) chatPane.forceActiveFocus()
+                root._trailPaletteToComposer()
+            }
         }
     }
     Connections {

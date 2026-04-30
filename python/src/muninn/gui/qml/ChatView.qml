@@ -6,9 +6,15 @@ Item {
     id: root
     property string convId: bridge.activeConvId
     clip: true
-    
+
     // Pass focus down to composer
     onActiveFocusChanged: if (activeFocus) composer.forceActiveFocus()
+
+    // Window-space position of the composer cursor, used by the cursor-
+    // trail overlay so trails can fly out of / into the typing position.
+    function cursorPos(target) {
+        return composer.cursorPos(target)
+    }
 
     // Background
     Rectangle {

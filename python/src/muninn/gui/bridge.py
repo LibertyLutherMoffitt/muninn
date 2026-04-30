@@ -673,7 +673,9 @@ class ChatBridge(QObject):
         if conv_id.startswith("dm:"):
             rows = self._storage.load_dm_history(self._local_mac, conv_id[3:], n)
         elif conv_id.startswith("group:"):
-            rows = self._storage.load_group_history(bytes.fromhex(conv_id[6:]), n)
+            rows = self._storage.load_group_history(
+                bytes.fromhex(conv_id[6:]), self._local_mac, n
+            )
         else:
             return
         self._msg_model.load_history(rows, self._local_mac, self._gs.display_name)
@@ -740,7 +742,7 @@ class ChatBridge(QObject):
             rows = self._storage.load_dm_history(self._local_mac, addr, 50)
         elif conv_id.startswith("group:"):
             gid = bytes.fromhex(conv_id[6:])
-            rows = self._storage.load_group_history(gid, 50)
+            rows = self._storage.load_group_history(gid, self._local_mac, 50)
         else:
             self._msg_model.clear()
             return

@@ -228,8 +228,19 @@ class MessageListModel(QAbstractListModel):
                 break
 
     def load_history(
-        self, rows: list[tuple[bytes, str, str, int]], local_mac: str, name_fn
+        self,
+        rows: list[tuple[bytes, str, str, int, str]],
+        local_mac: str,
+        name_fn,
     ) -> None:
+        """Replace messages with stored history.
+
+        Each row is `(msg_id, sender, body, ts, ack_state)` — `ack_state`
+        comes from `Storage`, which derives it from per-recipient
+        `acked_at` / `read_at` timestamps. Reusing the canonical state
+        avoids the old bug where every reload flipped unacked outbound
+        messages to "read".
+        """
         self.beginResetModel()
         self._messages = [
             {
@@ -239,9 +250,9 @@ class MessageListModel(QAbstractListModel):
                 "text": body,
                 "timestamp": ts,
                 "isOutbound": sender == local_mac,
-                "ackState": ACK_READ,
+                "ackState": ack,
             }
-            for mid, sender, body, ts in rows
+            for mid, sender, body, ts, ack in rows
         ]
         self.endResetModel()
 

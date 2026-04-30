@@ -12,10 +12,21 @@ source tree — they are pulled in as separate artifacts by `pip` (PyPI) or
 | PySide6     | LGPL-3.0-only      | Python bindings to Qt 6                                 |
 | PyNaCl      | Apache-2.0         | Python wrapper around libsodium (X25519 + XSalsa20-Poly1305) |
 | libsodium   | ISC                | Bundled native library inside PyNaCl wheels             |
-| dbus-python | MIT / Academic Free License 2.1 | D-Bus client (Linux BlueZ backend)         |
+| dbus-python | MIT (also offered under Academic Free License 2.1) | D-Bus client (Linux BlueZ backend) |
 | PyGObject   | LGPL-2.1-or-later  | GLib mainloop binding (Linux BlueZ backend)             |
 | winrt-runtime, winrt-Windows.* | MIT | WinRT projection (Windows BT backend)            |
 | JetBrains Mono | SIL Open Font License 1.1 | Default UI font (used if installed; otherwise the OS substitutes a monospace face) |
+
+### Build-time tools (not redistributed in the source tree)
+
+These appear in `pyproject.toml` but are not part of the runtime artifact, so
+they do not impose attribution obligations on end users of Muninn. Listed for
+completeness.
+
+| Tool        | License            | Role                                                    |
+|-------------|--------------------|---------------------------------------------------------|
+| setuptools  | MIT                | PEP 517 build backend (`[build-system]` requires)       |
+| PyInstaller | GPL-2.0-or-later with bootloader exception | Optional `[windows-build]` extra used to produce a standalone `muninn.exe`. The bootloader exception explicitly permits bundling non-GPL applications; PyInstaller itself is not pulled into the resulting binary |
 
 ## LGPL compliance
 
