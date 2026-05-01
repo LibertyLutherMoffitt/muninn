@@ -69,7 +69,7 @@ Rectangle {
                 id: itemList
                 width: parent.width
                 height: parent.height - header.height - 16
-                model: ListModel { id: itemModel }
+                model: ListModel { id: itemModel; dynamicRoles: true }
                 currentIndex: 0
                 clip: true
                 spacing: 2
@@ -157,6 +157,8 @@ Rectangle {
         if (!item) { root.close(); return }
         if (item.convId) {
             root.convSelected(item.convId)
+        } else if (item.action === "url" && item.url) {
+            Qt.openUrlExternally(item.url)
         }
         root.close()
     }

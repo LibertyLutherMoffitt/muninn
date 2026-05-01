@@ -7,8 +7,17 @@ via handleKey(); Python emits bufferUpdated(text, cursor) to drive the view.
 from __future__ import annotations
 
 import enum
+import os
+import sys
 from PySide6.QtCore import Property, QObject, Signal, Slot
 from PySide6.QtGui import QClipboard, QGuiApplication
+
+_VIM_DEBUG = bool(os.environ.get("MUNINN_VIM_DEBUG"))
+
+
+def _dbg(msg: str) -> None:
+    if _VIM_DEBUG:
+        print(f"[vim] {msg}", file=sys.stderr, flush=True)
 
 
 class VimMode(enum.Enum):
@@ -129,6 +138,12 @@ class VimEditor(QObject):
         shift: bool,
         alt: bool,
     ) -> None:
+        _dbg(
+            f"handleKey text={key_text!r} code=0x{key_code:x} "
+            f"ctrl={ctrl} shift={shift} mode={self._mode.name} "
+            f"pending={self._pending!r} count={self._count} pre={self._pre_count} "
+            f"pos={self._pos} buflen={len(self._buf)}"
+        )
         if key_code in (_K["Return"], _K["Enter"]):
             if shift and self._mode == VimMode.INSERT:
                 # Shift+Enter = newline in insert mode
@@ -370,6 +385,7 @@ class VimEditor(QObject):
             if key_text in "dcy><":
                 self._pre_count = self._count
                 self._count = None
+            _dbg(f"  -> set pending={self._pending!r}")
             return
 
         # Register select
@@ -383,6 +399,7 @@ class VimEditor(QObject):
             p = self._pending
             self._pending = ""
             count = self._pop_count()
+            _dbg(f"  chord-resolve p={p!r} key={key_text!r} count={count}")
 
             if p == "g":
                 self._do_g(key_text, count)
@@ -854,6 +871,7 @@ class VimEditor(QObject):
     def _do_operator(
         self, op: str, motion: str, count: int, *, clipboard: bool = False
     ) -> None:
+        _dbg(f"  _do_operator op={op!r} motion={motion!r} count={count}")
         # `ys{motion}{char}` — surround. y is normally yank, but `ys` opens a
         # separate state machine handled in `_handle_normal`'s chord block.
         # Reset count so the motion phase reads its own count (`ys2w"`).
@@ -1078,6 +1096,7 @@ class VimEditor(QObject):
         change: tuple,
         clipboard: bool = False,
     ) -> None:
+        _dbg(f"  _apply_op_range op={op!r} start={start} end={end}")
         if start is None or end is None or start >= end:
             return
         text = self._buf[start:end]
@@ -1129,6 +1148,7 @@ class VimEditor(QObject):
 
     def _do_surround(self, ch: str, count: int) -> None:
         rng = self._surround_range
+        _dbg(f"  _do_surround ch={ch!r} rng={rng}")
         self._surround_range = None
         self._pending = ""
         if not rng or not ch:
@@ -1733,17 +1753,21 @@ class VimEditor(QObject):
 
     def _text_object(self, kind: str, ch: str) -> tuple[int, int] | None:
         """Return (start, end) for inner/around text object. kind='i' or 'a'."""
+        result: tuple[int, int] | None
         if ch == "w" or ch == "W":
-            return self._text_object_word(kind, big=(ch == "W"))
-        if ch in self._PAIR_OPEN:
+            result = self._text_object_word(kind, big=(ch == "W"))
+        elif ch in self._PAIR_OPEN:
             open_ch = (
                 ch if ch in "([{<" else {")": "(", "]": "[", "}": "{", ">": "<"}[ch]
             )
             close_ch = self._PAIR_OPEN[ch]
-            return self._text_object_pair(kind, open_ch, close_ch)
-        if ch in self._QUOTE_CHARS:
-            return self._text_object_quote(kind, ch)
-        return None
+            result = self._text_object_pair(kind, open_ch, close_ch)
+        elif ch in self._QUOTE_CHARS:
+            result = self._text_object_quote(kind, ch)
+        else:
+            result = None
+        _dbg(f"  _text_object kind={kind!r} ch={ch!r} -> {result}")
+        return result
 
     def _text_object_word(self, kind: str, *, big: bool) -> tuple[int, int] | None:
         if not self._buf:

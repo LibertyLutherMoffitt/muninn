@@ -726,6 +726,19 @@ class ChatBridge(QObject):
                     "convId": "",
                     "action": "",
                 },
+                {
+                    "label": "license",
+                    "sub": "MIT — see LICENSE / THIRD_PARTY_LICENSES.md",
+                    "convId": "",
+                    "action": "",
+                },
+                {
+                    "label": "github",
+                    "sub": "github.com/LibertyLutherMoffitt/muninn",
+                    "convId": "",
+                    "action": "url",
+                    "url": "https://github.com/LibertyLutherMoffitt/muninn",
+                },
             ]
             self.infoMenuRequested.emit("about", items)
             return
