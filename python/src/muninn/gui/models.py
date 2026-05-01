@@ -9,6 +9,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 if TYPE_CHECKING:
     from muninn.groups import GroupStore
     from muninn.peers import ConnectionManager
+    from muninn.storage import Storage
 
 
 class _R:
@@ -40,11 +41,13 @@ class PeerListModel(QAbstractListModel):
         self,
         group_store: GroupStore,
         conn_mgr: ConnectionManager,
+        storage: Storage | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self._gs = group_store
         self._cm = conn_mgr
+        self._storage = storage
         self._items: list[dict] = []
         self._unread: dict[str, int] = {}
 
@@ -113,6 +116,18 @@ class PeerListModel(QAbstractListModel):
         with self._cm.peers_lock:
             direct: set[str] = set(self._cm.peers.keys())
 
+        # Pull historical previews so chats show their last message even
+        # before any new traffic this session.
+        dm_last: dict[str, tuple[str, int]] = {}
+        grp_last: dict[bytes, tuple[str, int]] = {}
+        if self._storage is not None:
+            try:
+                dm_last = self._storage.last_message_per_dm(self._cm.local_mac)
+                grp_last = self._storage.last_message_per_group()
+            except Exception:
+                dm_last = {}
+                grp_last = {}
+
         for addr in self._gs.pubkeys:
             if addr == self._cm.local_mac:
                 continue
@@ -123,14 +138,15 @@ class PeerListModel(QAbstractListModel):
                 status = "relay"
             else:
                 status = "offline"
+            preview, last_ts = dm_last.get(addr, ("", 0))
             items.append(
                 {
                     "mac": addr,
                     "displayName": self._gs.display_name(addr),
                     "convId": conv_id,
                     "convType": "dm",
-                    "lastMessage": "",
-                    "lastTs": 0,
+                    "lastMessage": preview,
+                    "lastTs": last_ts,
                     "unreadCount": self._unread.get(conv_id, 0),
                     "status": status,
                     "via": self._cm.indirect_via.get(addr, ""),
@@ -139,20 +155,25 @@ class PeerListModel(QAbstractListModel):
 
         for gid, group in self._gs.groups.items():
             conv_id = "group:" + gid.hex()
+            preview, last_ts = grp_last.get(gid, ("", 0))
             items.append(
                 {
                     "mac": gid.hex(),
                     "displayName": group.name,
                     "convId": conv_id,
                     "convType": "group",
-                    "lastMessage": "",
-                    "lastTs": 0,
+                    "lastMessage": preview,
+                    "lastTs": last_ts,
                     "unreadCount": self._unread.get(conv_id, 0),
                     "status": "group",
                     "via": "",
                 }
             )
 
+        # Last-activity-first sort (peer rows already bubble on send/recv via
+        # set_last_message; this puts historical state in the same order on
+        # startup).
+        items.sort(key=lambda it: it["lastTs"], reverse=True)
         return items
 
 

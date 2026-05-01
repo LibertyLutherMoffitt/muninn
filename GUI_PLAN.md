@@ -407,9 +407,8 @@ QML as context properties, not as a separate `Theme.qml` singleton.
 - **About-dialog placement** — both `:about` command and a menu entry.
 
 ## TODO
-- cursor trail faster, more fps, smoother 
-    - trail to go to where the cursor is in the palette not the center of the palette
-- have the message preview under each chat work always (currently only has one if a message has been sent/received since opening the app)
-- desktop notifications
-- have a button to manually open the palette in addition to the keybinds
-- when switching to a next chat, start at the bottom instead of at the top (it's annoying to have to scroll down to the most recent message every time I go back to a dm)
+- ~~cursor trail faster, more fps, smoother~~ — done; tighter spacing, 18 dots, 90 ms segments, anchored to palette caret.
+- ~~have the message preview under each chat work always~~ — done; PeerListModel pulls historical previews from Storage on build.
+- ~~desktop notifications~~ — done via `notify-send` when conv unfocused / not active.
+- ~~have a button to manually open the palette~~ — done; status-bar button.
+- ~~switching to a next chat starts at the top~~ — done; `bridge.activeConvChanged` snaps `msgList` to bottom.

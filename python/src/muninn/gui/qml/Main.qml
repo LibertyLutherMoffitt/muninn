@@ -72,9 +72,9 @@ ApplicationWindow {
             z: 5
 
             Row {
-                anchors.fill: parent
+                anchors.left: parent.left
                 anchors.leftMargin: 12
-                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: 20
 
                 Text {
@@ -95,6 +95,44 @@ ApplicationWindow {
                     color: bridge.isWriter ? Theme.success : Theme.textMuted
                     font.pixelSize: 11
                     font.bold: bridge.isWriter
+                }
+            }
+
+            // Manual palette opener — keyboard shortcut is <space>f, but a
+            // visible button helps discoverability for new users.
+            Rectangle {
+                id: paletteBtn
+                anchors.right: parent.right
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                width: paletteBtnLabel.implicitWidth + 18
+                height: 18
+                radius: 4
+                color: paletteBtnArea.containsMouse
+                    ? Theme.accent : Theme.surface
+                border.color: Theme.accent
+                border.width: 1
+
+                Behavior on color {
+                    ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
+                }
+
+                Text {
+                    id: paletteBtnLabel
+                    anchors.centerIn: parent
+                    text: "⌘  palette  ·  ␣f"
+                    color: paletteBtnArea.containsMouse
+                        ? "white" : Theme.textMuted
+                    font.pixelSize: 10
+                    font.bold: true
+                }
+
+                MouseArea {
+                    id: paletteBtnArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (!cmdPalette.visible) cmdPalette.open("")
                 }
             }
         }

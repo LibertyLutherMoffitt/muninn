@@ -368,6 +368,45 @@ class Storage:
                 out.append((msg_id, sender, r[2], r[3], state))
         return out
 
+    def last_message_per_dm(self, local_mac: str) -> dict[str, tuple[str, int]]:
+        """Most recent DM body+ts keyed by peer MAC.
+
+        Used to populate the peer-list previews on startup so users see the
+        last thing they exchanged with each peer without having to send or
+        receive while the GUI is open.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                # Inbound DMs — peer = sender.
+                "SELECT sender AS peer, body, ts "
+                "FROM messages WHERE group_id = ? AND sender != ? "
+                "UNION ALL "
+                # Outbound DMs — peer = recipient (per message_recipients).
+                "SELECT r.recipient AS peer, m.body, m.ts "
+                "FROM messages m JOIN message_recipients r "
+                "  ON r.msg_id = m.msg_id "
+                "WHERE m.group_id = ? AND m.sender = ? "
+                "ORDER BY ts DESC",
+                (_GROUP_ZERO, local_mac, _GROUP_ZERO, local_mac),
+            ).fetchall()
+        out: dict[str, tuple[str, int]] = {}
+        for peer, body, ts in rows:
+            if peer not in out:
+                out[peer] = (body, ts)
+        return out
+
+    def last_message_per_group(self) -> dict[bytes, tuple[str, int]]:
+        """Most recent body+ts for each group_id (excluding the DM zero-id)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT m.group_id, m.body, m.ts FROM messages m "
+                "WHERE m.group_id != ? AND m.ts = ("
+                "  SELECT MAX(ts) FROM messages WHERE group_id = m.group_id"
+                ")",
+                (_GROUP_ZERO,),
+            ).fetchall()
+        return {bytes(gid): (body, ts) for gid, body, ts in rows}
+
     def _aggregate_recipient_state(self, msg_id: bytes) -> str:
         rows = self._conn.execute(
             "SELECT acked_at, read_at FROM message_recipients WHERE msg_id = ?",

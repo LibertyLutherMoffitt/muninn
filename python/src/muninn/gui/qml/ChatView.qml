@@ -72,7 +72,8 @@ Item {
 
             // Auto-scroll to bottom on new messages or model reset, but only
             // when user is already near the bottom — otherwise leave their
-            // scroll position alone.
+            // scroll position alone. Switching conversations always snaps
+            // to the bottom so the most recent message is visible.
             property bool _atBottom: true
             onContentYChanged: {
                 if (visibleArea.heightRatio >= 1.0) {
@@ -83,6 +84,14 @@ Item {
             }
             onCountChanged: if (_atBottom) Qt.callLater(positionViewAtEnd)
             Component.onCompleted: Qt.callLater(positionViewAtEnd)
+
+            Connections {
+                target: bridge
+                function onActiveConvChanged(_cid) {
+                    msgList._atBottom = true
+                    Qt.callLater(msgList.positionViewAtEnd)
+                }
+            }
 
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 

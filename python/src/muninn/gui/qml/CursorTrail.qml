@@ -14,11 +14,12 @@ Item {
     enabled: false
 
     property color trailColor: Theme.accent
-    property int dotCount: 9
-    property int segmentDuration: 180
+    property int dotCount: 18
+    property int segmentDuration: 90
     // How far back in time (within a segment) each successive dot trails.
-    // 1.0 = dotCount * trailSpacing covers the whole segment.
-    property real trailSpacing: 0.10
+    // 1.0 = dotCount * trailSpacing covers the whole segment. Tighter
+    // spacing makes the streak read as one comet rather than discrete dots.
+    property real trailSpacing: 0.045
 
     // ---- Internal state ----
     property real _srcX: 0
@@ -72,7 +73,9 @@ Item {
         from: 0
         to: 1
         duration: root.segmentDuration
-        easing.type: Easing.OutCubic
+        // Linear keeps motion uniform across multi-segment polylines so the
+        // comet doesn't visibly decelerate at every waypoint.
+        easing.type: Easing.Linear
         onFinished: {
             root._idx += 1
             root._playSegment()
@@ -81,12 +84,12 @@ Item {
 
     SequentialAnimation {
         id: fadeOut
-        PauseAnimation { duration: 80 }
+        PauseAnimation { duration: 40 }
         NumberAnimation {
             target: root
             property: "_alpha"
             to: 0
-            duration: 180
+            duration: 140
             easing.type: Easing.InQuad
         }
     }
@@ -99,14 +102,17 @@ Item {
                 0,
                 Math.min(1, root._progress - index * root.trailSpacing))
             readonly property bool active: pp > 0 && pp <= 1
-            readonly property real sz: Math.max(4, 14 - index * 1.1)
+            // Head dot is largest; tail tapers smoothly.
+            readonly property real sz: Math.max(3, 14 - index * 0.6)
             width: sz; height: sz; radius: sz / 2
             color: root.trailColor
-            // Head bright, tail faint. Multiplied by global _alpha so the
-            // whole trail can fade out cleanly between calls.
-            opacity: active
-                ? root._alpha * (1 - index / root.dotCount) * 0.85
-                : 0
+            antialiasing: true
+            // Head bright, tail faint, with a soft quadratic falloff so the
+            // streak looks continuous rather than a row of dots. Multiplied
+            // by global _alpha so the whole trail can fade out cleanly.
+            readonly property real tailFalloff:
+                Math.pow(1 - index / root.dotCount, 1.4)
+            opacity: active ? root._alpha * tailFalloff * 0.9 : 0
             x: root._srcX + (root._dstX - root._srcX) * pp - sz / 2
             y: root._srcY + (root._dstY - root._srcY) * pp - sz / 2
             visible: opacity > 0.01

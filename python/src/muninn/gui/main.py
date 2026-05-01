@@ -136,7 +136,7 @@ def main() -> None:
     writer_lock = WriterLock()
     is_writer = writer_lock.try_acquire()
 
-    peer_model = PeerListModel(group_store, conn_mgr)
+    peer_model = PeerListModel(group_store, conn_mgr, storage)
     msg_model = MessageListModel()
     bridge = ChatBridge(
         conn_mgr,

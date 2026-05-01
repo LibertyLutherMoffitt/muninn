@@ -13,10 +13,12 @@ import time
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtGui import QGuiApplication
 
 from muninn.peers import GROUP_ZERO
 from muninn.protocol import FrameTooLarge
 
+from . import notifications
 from .models import ACK_ACKED, ACK_READ, MessageListModel, PeerListModel
 
 if TYPE_CHECKING:
@@ -137,7 +139,8 @@ class ChatBridge(QObject):
         self, conv_id: str, sender_mac: str, text: str, msg_id: str, ts: int
     ) -> None:
         self._peer_model.set_last_message(conv_id, text, ts)
-        if conv_id == self._active_conv_id:
+        is_active = conv_id == self._active_conv_id
+        if is_active:
             self._msg_model.add_message(
                 msg_id,
                 sender_mac,
@@ -148,6 +151,27 @@ class ChatBridge(QObject):
             )
         else:
             self._peer_model.increment_unread(conv_id)
+
+        # Desktop notification when the user can't see this message — either
+        # they're on another conv or the Muninn window isn't focused. Read
+        # receipts still fire only when the conv is opened, so this mirrors
+        # the same "did the user actually see it" criterion.
+        if not (is_active and self._window_focused()):
+            sender = self._gs.display_name(sender_mac)
+            if conv_id.startswith("group:"):
+                gid = bytes.fromhex(conv_id[6:])
+                grp = self._gs.groups.get(gid)
+                title = f"{sender} · {grp.name}" if grp else sender
+            else:
+                title = sender
+            notifications.notify(title, text)
+
+    @staticmethod
+    def _window_focused() -> bool:
+        app = QGuiApplication.instance()
+        if app is None:
+            return False
+        return app.focusWindow() is not None
 
     def _on_peer_changed(self, addr: str, connected: bool) -> None:
         self._peer_model.refresh()

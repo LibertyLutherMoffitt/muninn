@@ -258,12 +258,20 @@ Rectangle {
         root._cmdMode = false
     }
 
-    // Window-space center of the search input, used by the cursor-trail
-    // overlay so the trail anchors to where typing actually happens.
+    // Window-space center of the search input's caret, used by the cursor-
+    // trail overlay so the trail anchors to where typing actually happens
+    // (not to the geometric center of the input box).
     function inputPos(target) {
-        return searchInput.mapToItem(target,
-            searchInput.width / 2,
-            searchInput.height / 2)
+        const r = searchInput.cursorRectangle
+        // Fall back to the field center if the caret has no geometry yet
+        // (e.g. before the field has been laid out).
+        const cx = (r && r.width >= 0)
+            ? r.x + r.width / 2
+            : searchInput.width / 2
+        const cy = (r && r.height > 0)
+            ? r.y + r.height / 2
+            : searchInput.height / 2
+        return searchInput.mapToItem(target, cx, cy)
     }
 
     function activate() {
