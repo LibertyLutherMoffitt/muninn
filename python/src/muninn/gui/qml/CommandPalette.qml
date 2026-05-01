@@ -332,6 +332,7 @@ Rectangle {
         { icon: "↺",  label: ":history",  sub: "reload last N messages",           action: "cmd", convId: "", cmd: "history " },
         { icon: "⌫",  label: ":clear",    sub: "clear visible messages",           action: "cmd", convId: "", cmd: "clear" },
         { icon: "i",  label: ":help",     sub: "list all commands",                action: "cmd", convId: "", cmd: "help" },
+        { icon: "?",  label: ":about",    sub: "version + identity info",          action: "cmd", convId: "", cmd: "about" },
         { icon: "✕",  label: ":quit",     sub: "exit Muninn",                      action: "cmd", convId: "", cmd: "quit" },
     ]
 

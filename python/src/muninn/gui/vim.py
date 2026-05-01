@@ -92,6 +92,9 @@ class VimEditor(QObject):
         # new conv. (text, cursor_pos, was_in_insert).
         self._drafts: dict[str, tuple[str, int, bool]] = {}
         self._active_conv: str = ""
+        # Range captured during a surround chain (ys{motion}{char}); held
+        # while waiting for the closing char.
+        self._surround_range: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -352,10 +355,10 @@ class VimEditor(QObject):
             return
 
         # Count accumulation. Allowed both before any chord and while an
-        # operator is pending (so `d2w`, `c3l`, `5~`, `2y$` all work).
+        # operator is pending (so `d2w`, `c3l`, `5~`, `2y$`, `ys2w"` all work).
         if key_text.isdigit():
             digit = int(key_text)
-            mid_op = self._pending in ("d", "c", "y", ">", "<", "")
+            mid_op = self._pending in ("d", "c", "y", ">", "<", "", "_ys")
             if (digit != 0 or self._count is not None) and mid_op:
                 self._count = (self._count or 0) * 10 + digit
                 return
@@ -433,6 +436,54 @@ class VimEditor(QObject):
             # Clipboard yank operator (from <space>y)
             if p == "\x00":
                 self._do_operator("y", key_text, count, clipboard=True)
+                return
+
+            # ys-surround state machine (vim-surround.vim style).
+            # `ys{motion}{char}` wraps the motion's range with `char`.
+            # `yss{char}` wraps the current line.
+            # `_ys`              awaiting motion (or 's', 'i', 'a', 'fFtT').
+            # `_ysi` / `_ysa`    awaiting text-object char.
+            # `_ysm<fFtT>`       awaiting find-target char.
+            # `_ysc`             awaiting closing surround char.
+            if p == "_ys":
+                if key_text == "s":
+                    ls = self._line_start(self._pos)
+                    le = self._line_end(self._pos)
+                    self._surround_range = (ls, le)
+                    self._pending = "_ysc"
+                    return
+                if key_text in ("i", "a"):
+                    self._pending = f"_ys{key_text}"
+                    self._count = count
+                    return
+                if key_text in "fFtT":
+                    self._pending = f"_ysm{key_text}"
+                    self._count = count
+                    return
+                rng = self._motion_range(key_text, count)
+                if rng[0] is not None and rng[1] is not None:
+                    self._surround_range = (rng[0], rng[1])
+                    self._pending = "_ysc"
+                return
+            if p in ("_ysi", "_ysa"):
+                kind = p[3]
+                rng = self._text_object(kind, key_text)
+                if rng:
+                    self._surround_range = rng
+                    self._pending = "_ysc"
+                    self._last_change = ("ys_obj", count, kind, key_text, None)
+                return
+            if len(p) == 5 and p.startswith("_ysm"):
+                op_ch = p[4]
+                if key_text:
+                    self._last_find = (op_ch, key_text)
+                    rng = self._find_motion_range(op_ch, key_text, count)
+                    if rng[0] is not None and rng[1] is not None:
+                        self._surround_range = (rng[0], rng[1])
+                        self._pending = "_ysc"
+                return
+            if p == "_ysc":
+                self._do_surround(key_text, count)
                 return
 
             # Three-char chord state from `_do_operator` deferral:
@@ -803,6 +854,13 @@ class VimEditor(QObject):
     def _do_operator(
         self, op: str, motion: str, count: int, *, clipboard: bool = False
     ) -> None:
+        # `ys{motion}{char}` — surround. y is normally yank, but `ys` opens a
+        # separate state machine handled in `_handle_normal`'s chord block.
+        # Reset count so the motion phase reads its own count (`ys2w"`).
+        if op == "y" and motion == "s":
+            self._pending = "_ys"
+            self._count = None
+            return
         # Two-key motions need a follow-up char. Defer and re-enter via
         # `_handle_normal`'s chord-completion block.
         if motion in ("i", "a") and op in "dcy":
@@ -1053,6 +1111,51 @@ class VimEditor(QObject):
             self._emit()
 
     # ------------------------------------------------------------------
+    # ys surround
+    # ------------------------------------------------------------------
+
+    # Bracket-style chars: opens insert with inner spaces (vim-surround
+    # convention); their closing counterparts wrap tight.
+    _SURROUND_PAIRS = {
+        "(": ("( ", " )"),
+        "[": ("[ ", " ]"),
+        "{": ("{ ", " }"),
+        ")": ("(", ")"),
+        "]": ("[", "]"),
+        "}": ("{", "}"),
+        "<": ("<", ">"),
+        ">": ("<", ">"),
+    }
+
+    def _do_surround(self, ch: str, count: int) -> None:
+        rng = self._surround_range
+        self._surround_range = None
+        self._pending = ""
+        if not rng or not ch:
+            return
+        start, end = rng
+        if ch in self._SURROUND_PAIRS:
+            left, right = self._SURROUND_PAIRS[ch]
+        else:
+            left = right = ch
+        self._push_undo()
+        self._buf = (
+            self._buf[:start] + left + self._buf[start:end] + right + self._buf[end:]
+        )
+        self._pos = start + len(left)
+        # Patch the closing-char into any pending dot-repeat metadata that
+        # was stashed by the text-object branch.
+        if (
+            self._last_change
+            and self._last_change[0] == "ys_obj"
+            and self._last_change[-1] is None
+        ):
+            tag, cnt, kind, obj_ch, _ = self._last_change
+            self._last_change = (tag, cnt, kind, obj_ch, ch)
+        self._clamp_normal()
+        self._emit()
+
+    # ------------------------------------------------------------------
     # g-commands
     # ------------------------------------------------------------------
 
@@ -1079,6 +1182,24 @@ class VimEditor(QObject):
     def _handle_visual(
         self, key_text: str, key_code: int, ctrl: bool, shift: bool
     ) -> None:
+        # Text-object pending: set when `i`/`a` is pressed in visual mode.
+        # Next char is the object selector — w/W/(/)/[/]/{/}/<>/`'"`.
+        if self._pending.startswith("_vobj_"):
+            kind = self._pending[6]
+            self._pending = ""
+            rng = self._text_object(kind, key_text)
+            if rng:
+                a, b = rng
+                self._visual_anchor = a
+                self._pos = max(a, b - 1)
+                self._update_last_col()
+                self._emit_selection()
+                self._emit()
+            return
+        if key_text in ("i", "a") and not self._pending:
+            self._pending = "_vobj_" + key_text
+            return
+
         count = self._pop_count()
 
         # Movement
@@ -1305,6 +1426,14 @@ class VimEditor(QObject):
             # Re-enter `r` chord, then feed the char.
             self._pending = "r"
             self.handleKey(lc[2], 0, False, False, False)
+        elif tag == "ys_obj":
+            _, count, kind, obj_ch, ch = lc
+            if ch is None:
+                return
+            rng = self._text_object(kind, obj_ch)
+            if rng:
+                self._surround_range = rng
+                self._do_surround(ch, count)
         elif tag == "~":
             self._count = lc[1]
             self.handleKey("~", 0, False, False, False)

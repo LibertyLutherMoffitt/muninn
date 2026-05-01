@@ -218,9 +218,11 @@ Rectangle {
     function open() {
         root._open = true
         root.opacity = 1
-        // Defer to next event loop tick so the visibility binding has
-        // settled — forceActiveFocus() silently fails on an item whose
-        // ancestor is still flagged invisible.
+        // Claim focus immediately *and* via Qt.callLater. The synchronous
+        // call wins when no other handler is competing; the deferred call
+        // wins when (e.g.) the palette's onVisibleChanged tries to bounce
+        // focus back to the chat pane while we're still opening.
+        scanBtn.forceActiveFocus()
         Qt.callLater(function() { scanBtn.forceActiveFocus() })
     }
     function close() {

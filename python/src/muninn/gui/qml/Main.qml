@@ -39,8 +39,10 @@ ApplicationWindow {
                 Layout.preferredWidth: 240
                 Layout.fillHeight: true
                 onConvSelected: (cid) => {
+                    const prev = bridge.activeConvId
                     bridge.setActiveConv(cid)
                     chatPane.forceActiveFocus()
+                    if (prev !== cid) root._trailConvCycle(prev, cid)
                 }
             }
 
@@ -132,7 +134,55 @@ ApplicationWindow {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: if (!cmdPalette.visible) cmdPalette.open("")
+                    onClicked: {
+                        if (cmdPalette.visible) return
+                        // Trail starts from the button so the comet flies
+                        // from the click point (not from the composer caret
+                        // the user isn't looking at).
+                        const c = paletteBtn.mapToItem(cursorTrail,
+                            paletteBtn.width / 2, paletteBtn.height / 2)
+                        root._paletteTrailStart = c
+                        cmdPalette.open("")
+                    }
+                }
+            }
+
+            // About button — sits to the left of the palette button. Routes
+            // through bridge.runCommand("about") so the popup styling matches
+            // every other info menu.
+            Rectangle {
+                id: aboutBtn
+                anchors.right: paletteBtn.left
+                anchors.rightMargin: 6
+                anchors.verticalCenter: parent.verticalCenter
+                width: aboutBtnLabel.implicitWidth + 18
+                height: 18
+                radius: 4
+                color: aboutBtnArea.containsMouse
+                    ? Theme.accent : Theme.surface
+                border.color: Theme.accent
+                border.width: 1
+
+                Behavior on color {
+                    ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
+                }
+
+                Text {
+                    id: aboutBtnLabel
+                    anchors.centerIn: parent
+                    text: "?  about"
+                    color: aboutBtnArea.containsMouse
+                        ? "white" : Theme.textMuted
+                    font.pixelSize: 10
+                    font.bold: true
+                }
+
+                MouseArea {
+                    id: aboutBtnArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: bridge.runCommand("about")
                 }
             }
         }
@@ -227,8 +277,14 @@ ApplicationWindow {
     // mapToItem requires a QQuickItem; ApplicationWindow's `root` is a
     // Window, not an Item — so all coordinates are mapped into the trail
     // overlay's own coord space (it already fills the content area).
+    //
+    // A click on the palette button stashes a one-shot start point here so
+    // the comet flies from the click instead of the composer caret.
+    property var _paletteTrailStart: null
+
     function _trailComposerToPalette() {
-        const a = chatPane.cursorPos(cursorTrail)
+        const a = root._paletteTrailStart || chatPane.cursorPos(cursorTrail)
+        root._paletteTrailStart = null
         const b = cmdPalette.inputPos(cursorTrail)
         cursorTrail.trail([a, b])
     }
@@ -331,7 +387,11 @@ ApplicationWindow {
             if (cmdPalette.visible) {
                 root._trailComposerToPalette()
             } else {
-                if (!infoMenu.visible) chatPane.forceActiveFocus()
+                // Don't yank focus back to chat if the palette closed because
+                // a different overlay (scan / info menu) just opened — that
+                // overlay needs to keep focus to receive Enter.
+                if (!infoMenu.visible && !scanDialog.visible)
+                    chatPane.forceActiveFocus()
                 root._trailPaletteToComposer()
             }
         }

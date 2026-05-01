@@ -337,6 +337,7 @@ class ChatBridge(QObject):
         "scan",
         "clear",
         "help",
+        "about",
         "next",
         "prev",
         "palette",
@@ -365,6 +366,7 @@ class ChatBridge(QObject):
         (":clear", "clear the visible message buffer"),
         (":next  /  :prev", "cycle conversations (Ctrl-N / Ctrl-P)"),
         (":palette", "open the command palette (also <space>f)"),
+        (":about", "show version + identity info"),
         (":w", "no-op"),
         (":q  /  :wq  /  :x", "quit (wq/x sends pending buffer first)"),
     )
@@ -687,6 +689,45 @@ class ChatBridge(QObject):
                 for label, desc in self._HELP
             ]
             self.infoMenuRequested.emit("commands", items)
+            return
+        if head == "about":
+            try:
+                from importlib.metadata import version as _ver
+
+                ver = _ver("muninn")
+            except Exception:
+                ver = "unknown"
+            with self._cm.peers_lock:
+                conn = len(self._cm.peers)
+            items = [
+                {
+                    "label": "Muninn",
+                    "sub": f"v{ver} — encrypted bluetooth chat",
+                    "convId": "",
+                    "action": "",
+                },
+                {
+                    "label": "you",
+                    "sub": f"{self._gs.display_name(self._local_mac)} · {self._local_mac}",
+                    "convId": "",
+                    "action": "",
+                },
+                {
+                    "label": "mode",
+                    "sub": "writer (sending enabled)"
+                    if self._is_writer
+                    else "reader (another instance holds the writer lock)",
+                    "convId": "",
+                    "action": "",
+                },
+                {
+                    "label": "peers",
+                    "sub": f"{conn} connected · {max(0, len(self._gs.pubkeys) - 1)} known",
+                    "convId": "",
+                    "action": "",
+                },
+            ]
+            self.infoMenuRequested.emit("about", items)
             return
 
         self.errorOccurred.emit(f"unknown command: :{head}")
