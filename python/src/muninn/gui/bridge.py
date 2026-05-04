@@ -733,6 +733,13 @@ class ChatBridge(QObject):
                     "action": "",
                 },
                 {
+                    "label": "Qt 6 / PySide6",
+                    "sub": "LGPL-3.0 — © The Qt Company",
+                    "convId": "",
+                    "action": "url",
+                    "url": "https://www.qt.io/licensing",
+                },
+                {
                     "label": "github",
                     "sub": "github.com/LibertyLutherMoffitt/muninn",
                     "convId": "",

@@ -101,6 +101,14 @@ First connection pairs devices automatically via `org.bluez.Device1.Pair()` — 
 
 ---
 
+## Windows — install & run GUI
+
+Requires Python 3.11+ ([download](https://www.python.org/downloads/) — check "Add Python to PATH" during install).
+
+Download and double-click [`install-gui.bat`](install-gui.bat). It installs Muninn + PySide6 and launches the GUI. After first install, just run `muninn-gui` from any terminal.
+
+---
+
 ## Security model
 
 Messages are end-to-end encrypted. Only message text is encrypted; metadata (sender MAC, timestamp, message ID) is plaintext to enable relay routing.
