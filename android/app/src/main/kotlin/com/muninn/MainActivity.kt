@@ -9,16 +9,21 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -33,6 +38,9 @@ private val REQUIRED_PERMISSIONS = arrayOf(
 
 class MainActivity : ComponentActivity() {
 
+    private lateinit var pairing: Pairing
+    private var lastAssociated by mutableStateOf<String?>(null)
+
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
@@ -41,10 +49,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pairing = Pairing(this) { device -> lastAssociated = device.address }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    Status()
+                    Status(
+                        onPair = pairing::requestPair,
+                        lastAssociated = lastAssociated,
+                    )
                 }
             }
         }
@@ -64,7 +76,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun Status() {
+private fun Status(onPair: () -> Unit, lastAssociated: String?) {
     val ctx = LocalContext.current
     val mgr = remember { ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
     val adapter = mgr?.adapter
@@ -74,14 +86,22 @@ private fun Status() {
         else -> "adapter ready"
     }
     val identity = remember { Identity.load(ctx) }
-    Column(Modifier.padding(16.dp)) {
+    Column(
+        modifier = Modifier.padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Text("Muninn", style = MaterialTheme.typography.headlineMedium)
         Text(adapterText, style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(4.dp))
         Text("wire id: ${identity.wireMacStr}", style = MaterialTheme.typography.bodySmall)
         Text(
             "pubkey: ${identity.pubkey.joinToString("") { "%02x".format(it.toInt() and 0xFF) }.take(16)}…",
             style = MaterialTheme.typography.bodySmall,
         )
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onPair) { Text("Pair a Muninn device") }
+        if (lastAssociated != null) {
+            Text("paired: $lastAssociated", style = MaterialTheme.typography.bodySmall)
+        }
     }
 }
