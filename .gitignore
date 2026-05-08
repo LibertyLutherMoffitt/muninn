@@ -25,6 +25,8 @@ local.properties
 *.jar
 *.dex
 .kotlin/
+# Gradle wrapper jar must be committed for ./gradlew to work on a fresh clone.
+!android/gradle/wrapper/gradle-wrapper.jar
 
 # Android Studio / IntelliJ
 .idea/

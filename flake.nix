@@ -13,7 +13,25 @@
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
-        pkgs = nixpkgs.legacyPackages.${system};
+        pkgs = import nixpkgs {
+          inherit system;
+          config = {
+            allowUnfree = true;
+            android_sdk.accept_license = true;
+          };
+        };
+
+        androidComposition = pkgs.androidenv.composeAndroidPackages {
+          platformVersions = ["34"];
+          buildToolsVersions = ["34.0.0"];
+          abiVersions = ["x86_64" "arm64-v8a"];
+          includeNDK = false;
+          includeEmulator = false;
+          includeSystemImages = false;
+          includeSources = false;
+        };
+        androidSdk = androidComposition.androidsdk;
+        androidSdkRoot = "${androidSdk}/libexec/android-sdk";
 
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn";
@@ -101,10 +119,12 @@
             pkgs.prek
             pkgs.alejandra
 
-            # Android client deps (future)
+            # Android client
             pkgs.jdk17
             pkgs.kotlin
             pkgs.gradle
+            pkgs.android-tools
+            androidSdk
           ];
 
           shellHook = ''
@@ -116,6 +136,11 @@
             HOOK
               chmod +x .git/hooks/pre-commit
             fi
+
+            export ANDROID_HOME="${androidSdkRoot}"
+            export ANDROID_SDK_ROOT="${androidSdkRoot}"
+            export JAVA_HOME="${pkgs.jdk17}"
+            export GRADLE_OPTS="-Dorg.gradle.project.android.aapt2FromMavenOverride=${androidSdkRoot}/build-tools/34.0.0/aapt2"
           '';
         };
       }
