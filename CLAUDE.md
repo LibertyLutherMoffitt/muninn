@@ -45,7 +45,7 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 
 - `DESIGN.md` — motivation, decisions, architecture, implementation steps
 - `PROTOCOL.md` — wire spec only (the cross-platform contract)
-- `GUI_PLAN.md` — GUI design, Vim keybindings, layout, milestones
+- `python/src/muninn/gui/GUI_PLAN.md` — GUI design, Vim keybindings, layout, milestones
 
 ## Key files (Python client)
 
