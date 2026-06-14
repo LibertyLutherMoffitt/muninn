@@ -52,9 +52,10 @@ fun readFrame(input: DataInputStream): Frame {
     return Frame(type, payload)
 }
 
-fun encodeHandshake(out: DataOutputStream, pubkey: ByteArray) {
+fun encodeHandshake(out: DataOutputStream, pubkey: ByteArray, wireId: ByteArray) {
     require(pubkey.size == PUBKEY_BYTES) { "pubkey must be $PUBKEY_BYTES bytes" }
-    encodeFrame(out, TYPE_HANDSHAKE, pubkey)
+    require(wireId.size == MAC_BYTES) { "wireId must be $MAC_BYTES bytes" }
+    encodeFrame(out, TYPE_HANDSHAKE, pubkey + wireId)
 }
 
 fun encodeMessage(
@@ -99,6 +100,18 @@ fun decodeAck(payload: ByteArray): Pair<ByteArray, ByteArray> {
     val msgId = payload.copyOfRange(0, UUID_BYTES)
     val fromMac = payload.copyOfRange(UUID_BYTES, UUID_BYTES + MAC_BYTES)
     return msgId to fromMac
+}
+
+/** 16 zero bytes — the group_id used for 1:1 DMs (see PROTOCOL.md). */
+val ZERO_GROUP_ID = ByteArray(UUID_BYTES)
+
+/** Random 16-byte message id (UUID v4 bytes), unique per message. */
+fun newMsgId(): ByteArray {
+    val uuid = java.util.UUID.randomUUID()
+    return ByteBuffer.allocate(UUID_BYTES)
+        .putLong(uuid.mostSignificantBits)
+        .putLong(uuid.leastSignificantBits)
+        .array()
 }
 
 fun macToBytes(mac: String): ByteArray =

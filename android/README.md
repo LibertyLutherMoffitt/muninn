@@ -4,7 +4,7 @@ Encrypted peer-to-peer chat over Bluetooth Classic (RFCOMM). No internet require
 
 Targets Android 12+ (API 31). Shares the wire protocol with the Python desktop client (see [`PROTOCOL.md`](../PROTOCOL.md)), so an Android phone and a Linux desktop running Muninn talk to each other directly.
 
-**Status:** scaffolding + milestones 1–3 complete (RFCOMM listener + X25519 handshake + NaCl Box decrypt). There is no conversation UI yet — incoming decrypted messages land in Logcat. The ConnectionManager port, message UI, groups, relay, and on-disk storage are next.
+**Status:** milestones 1–3 complete plus a working 1:1 chat UI — RFCOMM listener, X25519 handshake, NaCl Box encrypt/decrypt, in-app device discovery + pairing, and a Compose conversation view (send + receive). The ConnectionManager port, groups, relay, and on-disk storage are next.
 
 ## Quick start
 
@@ -35,35 +35,53 @@ adb logcat -s MuninnService PeerSession Pairing
 
 ## Pairing
 
-Tap **Pair a Muninn device** on the main screen. Android opens the system Companion Device sheet listing nearby Bluetooth Classic devices that advertise the Muninn RFCOMM service UUID. Pick yours; Android pops a one-tap Just Works confirm to bond, and from then on the foreground service connects to it automatically whenever both devices are in range.
+Tap **Pair** in the top bar. The app runs its own Bluetooth Classic discovery and
+shows a bottom sheet of nearby devices, flagging the ones that advertise the
+Muninn RFCOMM service UUID with a **Muninn** badge. Tap a device to bond; Android
+pops a one-tap Just Works confirm, and from then on the foreground service
+connects to it automatically whenever both devices are in range.
 
-If the sheet is empty:
+**Why not CompanionDeviceManager:** CDM's `BluetoothDeviceFilter.addServiceUuid`
+matches the 128-bit Muninn UUID against the classic-inquiry EIR, which BlueZ
+usually omits — so the system sheet came up empty. Service UUIDs live in SDP, not
+the inquiry response, so we discover devices ourselves and call
+`fetchUuidsWithSdp()` on each (SDP *does* return 128-bit UUIDs) to build a
+correct, Muninn-only list. See `BtDiscovery.kt`.
 
-- Verify the Linux peer is running and discoverable (Muninn calls `bluetoothctl discoverable on` automatically — check `bluetoothctl show` to confirm).
-- Pair via Android **Settings → Bluetooth** as a fallback. The app picks up bonded devices regardless of how they got bonded.
+If the list is empty:
 
-The Just Works confirm cannot be suppressed without the platform-signed permission `BLUETOOTH_PRIVILEGED`. One tap on first bond is the floor for non-system apps.
+- Verify the Linux peer is running and discoverable (Muninn calls
+  `bluetoothctl discoverable on` automatically — check `bluetoothctl show`).
+- Flip **Show all nearby devices** to list non-Muninn devices too (in case SDP
+  resolution lagged), or pair via Android **Settings → Bluetooth**. The app picks
+  up bonded devices regardless of how they got bonded.
+
+The Just Works confirm cannot be suppressed without the platform-signed
+permission `BLUETOOTH_PRIVILEGED`. One tap on first bond is the floor for
+non-system apps.
 
 ## Usage
 
-Milestone 1–3 only — there is no conversation view yet. The app:
+The app:
 
 1. On launch, requests `BLUETOOTH_CONNECT` / `BLUETOOTH_SCAN` / `BLUETOOTH_ADVERTISE` and `POST_NOTIFICATIONS`.
 2. Starts a foreground service (`MuninnService`) that owns an RFCOMM listening socket on the Muninn service UUID.
 3. Polls bonded devices every 15 s; if one advertises the Muninn UUID and isn't already connected, it dials.
-4. On each accepted/dialed socket, exchanges X25519 handshake keys, derives a NaCl Box, then loops on incoming frames.
-5. Decrypts MSG frames addressed to its 6-byte wire id, ACKs them, and writes the plaintext to Logcat under tag `PeerSession`.
+4. On each accepted/dialed socket, exchanges X25519 handshake keys + wire ids, derives a NaCl Box, then loops on frames.
+5. Shows the conversation in a Compose chat view: type and **Send**, incoming MSG frames decrypt into bubbles, each ACKed back to the sender. (Plaintext still mirrors to Logcat under tag `PeerSession`.)
 
-To send a test message from Linux to Android:
+Once a peer is connected, the top bar status flips to **Connected** and the
+composer enables. Send a message from the phone, or from Linux:
 
 ```
 nix run .#muninn-linux
 # Wait for the handshake to complete with the Android peer.
-/dm <android-wire-id>          # the value shown as "wire id" on the app's main screen
+/dm <android-wire-id>          # the wire id shown in the phone's status line when no peer is connected
 hello from linux
 ```
 
-The Linux side shows `⧗` then `✓` (delivered) once Android ACKs. The plaintext appears in `adb logcat -s PeerSession`.
+The Linux side shows `⧗` then `✓` (delivered) once Android ACKs. The message
+appears as a bubble in the phone's chat view.
 
 ## Identity
 
@@ -96,17 +114,20 @@ If you're using Android Studio:
 - X25519 key exchange + XSalsa20-Poly1305 (NaCl Box) via `lazysodium-android` —
   wire-compatible with the Python client's PyNaCl.
 - Static keypair + 6-byte wire id, persisted across restarts.
-- CompanionDeviceManager pair flow (one-tap pairing, no Settings trip).
-- Incoming MSG frame decryption + ACK back to the sender.
+- In-app pairing — own classic discovery + per-device `fetchUuidsWithSdp()` to
+  flag Muninn peers, then `createBond()` (see `BtDiscovery.kt`).
+- Compose 1:1 chat UI — message bubbles, composer, live connection status,
+  Material You theming.
+- Bidirectional messaging — encrypt + send + ACK, decrypt incoming, fan-out via
+  `ChatRepository`.
 - Runtime Bluetooth permission grant + foreground-service notification.
 
 ## What doesn't exist yet
 
-- Conversation UI — message list, composer, peer list.
 - ConnectionManager — multi-peer state, unacked tracking, dedup, reconnect
   resend (port of `peers.py`).
-- Active discovery — currently only bonded devices are scanned; no
-  `startDiscovery` / inquiry.
+- Multi-conversation UI — today it is a single flat message log; no per-peer
+  threads or peer list.
 - Groups, group setup, relay, peer announcements.
 - Profile (display name) frames in or out.
 - Read receipts.
@@ -121,14 +142,16 @@ does not re-arm its listen socket when Bluetooth comes back; restart the app
 after enabling Bluetooth.
 
 **Pair sheet shows no devices** — the Linux peer must be running and
-discoverable, and the peer's SDP record must include the Muninn service UUID.
-As a fallback, pair via **Settings → Bluetooth**; the app picks up bonded
-devices regardless of how they got bonded.
+discoverable, and its SDP record must include the Muninn service UUID. Hit the
+refresh icon to rescan; flip **Show all nearby devices** if SDP resolution
+lagged (device shows without the Muninn badge). As a last resort pair via
+**Settings → Bluetooth**; the app picks up bonded devices regardless of how
+they got bonded.
 
 **Phone connects but messages don't decrypt** — confirm the Linux peer is
-sending to the Android phone's **wire id** shown on the app's main screen, not
-a real Bluetooth MAC. The Linux side learns the wire id on first handshake and
-stores it in its `pubkeys` table.
+sending to the Android phone's **wire id** shown in the app's status line (when
+no peer is connected), not a real Bluetooth MAC. The Linux side learns the wire
+id on first handshake and stores it in its `pubkeys` table.
 
 **`adb devices` shows "no permissions"** — on NixOS, set
 `programs.adb.enable = true;` in your config and add yourself to `adbusers`,
