@@ -68,9 +68,12 @@ class BtDiscovery(private val context: Context) {
                         .getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE)
                         .takeIf { it != Short.MIN_VALUE }
                         ?.toInt()
+                    Log.i(TAG, "found ${device.address} (${runCatching { device.name }.getOrNull()})")
                     upsert(device, rssi)
-                    // Cached UUIDs may already be present from a prior bond/scan.
+                    // Cached UUIDs may already be present from a prior bond/scan;
+                    // otherwise queue an SDP fetch to learn its service UUIDs.
                     if (device.advertisesMuninn()) markMuninn(device.address)
+                    else resolveUuids(device.address)
                 }
 
                 BluetoothDevice.ACTION_UUID -> {
@@ -79,7 +82,9 @@ class BtDiscovery(private val context: Context) {
                         .getParcelableArrayExtraCompat(BluetoothDevice.EXTRA_UUID)
                         ?.filterIsInstance<ParcelUuid>()
                         .orEmpty()
-                    if (uuids.any { it.uuid == MUNINN_RFCOMM_UUID }) markMuninn(device.address)
+                    val muninn = uuids.any { it.uuid == MUNINN_RFCOMM_UUID }
+                    Log.i(TAG, "uuids ${device.address}: ${uuids.size} found, muninn=$muninn")
+                    if (muninn) markMuninn(device.address)
                 }
 
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
@@ -132,6 +137,7 @@ class BtDiscovery(private val context: Context) {
     /** Seed the list with bonded peers, then kick off a fresh inquiry. */
     fun scan() {
         val a = adapter ?: return
+        sdpRequested.clear()
         seedBonded()
         if (a.isDiscovering) a.cancelDiscovery()
         a.startDiscovery()
@@ -142,8 +148,13 @@ class BtDiscovery(private val context: Context) {
         _scanning.value = false
     }
 
-    /** Begin bonding. The connect loop in [MuninnService] dials once bonded. */
+    /**
+     * Record the peer as known (so the connect loop dials it) and kick off
+     * bonding. Bonding is best-effort UX — insecure RFCOMM works without it —
+     * so we register the peer regardless of how/whether the bond completes.
+     */
     fun bond(address: String) {
+        KnownPeers.add(context, address)
         val device = adapter?.getRemoteDevice(address) ?: return
         if (device.bondState == BluetoothDevice.BOND_BONDED) return
         adapter?.cancelDiscovery() // bonding is unreliable during inquiry
@@ -156,7 +167,10 @@ class BtDiscovery(private val context: Context) {
 
     private fun seedBonded() {
         val bonded = adapter?.bondedDevices.orEmpty()
-        bonded.forEach { upsert(it, rssi = null) }
+        bonded.forEach {
+            upsert(it, rssi = null)
+            if (!it.advertisesMuninn()) resolveUuids(it.address)
+        }
     }
 
     private fun upsert(device: BluetoothDevice, rssi: Int?) {
@@ -193,8 +207,12 @@ class BtDiscovery(private val context: Context) {
             }
         }
 
+    private val sdpRequested = mutableSetOf<String>()
+
     private fun resolveUuids(address: String) {
+        if (!sdpRequested.add(address)) return // one SDP fetch per device per scan
         runCatching { adapter?.getRemoteDevice(address)?.fetchUuidsWithSdp() }
+            .onFailure { Log.w(TAG, "fetchUuidsWithSdp($address) failed: ${it.message}") }
     }
 
     private fun BluetoothDevice.advertisesMuninn(): Boolean =

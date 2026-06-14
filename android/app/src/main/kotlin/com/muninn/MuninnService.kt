@@ -102,10 +102,19 @@ class MuninnService : Service() {
     private fun startConnectLoop() {
         connectJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
-                for (device in bt.bondedDevices()) {
+                // Peers the user explicitly picked in the pairing sheet — dialed
+                // directly (insecure RFCOMM needs no bond). Plus any device
+                // bonded outside the app that advertises the Muninn UUID.
+                val known = KnownPeers.load(this@MuninnService)
+                val bondedMuninn = bt.bondedDevices()
+                    .filter { deviceAdvertisesMuninn(it) }
+                    .map { it.address }
+                val targets = (known + bondedMuninn).map { it.uppercase() }.toSet()
+
+                for (addr in targets) {
                     if (!isActive) break
-                    if (alreadyConnected(device)) continue
-                    if (!deviceAdvertisesMuninn(device)) continue
+                    if (alreadyConnected(addr)) continue
+                    val device = bt.remoteDevice(addr) ?: continue
                     tryConnect(device)
                 }
                 delay(15_000)
@@ -114,14 +123,25 @@ class MuninnService : Service() {
     }
 
     private fun deviceAdvertisesMuninn(device: BluetoothDevice): Boolean {
-        val uuids = device.uuids ?: return false
+        val uuids = device.uuids
+        // Empty/unknown cache: Android hasn't browsed SDP for this bonded device
+        // yet (or cached an empty result from before the peer was up). Kick an
+        // async fetch so the next round learns the real UUIDs, but do NOT dial
+        // this round — dialing blindly would RFCOMM-connect to every bonded
+        // non-Muninn device (each a long, blocking connect) and stall the loop.
+        if (uuids.isNullOrEmpty()) {
+            runCatching { device.fetchUuidsWithSdp() }
+            return false
+        }
         return uuids.any { it.uuid == MUNINN_RFCOMM_UUID }
     }
 
-    private fun alreadyConnected(device: BluetoothDevice): Boolean {
-        // No peer registry yet — best effort guard against re-dialing the
-        // same MAC. Replaced by ConnectionManager in milestone 4.
-        synchronized(sessions) { return sessions.any { it.remoteAddress == device.address } }
+    private fun alreadyConnected(address: String): Boolean {
+        // No peer registry yet — best effort guard against re-dialing the same
+        // MAC. Replaced by ConnectionManager in milestone 4.
+        synchronized(sessions) {
+            return sessions.any { it.remoteAddress.equals(address, ignoreCase = true) }
+        }
     }
 
     private suspend fun tryConnect(device: BluetoothDevice) {
@@ -136,7 +156,23 @@ class MuninnService : Service() {
     }
 
     private fun spawnSession(sock: BluetoothSocket) {
-        val session = PeerSession(sock, identity, scope)
+        val addr = sock.remoteDevice.address
+        synchronized(sessions) {
+            // Dedup the accept-loop vs connect-loop race: if a session to this
+            // peer already exists, drop the newcomer instead of stacking two
+            // sockets (which makes both ends churn through teardown).
+            if (sessions.any { it.remoteAddress == addr }) {
+                Log.i(tag, "already have a session to $addr; closing duplicate socket")
+                runCatching { sock.close() }
+                return
+            }
+        }
+        val session = PeerSession(
+            sock,
+            identity,
+            scope,
+            onClosed = { sessions.remove(it) },
+        )
         sessions.add(session)
         session.start()
     }

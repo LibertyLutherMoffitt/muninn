@@ -26,6 +26,9 @@ class Bt(ctx: Context) {
 
     fun bondedDevices(): Set<BluetoothDevice> = adapter?.bondedDevices ?: emptySet()
 
+    fun remoteDevice(address: String): BluetoothDevice? =
+        runCatching { adapter?.getRemoteDevice(address) }.getOrNull()
+
     fun connect(device: BluetoothDevice): BluetoothSocket {
         val sock = device.createInsecureRfcommSocketToServiceRecord(MUNINN_RFCOMM_UUID)
         adapter?.cancelDiscovery()

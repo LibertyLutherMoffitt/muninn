@@ -24,6 +24,10 @@ class PeerSession(
     private val identity: Identity.Loaded,
     private val scope: CoroutineScope,
     val remoteAddress: String = socket.remoteDevice.address,
+    // Invoked once when the session ends (handshake failure or socket close) so
+    // the owner can drop it from its registry and allow a redial. Without this
+    // a dead session lingers and blocks all future reconnects to this peer.
+    private val onClosed: (PeerSession) -> Unit = {},
 ) {
     private val tag = "PeerSession"
     private val input = DataInputStream(socket.inputStream)
@@ -52,6 +56,7 @@ class PeerSession(
             } finally {
                 ChatRepository.unregisterPeer(peerId)
                 runCatching { socket.close() }
+                onClosed(this@PeerSession)
             }
         }
     }

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -347,7 +348,7 @@ private fun PairingSheet(discovery: BtDiscovery) {
     LaunchedEffect(Unit) { discovery.scan() }
 
     val visible = devices
-        .filter { showAll || it.muninn || it.bonded }
+        .filter { showAll || it.muninn }
         .sortedWith(compareByDescending<BtDiscovery.Device> { it.muninn }.thenBy { it.label })
 
     Column(
@@ -388,13 +389,22 @@ private fun PairingSheet(discovery: BtDiscovery) {
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    if (scanning) "Scanning…" else "No devices found",
+                    when {
+                        scanning -> "Scanning…"
+                        showAll -> "No devices found"
+                        else -> "No Muninn devices yet — toggle below or rescan"
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         } else {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                visible.forEach { device ->
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(visible, key = { it.address }) { device ->
                     DeviceRow(device, onClick = { discovery.bond(device.address) })
                 }
             }
