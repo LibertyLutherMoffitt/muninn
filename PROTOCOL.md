@@ -49,13 +49,25 @@ Sent by both sides immediately after RFCOMM connection. No encryption (shared se
 
 ```
 [ 32 bytes: X25519 public key ]
+[  6 bytes: wire id           ]  — sender's addressing identity (see note)
 ```
+
+**Wire id.** The 6-byte addressing identity used in every `sender_id` / `dest_id`
+field, ACK `from_id`, and relay route. For Linux/Windows it is the device's
+Bluetooth MAC. Android (API 31+ masks the hardware MAC from apps —
+`getAddress()` returns `02:00:00:00:00:00`) sends a stable random 6-byte id
+instead. The receiver **keys the peer by this wire id**, not by the transport
+Bluetooth address it dialed/accepted — so addressing is consistent regardless
+of platform. The transport address is retained only as a route for redialing.
+
+A 32-byte payload (no wire id) is the legacy form; the receiver falls back to
+the peer's transport Bluetooth address as its identity.
 
 **Sequence:**
 
 1. Both sides generate (or reuse) an X25519 keypair
-2. Both sides send a handshake frame containing their public key
-3. Both sides receive the peer's public key
+2. Both sides send a handshake frame containing their public key and wire id
+3. Both sides receive the peer's public key and adopt its wire id as the peer's identity
 4. Both sides compute the shared secret via ECDH (X25519)
 5. All subsequent frames use NaCl Box encryption (XSalsa20-Poly1305)
 
@@ -238,8 +250,8 @@ Device A                              Device B
 ────────────────────────────────────────────────
          ◄── RFCOMM connect ──►
 
-send Handshake(pubkey_A)  ──────────►  recv Handshake(pubkey_A)
-recv Handshake(pubkey_B)  ◄──────────  send Handshake(pubkey_B)
+send Handshake(pubkey_A, wire_A)  ──►  recv Handshake(pubkey_A, wire_A)
+recv Handshake(pubkey_B, wire_B)  ◄──  send Handshake(pubkey_B, wire_B)
 
          ECDH → shared secret
 

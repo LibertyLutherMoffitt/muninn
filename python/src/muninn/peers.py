@@ -80,6 +80,11 @@ class ConnectionManager:
         self.seen_reads: set[tuple[bytes, bytes]] = set()  # (msg_id, from_mac_bytes)
         self.relay_queue: dict[str, list[bytes]] = {}  # dest_addr -> [frame_bytes]
         self.indirect_via: dict[str, str] = {}  # addr -> relay_addr we learned from
+        # transport bond MAC -> peer wire id, for peers whose wire id differs
+        # from the BT address we dialed/accepted (e.g. Android, which hides its
+        # real MAC and announces a random wire id in the handshake). Lets the
+        # scanner dedup redials by transport while peers stay keyed by wire id.
+        self.peer_by_transport: dict[str, str] = {}
 
         # Rebuild unacked outbound from storage — re-encrypt fresh frames per
         # recipient (new nonce). msg_id stays the same so the receiver's seen
@@ -126,12 +131,12 @@ class ConnectionManager:
         new socket — otherwise a silently-dead peer would block all future
         reconnects for that address.
         """
-        addr = addr.upper()
+        transport_mac = addr.upper()
 
-        # Handshake — exchange pubkeys
+        # Handshake — exchange pubkeys + wire ids
         try:
             pubkey_bytes = bytes(self.private_key.public_key)
-            sock.sendall(protocol.encode_handshake(pubkey_bytes))
+            sock.sendall(protocol.encode_handshake(pubkey_bytes, self.local_mac_bytes))
 
             prev_timeout = sock.gettimeout()
             sock.settimeout(15)
@@ -140,12 +145,23 @@ class ConnectionManager:
             finally:
                 sock.settimeout(prev_timeout)
 
-            if frame_type != protocol.TYPE_HANDSHAKE or len(payload) != 32:
+            if frame_type != protocol.TYPE_HANDSHAKE:
+                sock.close()
+                return False
+            try:
+                peer_pubkey, wire_id = protocol.decode_handshake(payload)
+            except ValueError:
                 sock.close()
                 return False
 
-            box = crypto.derive_box(self.private_key, payload)
-            self.group_store.add_pubkey(addr, payload)
+            box = crypto.derive_box(self.private_key, peer_pubkey)
+            # The wire id is the peer's addressing identity. For Linux/Windows
+            # it equals the transport BT MAC; for Android it's a random id that
+            # stands in for the API-31-masked hardware MAC. Key the peer by wire
+            # id so MSG sender/dest, ACKs, and relay routing line up across
+            # platforms. Legacy peers send no wire id — fall back to transport.
+            addr = protocol.bytes_to_mac(wire_id) if wire_id else transport_mac
+            self.group_store.add_pubkey(addr, peer_pubkey)
         except (ConnectionError, OSError):
             try:
                 sock.close()
@@ -153,6 +169,8 @@ class ConnectionManager:
                 pass
             return False
 
+        if addr != transport_mac:
+            self.peer_by_transport[transport_mac] = addr
         self.indirect_via.pop(addr, None)
         peer = PeerState(addr=addr, sock=sock, box=box)
         peer.recv_thread = threading.Thread(
@@ -236,8 +254,23 @@ class ConnectionManager:
         stale = [k for k, v in self.indirect_via.items() if v == addr]
         for k in stale:
             del self.indirect_via[k]
+        # Drop the transport mapping (peers whose wire id != their bond MAC).
+        stale_tp = [t for t, w in self.peer_by_transport.items() if w == addr]
+        for t in stale_tp:
+            del self.peer_by_transport[t]
         if self.on_peer_change:
             self.on_peer_change(addr, False)
+
+    def is_connected(self, transport_mac: str) -> bool:
+        """True if a live peer owns this transport BT MAC — keyed directly by it
+        (Linux/Windows) or via a learned wire-id mapping (Android). The scanner
+        uses this to skip redialing devices that are already connected."""
+        transport_mac = transport_mac.upper()
+        with self.peers_lock:
+            if transport_mac in self.peers:
+                return True
+            wire = self.peer_by_transport.get(transport_mac)
+            return wire is not None and wire in self.peers
 
     def send_to(self, addr: str, frame: bytes) -> bool:
         """Send raw frame to peer. Returns False on error (removes peer)."""

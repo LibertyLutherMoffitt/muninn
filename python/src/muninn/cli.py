@@ -554,10 +554,9 @@ def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) 
             addr = addr.upper()
             if addr == local_mac:
                 continue
-            with conn_mgr.peers_lock:
-                if addr in conn_mgr.peers:
-                    deferred.pop(addr, None)
-                    continue
+            if conn_mgr.is_connected(addr):
+                deferred.pop(addr, None)
+                continue
 
             # Higher MAC defers 10s to let lower MAC initiate
             if not bt.should_keep_outgoing(local_mac, addr):

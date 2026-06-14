@@ -45,8 +45,21 @@ def recv_exact(sock, n: int) -> bytes:
 # --- Handshake ---
 
 
-def encode_handshake(pubkey: bytes) -> bytes:
-    return encode_frame(TYPE_HANDSHAKE, pubkey)
+def encode_handshake(pubkey: bytes, wire_id: bytes = b"") -> bytes:
+    """Handshake payload: 32-byte X25519 pubkey, optionally followed by the
+    sender's 6-byte wire id (its addressing identity). Omitting wire_id yields
+    the legacy 32-byte form; peers receiving it fall back to the transport MAC.
+    """
+    return encode_frame(TYPE_HANDSHAKE, pubkey + wire_id)
+
+
+def decode_handshake(payload: bytes) -> tuple[bytes, bytes | None]:
+    """Returns (pubkey, wire_id). wire_id is None for legacy 32-byte payloads."""
+    if len(payload) not in (32, 38):
+        raise ValueError(
+            f"handshake payload must be 32 or 38 bytes, got {len(payload)}"
+        )
+    return payload[:32], (payload[32:] if len(payload) == 38 else None)
 
 
 # --- Message ---
