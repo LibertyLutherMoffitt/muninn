@@ -15,12 +15,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -178,9 +182,13 @@ private fun ChatScreen(discovery: BtDiscovery) {
                 onDraftChange = { draft = it },
                 enabled = connected,
                 onSend = { if (ChatRepository.send(draft)) draft = "" },
-                modifier = Modifier
-                    .navigationBarsPadding()
-                    .imePadding(),
+                // union (per-side max), not a chain (sum): when the keyboard is
+                // up, WindowInsets.ime already covers the nav-bar region, so
+                // stacking navigationBarsPadding().imePadding() would add an
+                // extra nav-bar height and shove the screen up too far.
+                modifier = Modifier.windowInsetsPadding(
+                    WindowInsets.navigationBars.union(WindowInsets.ime),
+                ),
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
