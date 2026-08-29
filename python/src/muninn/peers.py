@@ -27,11 +27,13 @@ from nacl.public import PrivateKey
 
 from muninn import crypto, protocol
 from muninn.groups import Group, GroupStore
+from muninn.protocol import GROUP_ZERO_ID
 
 if TYPE_CHECKING:
     from muninn.storage import Storage
 
-GROUP_ZERO = b"\x00" * 16
+# Re-exported under the historical name for the CLI/GUI import sites.
+GROUP_ZERO = GROUP_ZERO_ID
 
 
 @dataclass

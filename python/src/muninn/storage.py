@@ -16,12 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from muninn.groups import Group
+from muninn.protocol import GROUP_ZERO_ID
 
-SCHEMA_VERSION = 1
-
-# Duplicated from peers.GROUP_ZERO. Importing would create a cycle, and this
-# byte pattern is a protocol constant unlikely to churn.
-_GROUP_ZERO = b"\x00" * 16
+SCHEMA_VERSION = 2
 
 
 def _row_ack_state(
@@ -96,6 +93,9 @@ class Storage:
                 return
             if current < 1:
                 self._conn.executescript(_SCHEMA_V1)
+            if current < 2:
+                self._conn.executescript(_SCHEMA_V2)
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # --- Identity ---
 
@@ -174,9 +174,46 @@ class Storage:
         """Return [(mac, pubkey, self_chosen_name, local_override), ...]."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT mac, pubkey, self_chosen_name, local_override FROM peers"
+                "SELECT mac, pubkey, self_chosen_name, local_override FROM peers "
+                "WHERE length(pubkey) = 32"
             ).fetchall()
         return [(r[0], bytes(r[1]), r[2], r[3]) for r in rows]
+
+    # --- Presence ---
+
+    def record_sighting(self, mac: str, ts: int) -> None:
+        """Note that `mac` was visible to a Bluetooth scan at `ts`.
+
+        Upserts because a device can be sighted before we ever hold its
+        pubkey — that is exactly the "nearby but not connectable" case the
+        peer list needs to show.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO peers (mac, pubkey, last_seen) VALUES (?, X'', ?) "
+                "ON CONFLICT(mac) DO UPDATE SET last_seen = excluded.last_seen",
+                (mac, ts),
+            )
+
+    def record_connection(self, mac: str, ts: int) -> None:
+        """Note a completed handshake with `mac` at `ts`."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO peers (mac, pubkey, last_seen, last_connected) "
+                "VALUES (?, X'', ?, ?) "
+                "ON CONFLICT(mac) DO UPDATE SET "
+                "  last_seen = excluded.last_seen, "
+                "  last_connected = excluded.last_connected",
+                (mac, ts, ts),
+            )
+
+    def load_presence(self) -> dict[str, tuple[int | None, int | None]]:
+        """Return {mac: (last_seen, last_connected)} for every known peer."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT mac, last_seen, last_connected FROM peers"
+            ).fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
 
     # --- Groups ---
 
@@ -326,7 +363,7 @@ class Storage:
                 "      (SELECT msg_id FROM message_recipients WHERE recipient = ?))"
                 "  ) ORDER BY m2.ts DESC LIMIT ?"
                 ") ORDER BY m.ts ASC",
-                (peer, _GROUP_ZERO, peer, local_mac, peer, limit),
+                (peer, GROUP_ZERO_ID, peer, local_mac, peer, limit),
             ).fetchall()
         return [
             (
@@ -387,7 +424,7 @@ class Storage:
                 "  ON r.msg_id = m.msg_id "
                 "WHERE m.group_id = ? AND m.sender = ? "
                 "ORDER BY ts DESC",
-                (_GROUP_ZERO, local_mac, _GROUP_ZERO, local_mac),
+                (GROUP_ZERO_ID, local_mac, GROUP_ZERO_ID, local_mac),
             ).fetchall()
         out: dict[str, tuple[str, int]] = {}
         for peer, body, ts in rows:
@@ -403,7 +440,7 @@ class Storage:
                 "WHERE m.group_id != ? AND m.ts = ("
                 "  SELECT MAX(ts) FROM messages WHERE group_id = m.group_id"
                 ")",
-                (_GROUP_ZERO,),
+                (GROUP_ZERO_ID,),
             ).fetchall()
         return {bytes(gid): (body, ts) for gid, body, ts in rows}
 
@@ -504,4 +541,13 @@ CREATE INDEX IF NOT EXISTS idx_recipients_unacked
     ON message_recipients(recipient) WHERE acked_at IS NULL;
 
 PRAGMA user_version = 1;
+"""
+
+# v2 — presence. `last_seen` is the most recent Bluetooth sighting (scan or
+# connection); `last_connected` the most recent completed handshake. Both are
+# unix seconds. Together they let the UI distinguish "connected", "nearby but
+# unreachable", and "gone" without keeping any of it in memory across restarts.
+_SCHEMA_V2 = """
+ALTER TABLE peers ADD COLUMN last_seen INTEGER;
+ALTER TABLE peers ADD COLUMN last_connected INTEGER;
 """

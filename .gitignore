@@ -38,3 +38,6 @@ captures/
 *.swp
 *.swo
 *~
+.venv-test/
+spec/kotlin-conformance/.gradle/
+spec/kotlin-conformance/build/

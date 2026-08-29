@@ -1,3 +1,4 @@
+import re
 import struct
 import time
 import uuid
@@ -11,6 +12,9 @@ TYPE_PROFILE = 0x06
 TYPE_PEER_ANNC = 0x07
 
 MAX_PAYLOAD = 0xFFFF  # uint16 — see PROTOCOL.md
+
+# group_id used by 1:1 DMs. 16 zero bytes, per PROTOCOL.md.
+GROUP_ZERO_ID = b"\x00" * 16
 
 
 class FrameTooLarge(ValueError):
@@ -71,9 +75,14 @@ def encode_message(
     sender_mac: bytes,
     dest_mac: bytes,
     encrypted: bytes,
+    timestamp: int | None = None,
 ) -> bytes:
-    timestamp = struct.pack("!I", int(time.time()))
-    payload = group_id + msg_id + sender_mac + dest_mac + timestamp + encrypted
+    """Encode a message frame. `timestamp` defaults to now; pass it explicitly
+    to produce a byte-for-byte reproducible frame (the wire vectors do)."""
+    if timestamp is None:
+        timestamp = int(time.time())
+    ts = struct.pack("!I", timestamp & 0xFFFFFFFF)
+    payload = group_id + msg_id + sender_mac + dest_mac + ts + encrypted
     return encode_frame(TYPE_MESSAGE, payload)
 
 
@@ -165,11 +174,30 @@ def decode_profile(payload: bytes) -> str:
 # --- Peer announcement ---
 
 
+def _truncate_utf8(text: str, limit: int) -> bytes:
+    """Encode `text`, cut to at most `limit` bytes on a codepoint boundary.
+
+    A naive `text.encode()[:limit]` can split a multi-byte sequence, and the
+    decoder (errors="replace") would render the tail as U+FFFD on the peer.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return encoded
+    # Back off to the start of the codepoint that straddles the cut. UTF-8
+    # continuation bytes are 0b10xxxxxx.
+    end = limit
+    while end > 0 and (encoded[end] & 0xC0) == 0x80:
+        end -= 1
+    return encoded[:end]
+
+
 def encode_peer_annc(peers: list[tuple[bytes, bytes, str]]) -> bytes:
     """peers: list of (mac_6_bytes, pubkey_32_bytes, display_name)."""
+    if len(peers) > 255:
+        raise ValueError(f"peer_count is a uint8; got {len(peers)} peers")
     parts = [struct.pack("!B", len(peers))]
     for mac, pubkey, name in peers:
-        name_bytes = name.encode("utf-8")[:255]
+        name_bytes = _truncate_utf8(name, 255)
         parts.append(mac)
         parts.append(pubkey)
         parts.append(struct.pack("!B", len(name_bytes)))
@@ -196,8 +224,19 @@ def decode_peer_annc(payload: bytes) -> list[tuple[bytes, bytes, str]]:
 # --- Helpers ---
 
 
+_MAC_RE = re.compile(r"\A[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\Z")
+
+
 def mac_to_bytes(mac_str: str) -> bytes:
-    return bytes(int(b, 16) for b in mac_str.split(":"))
+    """Parse "AA:BB:CC:DD:EE:FF" into 6 bytes, MSB first.
+
+    Strict on purpose: every wire field that takes a MAC is fixed at 6 bytes,
+    so a malformed address must raise here rather than silently shift every
+    following field in the frame.
+    """
+    if not _MAC_RE.match(mac_str):
+        raise ValueError(f"not a 6-octet MAC address: {mac_str!r}")
+    return bytes.fromhex(mac_str.replace(":", ""))
 
 
 def bytes_to_mac(mac_bytes: bytes) -> str:
