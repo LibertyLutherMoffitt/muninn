@@ -13,7 +13,7 @@ try:
 except ImportError:
     _HAS_READLINE = False
 
-from muninn import bt
+from muninn import bt, presence
 from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import Group, GroupStore
 from muninn.peers import GROUP_ZERO, ConnectionManager
@@ -34,6 +34,10 @@ COMMANDS = [
 
 HISTORY_DEFAULT = 20
 HISTORY_MAX = 500
+
+# How long to hold a new peer's "connected" line waiting for its Profile
+# frame, so we can name it instead of printing a MAC and correcting it.
+PROFILE_GRACE = 1.0
 
 
 def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
@@ -107,6 +111,9 @@ class ChatUI:
         self.outbound: dict[bytes, set[str]] = {}
         # conv_key -> [(msg_id, sender_addr)] — unread incoming msgs per conv
         self.unread: dict[tuple[str, str | bytes], list[bytes]] = {}
+        # Connect announcements held back until the peer's Profile arrives.
+        self._pending_connects: dict[str, threading.Timer] = {}
+        self._pending_lock = threading.Lock()
         # Blocks _input_reader from drawing the next prompt until the current
         # command has finished printing all output.
         self._ready_for_prompt = threading.Event()
@@ -187,10 +194,35 @@ class ChatUI:
             self._status(f"\u2713\u2713 {self._name(from_mac)}")
 
     def _on_profile(self, addr: str, name: str) -> None:
+        # A peer's Profile frame usually lands within milliseconds of its
+        # handshake, but the two race: whichever side finishes add_peer() last
+        # sees the name first. If we are still holding this peer's "connected"
+        # line waiting for exactly this, announce it now with the real name
+        # instead of printing a MAC and correcting it a moment later.
+        if self._resolve_pending_connect(addr):
+            return
         if name:
             self._display(f"  {addr} is now known as {name}")
         else:
             self._display(f"  {addr} cleared their display name")
+
+    def _resolve_pending_connect(self, addr: str) -> bool:
+        """Flush a deferred connect announcement for `addr`. True if we did."""
+        with self._pending_lock:
+            timer = self._pending_connects.pop(addr, None)
+        if timer is None:
+            return False
+        timer.cancel()
+        self._announce_connected(addr)
+        return True
+
+    def _announce_connected(self, addr: str) -> None:
+        label = self._name(addr)
+        self._display(f"+ {label} connected")
+        if self.active_conv is None:
+            self.active_conv = ("dm", addr)
+            self._display(f"  Active conversation: DM with {label}")
+            self._render_history(self.active_conv)
 
     def _flush_reads(self, conv_key: tuple[str, str | bytes]) -> None:
         for msg_id in self.unread.pop(conv_key, []):
@@ -234,16 +266,94 @@ class ChatUI:
                     self._display(f"  {t} [{gname}] < {self._name(sender)}: {body}")
         self._display("---")
 
+    def _presence_label(self, addr: str) -> str:
+        """A peer's connectivity, rendered for a terminal."""
+        status = self.conn_mgr.presence.status(addr)
+        if status.state == presence.CONNECTED:
+            return "connected"
+        if status.state == presence.RELAY:
+            via = status.via
+            return f"relay via {self._name(via)}" if via else "relay"
+        return status.describe()
+
+    def _print_presence(self, reachable_only: bool) -> None:
+        """Render the peer list grouped by how reachable each peer is.
+
+        `/peers` shows only what we can talk to right now; `/known` adds every
+        peer we have ever exchanged keys with, plus any device the radio has
+        seen but we could not connect to.
+        """
+        tracker = self.conn_mgr.presence
+        tracker.sync_from_manager(self.conn_mgr)
+        statuses = tracker.all_statuses()
+
+        known = {a for a in self.group_store.pubkeys if a != self.local_mac}
+        # Devices seen in a scan that we have no key for are still worth
+        # showing — that is the "someone nearby isn't paired yet" case.
+        candidates = known | {
+            a
+            for a, s in statuses.items()
+            if s.state != presence.OFFLINE or s.last_seen is not None
+        }
+
+        buckets: dict[str, list[str]] = {
+            presence.CONNECTED: [],
+            presence.RELAY: [],
+            presence.NEARBY: [],
+            presence.OFFLINE: [],
+        }
+        for addr in sorted(candidates):
+            state = statuses.get(addr, tracker.status(addr)).state
+            buckets.setdefault(state, []).append(addr)
+
+        headings = [
+            (presence.CONNECTED, "Connected"),
+            (presence.RELAY, "Reachable via relay"),
+            (presence.NEARBY, "Nearby"),
+        ]
+        if not reachable_only:
+            headings.append((presence.OFFLINE, "Not in range"))
+
+        printed = False
+        for state, heading in headings:
+            addrs = buckets.get(state) or []
+            if not addrs:
+                continue
+            printed = True
+            print(f"{heading}:")
+            for addr in addrs:
+                name = self._name(addr)
+                suffix = f" ({addr})" if name != addr else ""
+                unknown = " · no key yet" if addr not in known else ""
+                print(f"  {name}{suffix}  — {self._presence_label(addr)}{unknown}")
+        if not printed:
+            print(
+                "No peers yet."
+                if reachable_only
+                else "No known peers and nothing seen nearby."
+            )
+
     def _on_peer_change(self, addr: str, connected: bool) -> None:
-        label = self._name(addr)
-        if connected:
-            self._display(f"+ {label} connected")
-            if self.active_conv is None:
-                self.active_conv = ("dm", addr)
-                self._display(f"  Active conversation: DM with {label}")
-                self._render_history(self.active_conv)
-        else:
-            self._display(f"- {label} disconnected")
+        if not connected:
+            self._resolve_pending_connect(addr)
+            self._display(f"- {self._name(addr)} disconnected")
+            return
+
+        if self._name(addr) != addr:
+            # We already know what to call them (stored from a previous run, or
+            # their Profile beat our handshake) — nothing to wait for.
+            self._announce_connected(addr)
+            return
+
+        # First sight of this peer. Give their Profile frame a moment to land so
+        # the user sees a name rather than a MAC that renames itself.
+        timer = threading.Timer(
+            PROFILE_GRACE, lambda: self._resolve_pending_connect(addr)
+        )
+        timer.daemon = True
+        with self._pending_lock:
+            self._pending_connects[addr] = timer
+        timer.start()
 
     def _on_group_setup(self, group: Group) -> None:
         members = len(group.members)
@@ -275,58 +385,10 @@ class ChatUI:
         cmd = parts[0].lower()
 
         if cmd == "/peers":
-            with self.conn_mgr.peers_lock:
-                direct_addrs = list(self.conn_mgr.peers.keys())
-            direct_set = set(direct_addrs)
-            # Relay section: all known peers that aren't direct. Uses
-            # group_store.pubkeys (not indirect_via) as the source of truth so
-            # peers whose pubkey arrived via DB or a previous Peer Annc still
-            # show even if indirect_via wasn't populated yet. indirect_via is
-            # used for the "via X" annotation only (best-effort).
-            relay_addrs = [
-                addr
-                for addr in self.group_store.pubkeys
-                if addr != self.local_mac and addr not in direct_set
-            ]
-            if not direct_addrs and not relay_addrs:
-                print("No connected or reachable peers.")
-            else:
-                if direct_addrs:
-                    print("Connected:")
-                    for addr in direct_addrs:
-                        name = self._name(addr)
-                        suffix = f" ({addr})" if name != addr else ""
-                        print(f"  {name}{suffix}")
-                if relay_addrs:
-                    print("Reachable via relay:")
-                    for addr in relay_addrs:
-                        name = self._name(addr)
-                        suffix = f" ({addr})" if name != addr else ""
-                        via = self.conn_mgr.indirect_via.get(addr)
-                        via_str = self._name(via) if via else "?"
-                        print(f"  {name}{suffix}  via {via_str}")
+            self._print_presence(reachable_only=True)
 
         elif cmd == "/known":
-            all_peers = sorted(
-                addr for addr in self.group_store.pubkeys if addr != self.local_mac
-            )
-            if not all_peers:
-                print("No known peers.")
-            else:
-                with self.conn_mgr.peers_lock:
-                    direct_set = set(self.conn_mgr.peers.keys())
-                print("All known peers:")
-                for addr in all_peers:
-                    name = self._name(addr)
-                    suffix = f" ({addr})" if name != addr else ""
-                    if addr in direct_set:
-                        status = "  [connected]"
-                    elif addr in self.conn_mgr.indirect_via:
-                        via = self.conn_mgr.indirect_via[addr]
-                        status = f"  [relay via {self._name(via)}]"
-                    else:
-                        status = "  [offline]"
-                    print(f"  {name}{suffix}{status}")
+            self._print_presence(reachable_only=False)
 
         elif cmd == "/dm":
             if len(parts) < 2:
@@ -440,8 +502,8 @@ class ChatUI:
             print("  /nick <peer> <name>     — local override for a peer")
             print('  /nick <peer> ""         — clear a local override')
             print("  /list                   — show conversations")
-            print("  /peers                  — show connected + relay peers")
-            print("  /known                  — show all peers ever seen")
+            print("  /peers                  — who is reachable right now")
+            print("  /known                  — every known peer + who is nearby")
             print(
                 f"  /history [N]            — show last N msgs (default {HISTORY_DEFAULT})"
             )
@@ -527,22 +589,30 @@ def acceptor(conn_mgr: ConnectionManager) -> None:
 
 def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) -> None:
     """Periodically discover and connect to new Muninn peers."""
-    # Initial scan to populate BlueZ cache
+    # Initial scan to populate the BlueZ cache. Its results are sightings too —
+    # discarding them left a device visible at launch looking offline until the
+    # first periodic re-scan, two minutes later.
     try:
-        bt.scan_devices(duration=5)
+        for addr, _name in bt.scan_devices(duration=5):
+            conn_mgr.presence.record_sighting(addr)
     except Exception:
         pass
 
     deferred: dict[str, float] = {}  # MAC tiebreaker deferral
     cycles = 0
+    presence = conn_mgr.presence
 
     while not stop.is_set():
         cycles += 1
         # Refresh BT cache every ~2 min so UUIDs stay current and newly-online
         # peers are discoverable even if they missed the initial scan window.
+        # Every device the inquiry returns counts as a sighting, Muninn or not —
+        # that is what lets the UI say "nearby but can't connect" rather than
+        # silently showing a peer as offline.
         if cycles % 8 == 0:
             try:
-                bt.scan_devices(duration=5, quiet=True)
+                for addr, _name in bt.scan_devices(duration=5, quiet=True):
+                    presence.record_sighting(addr)
             except Exception:
                 pass
         try:
@@ -554,6 +624,7 @@ def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) 
             addr = addr.upper()
             if addr == local_mac:
                 continue
+            presence.record_sighting(addr)
             if conn_mgr.is_connected(addr):
                 deferred.pop(addr, None)
                 continue
@@ -570,9 +641,12 @@ def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) 
             try:
                 bt.ensure_paired(addr)
                 sock, peer_addr = bt.connect(addr)
-                conn_mgr.add_peer(sock, peer_addr)
-            except (ConnectionError, OSError):
-                pass
+                if not conn_mgr.add_peer(sock, peer_addr):
+                    presence.record_dial_failure(addr, "handshake failed")
+            except (ConnectionError, OSError) as e:
+                # Visible to the radio but unreachable. Recorded so the peer
+                # list can distinguish this from "out of range entirely".
+                presence.record_dial_failure(addr, str(e))
 
         stop.wait(15)
 

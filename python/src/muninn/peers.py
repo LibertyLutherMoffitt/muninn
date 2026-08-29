@@ -27,6 +27,7 @@ from nacl.public import PrivateKey
 
 from muninn import crypto, protocol
 from muninn.groups import Group, GroupStore
+from muninn.presence import PresenceTracker
 from muninn.protocol import GROUP_ZERO_ID
 
 if TYPE_CHECKING:
@@ -67,6 +68,10 @@ class ConnectionManager:
         self.display_name = display_name
         if display_name:
             self.group_store.set_name(local_mac, display_name)
+
+        # Shared connectivity view. Fed here (connect/disconnect/relay) and by
+        # the scanner (sightings, dial failures); read by the CLI and GUI.
+        self.presence = PresenceTracker(storage=storage, local_mac=local_mac)
 
         self.peers: dict[str, PeerState] = {}
         self.peers_lock = threading.Lock()
@@ -221,6 +226,7 @@ class ConnectionManager:
             for existing_addr in existing:
                 self.send_to(existing_addr, annc)
 
+        self.presence.record_connected(addr)
         if self.on_peer_change:
             self.on_peer_change(addr, True)
 
@@ -260,6 +266,9 @@ class ConnectionManager:
         stale_tp = [t for t, w in self.peer_by_transport.items() if w == addr]
         for t in stale_tp:
             del self.peer_by_transport[t]
+        self.presence.record_disconnected(addr)
+        for k in stale:
+            self.presence.clear_relay(k)
         if self.on_peer_change:
             self.on_peer_change(addr, False)
 
@@ -598,8 +607,11 @@ class ConnectionManager:
             if had_name and self.on_profile:
                 self.on_profile(from_addr, "")
             return
+        # Only surface an actual change. A reconnect re-sends PROFILE, and
+        # announcing "X is now known as X" on every reconnect is noise.
+        changed = self.group_store.names.get(from_addr) != name
         self.group_store.set_name(from_addr, name)
-        if self.on_profile:
+        if changed and self.on_profile:
             self.on_profile(from_addr, name)
         # Re-announce updated name to all other connected peers so indirect
         # peers learn this device's nick without waiting for a reconnect.
@@ -641,6 +653,7 @@ class ConnectionManager:
             # Only skip if addr is currently a direct peer — direct beats relay.
             if addr not in direct:
                 self.indirect_via[addr] = from_addr
+                self.presence.record_relay(addr, from_addr)
 
     def set_display_name(self, name: str) -> None:
         """Update our own display name and broadcast to all connected peers."""
