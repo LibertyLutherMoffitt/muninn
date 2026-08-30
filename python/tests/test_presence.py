@@ -99,7 +99,9 @@ def test_one_dial_failure_is_not_yet_unreachable(tracker):
 
 
 def test_repeated_dial_failures_mark_a_visible_peer_unreachable(tracker):
-    tracker.record_sighting(PEER)
+    # It has to be a peer for this to be worth reporting — the scanner probes
+    # every radio it hears, and a headset refusing us is not news.
+    tracker.record_sighting(PEER, advertises_muninn=True)
     for _ in range(presence.UNREACHABLE_AFTER):
         tracker.record_dial_failure(PEER, "br-connection-key-missing")
     status = tracker.status(PEER)
@@ -312,3 +314,42 @@ def test_the_acceptor_survives_a_peer_that_blows_up(node_factory, monkeypatch):
     threading.Thread(target=run, daemon=True).start()
     assert done.wait(5), "acceptor did not keep going after a failing peer"
     assert calls["n"] == 2, "it stopped accepting after the first failure"
+
+
+# --- Telling peers apart from passing radios ---
+
+
+def test_a_plain_sighting_is_not_treated_as_a_peer(tracker):
+    """The scanner probes every radio it hears; most are other people's
+    headsets and have no business in a conversation list."""
+    tracker.record_sighting(PEER)
+    assert tracker.status(PEER).advertises_muninn is False
+    assert tracker.muninn_devices() == {}
+
+
+def test_advertising_the_service_marks_a_device_as_a_peer(tracker):
+    tracker.record_sighting(PEER, advertises_muninn=True)
+    assert tracker.status(PEER).advertises_muninn is True
+    assert list(tracker.muninn_devices()) == [PEER]
+
+
+def test_connecting_marks_a_device_as_a_peer(tracker):
+    tracker.record_connected(PEER)
+    assert tracker.status(PEER).advertises_muninn is True
+
+
+def test_the_peer_flag_is_sticky_across_later_bare_sightings(tracker):
+    # Adapter caches drop UUIDs routinely; a device that spoke Muninn still does.
+    tracker.record_sighting(PEER, advertises_muninn=True)
+    tracker.record_sighting(PEER)
+    assert tracker.status(PEER).advertises_muninn is True
+
+
+def test_unreachable_reporting_ignores_devices_that_are_not_peers(tracker):
+    for _ in range(presence.UNREACHABLE_AFTER):
+        tracker.record_dial_failure(PEER2, "not muninn")
+    assert tracker.nearby_unreachable() == []
+    tracker.record_sighting(PEER, advertises_muninn=True)
+    for _ in range(presence.UNREACHABLE_AFTER):
+        tracker.record_dial_failure(PEER, "key missing")
+    assert tracker.nearby_unreachable() == [PEER]

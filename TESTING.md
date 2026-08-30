@@ -116,7 +116,29 @@ check a change to the shared core did not break one of them.
 | `MUNINN_LOOPBACK_NAME` | Device name peers see in scans. |
 | `MUNINN_LOOPBACK_DIR` | Rendezvous directory. Instances only find each other if this matches. |
 | `MUNINN_LOOPBACK_GHOSTS` | `MAC=Name,…` — devices that advertise the service and refuse every connection. |
+| `MUNINN_LOOPBACK_NOISE` | `MAC=Name,…` — devices that are not Muninn at all: visible, never advertise, always refuse. A cabin full of headsets. |
+| `MUNINN_LOOPBACK_HIDE_UUID` | `1` to omit this instance's service record, modelling an adapter whose SDP cache never resolves. |
 | `MUNINN_LOOPBACK_PAIRING` | `1` to require `ensure_paired()` before connecting. |
+| `MUNINN_SCAN_POLICY` | `aggressive` / `balanced` / `conservative`, overriding the stored choice for one run. |
+
+### Simulating a full cabin
+
+The case the dial scheduler exists for is forty Bluetooth devices in range and
+one of them the person you want. `MUNINN_LOOPBACK_NOISE` fabricates the other
+thirty-nine, and `MUNINN_LOOPBACK_HIDE_UUID` models the failure that makes this
+hard: an adapter whose SDP cache never learns the Muninn UUID, so the peer is
+invisible to a service-filtered lookup and only a blind dial can find it.
+
+```bash
+export MUNINN_LOOPBACK_NOISE="$(python - <<'PY'
+print(",".join(f"C0:FF:EE:00:{i//256:02X}:{i%256:02X}=Headset{i}" for i in range(40)))
+PY
+)"
+```
+
+`test_integration_loopback.py` runs both scenarios. The hidden-UUID test hides
+the record on *both* sides on purpose — hiding one proves nothing, because the
+other side would still discover it and dial in.
 
 ### Ghosts
 

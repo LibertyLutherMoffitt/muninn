@@ -27,6 +27,10 @@ Environment:
     MUNINN_LOOPBACK_NAME         device name shown to peers in scans
     MUNINN_LOOPBACK_DIR          rendezvous directory
     MUNINN_LOOPBACK_GHOSTS       "MAC=Name,MAC=Name" — visible, unconnectable
+    MUNINN_LOOPBACK_NOISE        "MAC=Name,..." — visible, not Muninn, refuses
+    MUNINN_LOOPBACK_HIDE_UUID    set to 1 to omit the service from this
+                                 instance's advertisement, modelling an adapter
+                                 whose SDP cache never learns the UUID
     MUNINN_LOOPBACK_PAIRING      set to 1 to require ensure_paired() first
 """
 
@@ -119,11 +123,12 @@ def _ghosts() -> list[tuple[str, str]]:
     Fabricated on purpose: this is how a peer with Bluetooth off, or one out of
     RFCOMM range but inside inquiry range, presents itself.
     """
-    raw = os.environ.get("MUNINN_LOOPBACK_GHOSTS", "").strip()
-    if not raw:
-        return []
+    return _parse_device_list(os.environ.get("MUNINN_LOOPBACK_GHOSTS", ""))
+
+
+def _parse_device_list(raw: str) -> list[tuple[str, str]]:
     out = []
-    for entry in raw.split(","):
+    for entry in raw.strip().split(","):
         entry = entry.strip()
         if not entry:
             continue
@@ -132,8 +137,18 @@ def _ghosts() -> list[tuple[str, str]]:
     return out
 
 
+def _noise() -> list[tuple[str, str]]:
+    """Devices that are not Muninn at all — a cabin full of headsets.
+
+    They answer inquiry, never advertise the service, and refuse every
+    connection. Probing them is the cost the scheduler has to ration.
+    """
+    return _parse_device_list(os.environ.get("MUNINN_LOOPBACK_NOISE", ""))
+
+
 def _is_ghost(addr: str) -> bool:
-    return any(mac == addr.upper() for mac, _ in _ghosts())
+    addr = addr.upper()
+    return any(mac == addr for mac, _ in _ghosts() + _noise())
 
 
 # --- Server ---
@@ -160,7 +175,13 @@ def create_server() -> None:
                 "name": _device_name(),
                 "port": port,
                 "pid": os.getpid(),
-                "uuid": SERVICE_UUID,
+                # Omitted when MUNINN_LOOPBACK_HIDE_UUID=1 so discover()
+                # cannot see this instance and only a probe will find it.
+                "uuid": (
+                    ""
+                    if os.environ.get("MUNINN_LOOPBACK_HIDE_UUID") == "1"
+                    else SERVICE_UUID
+                ),
                 "started": int(time.time()),
             }
         )
@@ -246,7 +267,14 @@ def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str,
     # A real inquiry takes seconds; keep a token delay so callers that assume
     # scanning is slow behave the same here, but never block a test for long.
     time.sleep(min(float(duration), 0.2))
-    found = discover()
+    me = get_local_mac()
+    # Inquiry sees every radio, including instances hiding their service record
+    # and devices that are not Muninn at all.
+    found = [
+        (r["mac"].upper(), r.get("name") or r["mac"])
+        for r in _read_records()
+        if r["mac"].upper() != me
+    ] + [g for g in _ghosts() + _noise() if g[0] != me]
     seen: set[str] = set()
     out = []
     for mac, name in found:

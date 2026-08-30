@@ -1,9 +1,11 @@
 package com.muninn
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -45,6 +47,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -122,6 +126,23 @@ class MainActivity : ComponentActivity() {
         if (missing.isEmpty()) startRadio() else permLauncher.launch(missing.toTypedArray())
     }
 
+    /**
+     * Ask Android to make this phone findable.
+     *
+     * Without it the phone answers connections but never appears in anyone
+     * else's inquiry, so a desktop can never make first contact — only the
+     * phone could ever start a conversation. Android caps the window (300s is
+     * the documented maximum on most builds), and only the user can grant it,
+     * so this is offered rather than nagged: the button in the top bar.
+     */
+    fun requestDiscoverable(seconds: Int = 300) {
+        val intent = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
+            putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, seconds)
+        }
+        runCatching { startActivity(intent) }
+            .onFailure { Log.w("MainActivity", "discoverable request refused: ${it.message}") }
+    }
+
     private fun startRadio() {
         ContextCompat.startForegroundService(this, Intent(this, MuninnService::class.java))
     }
@@ -137,6 +158,8 @@ private fun ChatScreen(discovery: BtDiscovery) {
     val presence by ChatRepository.presence.collectAsState()
     var draft by remember { mutableStateOf("") }
     var showPairing by remember { mutableStateOf(false) }
+    var showScanMode by remember { mutableStateOf(false) }
+    var scanPolicy by remember { mutableStateOf(Settings.scanPolicy(ctx)) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size) {
@@ -182,6 +205,7 @@ private fun ChatScreen(discovery: BtDiscovery) {
                     }
                 },
                 actions = {
+                    TextButton(onClick = { showScanMode = true }) { Text(scanPolicy.label) }
                     TextButton(onClick = { showPairing = true }) { Text("Pair") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -222,6 +246,27 @@ private fun ChatScreen(discovery: BtDiscovery) {
         }
     }
 
+    if (showScanMode) {
+        ScanModeDialog(
+            current = scanPolicy,
+            onDismiss = { showScanMode = false },
+            onPick = { picked ->
+                scanPolicy = picked
+                Settings.setScanPolicy(ctx, picked)
+                // Restart the service so the running loop picks it up now
+                // rather than after the old, longer waits expire.
+                ContextCompat.startForegroundService(
+                    ctx, Intent(ctx, MuninnService::class.java)
+                )
+                showScanMode = false
+            },
+            onMakeDiscoverable = {
+                (ctx as? MainActivity)?.requestDiscoverable()
+                showScanMode = false
+            },
+        )
+    }
+
     if (showPairing) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
@@ -234,6 +279,63 @@ private fun ChatScreen(discovery: BtDiscovery) {
             PairingSheet(discovery)
         }
     }
+}
+
+@Composable
+private fun ScanModeDialog(
+    current: ScanPolicy,
+    onDismiss: () -> Unit,
+    onPick: (ScanPolicy) -> Unit,
+    onMakeDiscoverable: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("How hard to look for peers") },
+        text = {
+            Column {
+                Text(
+                    "Scanning finds people sooner but costs battery.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                ScanPolicy.entries.forEach { policy ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(policy) }
+                            .padding(vertical = 8.dp),
+                    ) {
+                        RadioButton(
+                            selected = policy == current,
+                            onClick = { onPick(policy) },
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Column {
+                            Text(policy.label, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                policy.description,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Other devices can only find this phone while it is " +
+                        "discoverable. Android limits that to a few minutes at a time.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onMakeDiscoverable) { Text("Make discoverable") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 @Composable

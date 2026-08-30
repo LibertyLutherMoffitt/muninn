@@ -13,7 +13,12 @@ sourceSets {
     main {
         kotlin.setSrcDirs(listOf("../../android/app/src/main/kotlin"))
         // Everything else in that tree pulls in android.* and cannot compile here.
-        kotlin.include("com/muninn/Protocol.kt", "com/muninn/PeerBook.kt")
+        kotlin.include(
+            "com/muninn/Protocol.kt",
+            "com/muninn/PeerBook.kt",
+            "com/muninn/ScanPolicy.kt",
+            "com/muninn/DialScheduler.kt",
+        )
     }
 }
 

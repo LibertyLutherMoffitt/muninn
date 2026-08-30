@@ -24,11 +24,14 @@ import kotlinx.coroutines.withContext
 /**
  * Foreground service that owns the Bluetooth radio:
  *   - opens an RFCOMM listening socket on the Muninn UUID
- *   - tries connecting to bonded devices that advertise the Muninn UUID
+ *   - runs its own inquiry, so peers are found with the app in the background
+ *   - dials whatever [DialScheduler] says is worth dialling
  *   - hands each accepted/connected socket to a PeerSession
  *
- * Milestone 1+ scope. No discovery, no UI peer list, no ConnectionManager
- * yet — those land in milestone 4 (peers.py port).
+ * Discovery lives here rather than in the activity on purpose: a peer who sits
+ * down near you has to be picked up with the screen off, which is the whole
+ * point of the app. The pairing sheet in the UI is now a manual fallback for
+ * when SDP is uncooperative, not the only way in.
  */
 class MuninnService : Service() {
 
@@ -37,6 +40,8 @@ class MuninnService : Service() {
 
     private lateinit var bt: Bt
     private lateinit var identity: Identity.Loaded
+    private lateinit var discovery: BtDiscovery
+    private val scheduler = DialScheduler()
     private var serverSocket: BluetoothServerSocket? = null
     private var acceptJob: Job? = null
     private var connectJob: Job? = null
@@ -52,6 +57,10 @@ class MuninnService : Service() {
 
         bt = Bt(this)
         identity = Identity.load(this)
+        discovery = BtDiscovery(this)
+        scheduler.policy = Settings.scanPolicy(this)
+        ChatRepository.book.knownPeers().forEach(scheduler::markPeer)
+        KnownPeers.load(this).forEach(scheduler::markPeer)
         Log.i(tag, "wireMac=${identity.wireMacStr} pubkey=${identity.pubkey.toHex8()}…")
 
         if (!bt.isReady) {
@@ -59,6 +68,8 @@ class MuninnService : Service() {
             updateNotification("Bluetooth disabled")
             return
         }
+        discovery.start()
+        watchDiscoveries()
         startAcceptLoop()
         startConnectLoop()
         updateNotification("listening on Muninn UUID")
@@ -68,6 +79,7 @@ class MuninnService : Service() {
 
     override fun onDestroy() {
         Log.i(tag, "stopping")
+        runCatching { discovery.stop() }
         runCatching { serverSocket?.close() }
         synchronized(sessions) {
             sessions.forEach { it.stop() }
@@ -99,29 +111,87 @@ class MuninnService : Service() {
         }
     }
 
-    private fun startConnectLoop() {
-        connectJob = scope.launch(Dispatchers.IO) {
-            while (isActive) {
-                // Peers the user explicitly picked in the pairing sheet — dialed
-                // directly (insecure RFCOMM needs no bond). Plus any device
-                // bonded outside the app that advertises the Muninn UUID.
-                val known = KnownPeers.load(this@MuninnService)
-                val bondedMuninn = bt.bondedDevices()
-                    .filter { deviceAdvertisesMuninn(it) }
-                    .map { it.address }
-                val targets = (known + bondedMuninn).map { it.uppercase() }.toSet()
-
-                for (addr in targets) {
-                    if (!isActive) break
-                    if (alreadyConnected(addr)) continue
-                    val device = bt.remoteDevice(addr) ?: continue
-                    ChatRepository.book.recordSighting(addr)
-                    tryConnect(device)
+    /**
+     * Feed every inquiry result to the scheduler.
+     *
+     * `muninn` means SDP confirmed the service — a hint that promotes the
+     * device to a peer. Everything else is a candidate to probe, because
+     * Android's SDP cache frequently never resolves for a device we have not
+     * connected to, and a blind dial is the only sure test.
+     */
+    private fun watchDiscoveries() {
+        scope.launch {
+            discovery.devices.collect { devices ->
+                val now = System.currentTimeMillis()
+                for (device in devices) {
+                    scheduler.saw(device.address, now, isPeer = device.muninn)
+                    ChatRepository.book.recordSighting(device.address, device.rssi, now)
                 }
                 ChatRepository.refreshPresence()
-                delay(15_000)
             }
         }
+    }
+
+    private fun startConnectLoop() {
+        connectJob = scope.launch(Dispatchers.IO) {
+            var lastInquiry = 0L
+            while (isActive) {
+                val policy = scheduler.policy
+                val now = System.currentTimeMillis()
+
+                // Peers we already hold keys for stay dial-worthy whether or
+                // not this inquiry saw them; inquiry misses are routine.
+                KnownPeers.load(this@MuninnService).forEach(scheduler::markPeer)
+                ChatRepository.book.knownPeers().forEach(scheduler::markPeer)
+                bt.bondedDevices()
+                    .filter { deviceAdvertisesMuninn(it) }
+                    .forEach { scheduler.markPeer(it.address) }
+
+                if (now - lastInquiry >= policy.inquiryIntervalMs) {
+                    lastInquiry = now
+                    runCatching { discovery.scan() }
+                }
+
+                val plan = scheduler.plan(now, ::alreadyConnected)
+                for (addr in plan.peers) {
+                    if (!isActive) break
+                    dial(addr, probe = false)
+                }
+                for (addr in plan.probes) {
+                    if (!isActive) break
+                    dial(addr, probe = true)
+                }
+                ChatRepository.refreshPresence()
+                delay(policy.dialIntervalMs)
+            }
+        }
+    }
+
+    private suspend fun dial(address: String, probe: Boolean) {
+        val device = bt.remoteDevice(address) ?: return
+        val now = System.currentTimeMillis()
+        val sock: BluetoothSocket = try {
+            withContext(Dispatchers.IO) { bt.connect(device) }
+        } catch (e: Throwable) {
+            scheduler.failed(address, now, e.message ?: "connect failed")
+            // A headset refusing us is not news; only report a device we
+            // believe is a peer as unreachable.
+            if (!probe) {
+                ChatRepository.book.recordDialFailure(address, e.message ?: "connect failed", now)
+            }
+            return
+        }
+        Log.i(tag, "connected to $address")
+        scheduler.succeeded(address)
+        // Remember it so we dial it directly next time without waiting on SDP.
+        KnownPeers.add(this, address)
+        spawnSession(sock)
+    }
+
+    /** Change how hard to hunt, and remember the choice. */
+    fun setScanPolicy(policy: ScanPolicy) {
+        Settings.setScanPolicy(this, policy)
+        scheduler.policy = policy
     }
 
     private fun deviceAdvertisesMuninn(device: BluetoothDevice): Boolean {
@@ -144,21 +214,6 @@ class MuninnService : Service() {
         synchronized(sessions) {
             return sessions.any { it.remoteAddress.equals(address, ignoreCase = true) }
         }
-    }
-
-    private suspend fun tryConnect(device: BluetoothDevice) {
-        val sock: BluetoothSocket = try {
-            withContext(Dispatchers.IO) { bt.connect(device) }
-        } catch (e: Throwable) {
-            Log.d(tag, "connect ${device.address} failed: ${e.message}")
-            // The radio can see it but no session forms — that is the state
-            // worth surfacing, not silence.
-            ChatRepository.book.recordDialFailure(device.address, e.message ?: "connect failed")
-            ChatRepository.refreshPresence()
-            return
-        }
-        Log.i(tag, "connected to ${device.address}")
-        spawnSession(sock)
     }
 
     private fun spawnSession(sock: BluetoothSocket) {

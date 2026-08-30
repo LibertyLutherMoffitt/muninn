@@ -14,7 +14,8 @@ from PySide6.QtCore import QUrl
 from muninn import bt
 from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import GroupStore
-from muninn.discovery import acceptor, scanner
+from muninn import scanpolicy
+from muninn.discovery import Scanner, acceptor
 from muninn.peers import ConnectionManager
 from muninn.storage import Storage
 
@@ -142,10 +143,10 @@ def main() -> None:
     stop = threading.Event()
     if is_writer:
         bt.create_server()
+        scanner = Scanner(conn_mgr, local_mac, stop, scanpolicy.resolve(storage))
+        bridge.attach_scanner(scanner)
         threading.Thread(target=acceptor, args=(conn_mgr,), daemon=True).start()
-        threading.Thread(
-            target=scanner, args=(conn_mgr, local_mac, stop), daemon=True
-        ).start()
+        threading.Thread(target=scanner.run, daemon=True).start()
 
     ret = app.exec()
 

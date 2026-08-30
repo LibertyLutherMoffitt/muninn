@@ -58,6 +58,10 @@ class PeerStatus:
     rssi: int | None = None
     failed_dials: int = 0
     last_error: str | None = None
+    # True once this device has advertised the Muninn service, or we have
+    # exchanged keys with it. The scanner probes every radio it can see, so
+    # without this the peer list fills up with other people's headsets.
+    advertises_muninn: bool = False
 
     @property
     def is_reachable(self) -> bool:
@@ -152,8 +156,18 @@ class PresenceTracker:
 
     # --- Feeds ---
 
-    def record_sighting(self, addr: str, rssi: int | None = None) -> None:
-        """The radio saw this device. Says nothing about whether we can talk."""
+    def record_sighting(
+        self,
+        addr: str,
+        rssi: int | None = None,
+        advertises_muninn: bool = False,
+    ) -> None:
+        """The radio saw this device. Says nothing about whether we can talk.
+
+        `advertises_muninn` means its SDP record named our service. Sticky once
+        set: adapter caches drop UUIDs all the time, and a device that spoke
+        Muninn once is still a peer.
+        """
         addr = addr.upper()
         if addr == self.local_mac:
             return
@@ -163,6 +177,8 @@ class PresenceTracker:
             status.last_seen = now
             if rssi is not None:
                 status.rssi = rssi
+            if advertises_muninn:
+                status.advertises_muninn = True
             if status.state == OFFLINE:
                 status.state = NEARBY
         if self.storage is not None:
@@ -175,6 +191,7 @@ class PresenceTracker:
         with self._lock:
             status = self._entry(addr)
             status.state = CONNECTED
+            status.advertises_muninn = True  # it just spoke the protocol
             status.last_seen = now
             status.last_connected = now
             status.via = None
@@ -272,10 +289,18 @@ class PresenceTracker:
     def connected(self) -> list[str]:
         return sorted(a for a, s in self.all_statuses().items() if s.state == CONNECTED)
 
+    def muninn_devices(self) -> dict[str, PeerStatus]:
+        """Statuses worth showing a user: peers, not passing headsets."""
+        return {
+            a: s for a, s in self.all_statuses().items() if s.advertises_muninn
+        }
+
     def nearby_unreachable(self) -> list[str]:
         """Devices the radio can see but we have repeatedly failed to reach."""
         return sorted(
-            a for a, s in self.all_statuses().items() if s.unreachable_nearby
+            a
+            for a, s in self.all_statuses().items()
+            if s.unreachable_nearby and s.advertises_muninn
         )
 
     def sync_from_manager(self, conn_mgr) -> None:

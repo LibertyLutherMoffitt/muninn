@@ -18,7 +18,7 @@ from pathlib import Path
 from muninn.groups import Group
 from muninn.protocol import GROUP_ZERO_ID
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _row_ack_state(
@@ -95,6 +95,8 @@ class Storage:
                 self._conn.executescript(_SCHEMA_V1)
             if current < 2:
                 self._conn.executescript(_SCHEMA_V2)
+            if current < 3:
+                self._conn.executescript(_SCHEMA_V3)
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # --- Identity ---
@@ -178,6 +180,23 @@ class Storage:
                 "WHERE length(pubkey) = 32"
             ).fetchall()
         return [(r[0], bytes(r[1]), r[2], r[3]) for r in rows]
+
+    # --- Settings ---
+
+    def get_setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
 
     # --- Presence ---
 
@@ -550,4 +569,12 @@ PRAGMA user_version = 1;
 _SCHEMA_V2 = """
 ALTER TABLE peers ADD COLUMN last_seen INTEGER;
 ALTER TABLE peers ADD COLUMN last_connected INTEGER;
+"""
+
+# v3 — user preferences that are not part of the protocol or the message store.
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """

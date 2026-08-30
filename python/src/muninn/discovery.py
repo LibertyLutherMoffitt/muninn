@@ -1,31 +1,33 @@
 """Peer discovery and connection loops, shared by every desktop front end.
 
-The CLI and the Qt GUI both need to accept inbound sockets and periodically
-scan for, pair with and dial nearby peers. These loops used to be copy-pasted
-into both entry points, and the copies drifted: only one of them fed the
-presence tracker, so the GUI's peer list could not tell a device that had gone
-away from one sitting in range refusing connections.
+The CLI and the Qt GUI both need to accept inbound sockets and keep hunting for
+peers. These loops used to be copy-pasted into both entry points, and the
+copies drifted.
 
-One implementation, imported by both.
+**Why this does not simply trust the adapter's service cache.** `bt.discover()`
+returns devices whose cached UUID list already contains the Muninn service. That
+list is filled from the inquiry EIR, which BlueZ routinely omits 128-bit UUIDs
+from, or from an SDP browse, which only happens after a pair or connect. So a
+peer that has never been connected to may never appear there — the app looks
+broken while the person is sitting two rows away.
+
+The fix is to treat every device the radio can see as a candidate and *try* it.
+A non-Muninn device refuses quickly and is backed off hard; see `dialer.py` for
+how that is rationed so a cabin full of headsets cannot starve a real peer.
 """
 
 import threading
 import time
 
 from muninn import bt
+from muninn.dialer import DialScheduler
 from muninn.peers import ConnectionManager
+from muninn.scanpolicy import DEFAULT, ScanPolicy
 
 # How long the higher-MAC device waits for the lower-MAC one to dial first.
 # The deferral is the primary defence against both sides connecting at once;
 # see PROTOCOL.md, "Simultaneous Connection Tiebreak".
 TIEBREAK_DEFER = 10.0
-
-# Gap between discovery sweeps.
-SCAN_INTERVAL = 15.0
-
-# Sweeps between full inquiries. A full inquiry is slow and disruptive to an
-# active link, so it runs roughly every two minutes rather than every cycle.
-INQUIRY_EVERY = 8
 
 INQUIRY_SECONDS = 5.0
 
@@ -52,66 +54,145 @@ def acceptor(conn_mgr: ConnectionManager) -> None:
                 pass
 
 
-def scanner(
-    conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event
-) -> None:
-    """Discover Muninn peers and keep connections up.
+class Scanner:
+    """Owns the discovery loop and the dial schedule.
 
-    Every device the radio reports is recorded as a sighting, and every failed
-    dial as a failure, so the UI can distinguish "not here" from "here but
-    unreachable" — the two look identical from the peers table alone.
+    Kept as an object so the UI can change the scan policy while it runs and
+    read back what it is currently doing.
     """
-    presence = conn_mgr.presence
-    local_mac = local_mac.upper()
 
-    def inquiry() -> None:
+    def __init__(
+        self,
+        conn_mgr: ConnectionManager,
+        local_mac: str,
+        stop: threading.Event,
+        policy: ScanPolicy = DEFAULT,
+    ):
+        self.conn_mgr = conn_mgr
+        self.local_mac = local_mac.upper()
+        self.stop = stop
+        self.policy = policy
+        self.scheduler = DialScheduler(policy, self.local_mac)
+        self._deferred: dict[str, float] = {}
+        self._last_inquiry = 0.0
+
+        # Anything we already hold a key for is a peer, whatever the adapter
+        # thinks — that is the whole point of remembering them across restarts.
+        for addr in conn_mgr.group_store.pubkeys:
+            if addr != self.local_mac:
+                self.scheduler.mark_peer(addr)
+
+    def set_policy(self, policy: ScanPolicy) -> None:
+        self.policy = policy
+        self.scheduler.set_policy(policy)
+
+    # --- One pass ---
+
+    def _inquiry(self, now: float) -> None:
+        """Full inquiry: everything the radio can hear, Muninn or not."""
         try:
-            for addr, _name in bt.scan_devices(duration=INQUIRY_SECONDS, quiet=True):
-                if addr.upper() != local_mac:
-                    presence.record_sighting(addr)
+            found = bt.scan_devices(duration=INQUIRY_SECONDS, quiet=True)
         except Exception:
-            # A scan failure must never take the loop down; the next sweep
-            # tries again.
-            pass
+            # A scan failure must never take the loop down.
+            return
+        self._last_inquiry = now
+        for addr, _name in found:
+            addr = addr.upper()
+            if addr == self.local_mac:
+                continue
+            self.scheduler.saw(addr, now)
+            self.conn_mgr.presence.record_sighting(addr)
 
-    inquiry()  # populate the adapter's cache before the first sweep
-
-    deferred: dict[str, float] = {}
-    cycles = 0
-
-    while not stop.is_set():
-        cycles += 1
-        if cycles % INQUIRY_EVERY == 0:
-            inquiry()
-
+    def _advertised(self, now: float) -> None:
+        """Devices whose cached SDP record already names the Muninn service."""
         try:
             services = bt.discover()
         except Exception:
             services = []
-
         for addr, _name in services:
             addr = addr.upper()
-            if addr == local_mac:
+            if addr == self.local_mac:
                 continue
-            presence.record_sighting(addr)
+            self.scheduler.saw(addr, now, is_peer=True)
+            self.conn_mgr.presence.record_sighting(addr, advertises_muninn=True)
 
-            if conn_mgr.is_connected(addr):
-                deferred.pop(addr, None)
+    def _should_defer(self, addr: str, now: float) -> bool:
+        """Higher MAC holds off briefly so the lower one dials first."""
+        try:
+            if bt.should_keep_outgoing(self.local_mac, addr):
+                self._deferred.pop(addr, None)
+                return False
+        except ValueError:
+            return False
+        started = self._deferred.setdefault(addr, now)
+        if now - started < TIEBREAK_DEFER:
+            return True
+        self._deferred.pop(addr, None)
+        return False
+
+    def _dial(self, addr: str, now: float, is_probe: bool) -> None:
+        try:
+            bt.ensure_paired(addr)
+            sock, peer_addr = bt.connect(addr)
+        except (ConnectionError, OSError) as e:
+            self.scheduler.failed(addr, now, str(e))
+            # Only report a dial failure as a presence problem for devices we
+            # believe are peers. A headset refusing us is not news.
+            if not is_probe:
+                self.conn_mgr.presence.record_dial_failure(addr, str(e))
+            return
+        except Exception as e:
+            self.scheduler.failed(addr, now, str(e))
+            return
+
+        if self.conn_mgr.add_peer(sock, peer_addr):
+            self.scheduler.succeeded(addr)
+        else:
+            self.scheduler.failed(addr, now, "handshake failed")
+            if not is_probe:
+                self.conn_mgr.presence.record_dial_failure(addr, "handshake failed")
+
+    def sweep(self, now: float | None = None) -> None:
+        """One pass: inquire if due, then dial whoever is worth dialling."""
+        now = time.time() if now is None else now
+        if now - self._last_inquiry >= self.policy.inquiry_interval:
+            self._inquiry(now)
+        self._advertised(now)
+
+        # Peers we hold keys for stay dial-worthy even when this inquiry
+        # missed them; inquiry misses are routine in a noisy cabin.
+        for addr in list(self.conn_mgr.group_store.pubkeys):
+            if addr != self.local_mac:
+                self.scheduler.mark_peer(addr)
+
+        plan = self.scheduler.plan(now, self.conn_mgr.is_connected)
+        for addr in plan.peers:
+            if self.stop.is_set():
+                return
+            if self._should_defer(addr, now):
                 continue
+            self._dial(addr, now, is_probe=False)
+        for addr in plan.probes:
+            if self.stop.is_set():
+                return
+            self._dial(addr, now, is_probe=True)
 
-            # The higher MAC holds off briefly so the lower one dials first.
-            if not bt.should_keep_outgoing(local_mac, addr):
-                started = deferred.setdefault(addr, time.time())
-                if time.time() - started < TIEBREAK_DEFER:
-                    continue
-
-            deferred.pop(addr, None)
+    def run(self) -> None:
+        while not self.stop.is_set():
             try:
-                bt.ensure_paired(addr)
-                sock, peer_addr = bt.connect(addr)
-                if not conn_mgr.add_peer(sock, peer_addr):
-                    presence.record_dial_failure(addr, "handshake failed")
-            except (ConnectionError, OSError) as e:
-                presence.record_dial_failure(addr, str(e))
+                self.sweep()
+            except Exception as e:
+                print(f"[scan] sweep failed: {e!r}")
+            self.stop.wait(self.policy.dial_interval)
 
-        stop.wait(SCAN_INTERVAL)
+
+def scanner(
+    conn_mgr: ConnectionManager,
+    local_mac: str,
+    stop: threading.Event,
+    policy: ScanPolicy = DEFAULT,
+) -> Scanner:
+    """Build and run a Scanner. Returns it so callers can retune it live."""
+    s = Scanner(conn_mgr, local_mac, stop, policy)
+    s.run()
+    return s

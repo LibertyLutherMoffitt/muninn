@@ -27,7 +27,16 @@ GHOST_NAME = "Phantom Pixel"
 class Client:
     """A Muninn CLI subprocess with line-buffered capture."""
 
-    def __init__(self, mac: str, name: str, rendezvous: Path, home: Path, ghosts=""):
+    def __init__(
+        self,
+        mac: str,
+        name: str,
+        rendezvous: Path,
+        home: Path,
+        ghosts="",
+        noise="",
+        hide_uuid=False,
+    ):
         env = dict(os.environ)
         env.update(
             PYTHONPATH=str(SRC),
@@ -37,6 +46,8 @@ class Client:
             MUNINN_LOOPBACK_MAC=mac,
             MUNINN_LOOPBACK_NAME=name,
             MUNINN_LOOPBACK_GHOSTS=ghosts,
+            MUNINN_LOOPBACK_NOISE=noise,
+            MUNINN_LOOPBACK_HIDE_UUID="1" if hide_uuid else "",
             MUNINN_NAME=name,
             XDG_DATA_HOME=str(home),
             TERM="dumb",
@@ -103,8 +114,22 @@ class Client:
 def clients(tmp_path):
     made: list[Client] = []
 
-    def spawn(mac: str, name: str, ghosts: str = "") -> Client:
-        client = Client(mac, name, tmp_path / "rendezvous", tmp_path / name, ghosts)
+    def spawn(
+        mac: str,
+        name: str,
+        ghosts: str = "",
+        noise: str = "",
+        hide_uuid: bool = False,
+    ) -> Client:
+        client = Client(
+            mac,
+            name,
+            tmp_path / "rendezvous",
+            tmp_path / name,
+            ghosts,
+            noise,
+            hide_uuid,
+        )
         made.append(client)
         return client
 
@@ -293,3 +318,95 @@ def test_whoami_reports_the_address_needed_for_pairing(clients):
     assert alice.wait_for("You are AA:AA:AA:AA:AA:01"), alice.output()
     assert alice.wait_for("display name: alice"), alice.output()
     assert alice.wait_for("connected peers:"), alice.output()
+
+
+# --- Scan policy ---
+
+
+def test_scanmode_reports_and_changes_the_policy(clients):
+    alice = clients("AA:AA:AA:AA:AA:01", "alice")
+    assert alice.wait_for("Scanning for peers"), alice.output()
+    # Aggressive is the default: finding peers unattended is the point.
+    assert "aggressive" in alice.output()
+
+    alice.send("/scanmode")
+    assert alice.wait_for("Scan mode: Aggressive"), alice.output()
+    assert alice.wait_for("conservative"), alice.output()
+
+    alice.send("/scanmode conservative")
+    assert alice.wait_for("Scan mode: Conservative"), alice.output()
+
+
+def test_an_unknown_scan_mode_is_rejected(clients):
+    alice = clients("AA:AA:AA:AA:AA:01", "alice")
+    assert alice.wait_for("Scanning for peers")
+    alice.send("/scanmode turbo")
+    assert alice.wait_for("Unknown scan mode: turbo"), alice.output()
+
+
+def test_the_chosen_scan_mode_survives_a_restart(clients):
+    alice = clients("AA:AA:AA:AA:AA:01", "alice")
+    assert alice.wait_for("Scanning for peers")
+    alice.send("/scanmode balanced")
+    assert alice.wait_for("Scan mode: Balanced")
+    alice.close()
+
+    revived = clients("AA:AA:AA:AA:AA:01", "alice")
+    assert revived.wait_for("Scanning for peers (balanced)"), revived.output()
+
+
+def test_peers_are_still_found_with_the_new_scheduler(clients):
+    """The scheduler must not regress the thing it exists to improve."""
+    alice = clients("AA:AA:AA:AA:AA:01", "alice")
+    bob = clients("BB:BB:BB:BB:BB:02", "bob")
+    assert alice.wait_for("bob connected"), _diagnose(alice, bob)
+    assert bob.wait_for("alice connected"), _diagnose(alice, bob)
+
+
+def test_a_peer_whose_service_record_never_resolves_is_still_found(clients):
+    """The bug this scheduler exists for.
+
+    BlueZ routinely omits 128-bit UUIDs from inquiry EIR, and only browses SDP
+    after a pair or connect — so a peer that has never been connected to can be
+    invisible to a UUID-filtered discover() forever. Probing every visible
+    device is what closes that hole.
+
+    Both sides hide their service record here, so neither can discover the
+    other and the only route to a connection is a blind dial. (Hiding just one
+    proves nothing: the other side would still find it and dial in.)
+    """
+    alice = clients("AA:AA:AA:AA:AA:01", "alice", hide_uuid=True)
+    bob = clients("BB:BB:BB:BB:BB:02", "bob", hide_uuid=True)
+    assert alice.wait_for("bob connected", timeout=60), _diagnose(alice, bob)
+    assert bob.wait_for("alice connected", timeout=60), _diagnose(alice, bob)
+
+
+def test_a_cabin_full_of_other_devices_does_not_stop_a_peer_connecting(clients):
+    """40 headsets between you and the person you want to talk to."""
+    headsets = ",".join(
+        f"C0:FF:EE:00:{i // 256:02X}:{i % 256:02X}=Headset{i}" for i in range(40)
+    )
+    alice = clients("AA:AA:AA:AA:AA:01", "alice", noise=headsets)
+    bob = clients("BB:BB:BB:BB:BB:02", "bob", noise=headsets)
+    assert alice.wait_for("bob connected", timeout=90), _diagnose(alice, bob)
+    alice.send("/dm bob")
+    alice.send("row 14, is that you")
+    assert bob.wait_for("row 14, is that you", timeout=60), _diagnose(alice, bob)
+
+
+def test_a_crowd_of_unknown_devices_is_probed_but_rationed(clients):
+    headsets = ",".join(
+        f"C0:FF:EE:00:{i // 256:02X}:{i % 256:02X}=Headset{i}" for i in range(30)
+    )
+    alice = clients("AA:AA:AA:AA:AA:01", "alice", noise=headsets)
+    assert alice.wait_for("Scanning for peers")
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        alice.send("/scanmode")
+        if "unidentified" in alice.output():
+            break
+        time.sleep(2)
+    out = alice.output()
+    assert "tracking" in out, out
+    # It must have noticed them without trying to dial all 30 at once.
+    assert "unidentified" in out, out

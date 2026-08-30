@@ -13,8 +13,8 @@ try:
 except ImportError:
     _HAS_READLINE = False
 
-from muninn import bt, presence
-from muninn.discovery import acceptor, scanner
+from muninn import bt, presence, scanpolicy
+from muninn.discovery import Scanner, acceptor
 from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import Group, GroupStore
 from muninn.peers import GROUP_ZERO, ConnectionManager
@@ -31,6 +31,7 @@ COMMANDS = [
     "/known",
     "/history",
     "/whoami",
+    "/scanmode ",
     "/help",
 ]
 
@@ -99,8 +100,10 @@ class ChatUI:
         conn_mgr: ConnectionManager,
         group_store: GroupStore,
         local_mac: str,
+        scanner: "Scanner | None" = None,
     ):
         self.conn_mgr = conn_mgr
+        self.scanner = scanner
         self.group_store = group_store
         self.local_mac = local_mac
         self.active_conv: tuple[str, str | bytes] | None = None
@@ -308,7 +311,8 @@ class ChatUI:
         candidates = known | {
             a
             for a, s in statuses.items()
-            if s.state != presence.OFFLINE or s.last_seen is not None
+            if s.advertises_muninn
+            and (s.state != presence.OFFLINE or s.last_seen is not None)
         }
 
         buckets: dict[str, list[str]] = {
@@ -526,6 +530,34 @@ class ChatUI:
                 names = ", ".join(self._name(a) for a in unreachable)
                 print(f"  nearby but unreachable: {names}")
 
+        elif cmd == "/scanmode":
+            if len(parts) == 1:
+                current = (
+                    self.scanner.policy
+                    if self.scanner is not None
+                    else scanpolicy.resolve(self.conn_mgr.storage)
+                )
+                print(f"Scan mode: {current.label} — {current.description}")
+                for policy in scanpolicy.POLICIES.values():
+                    marker = "*" if policy.name == current.name else " "
+                    print(f"  {marker} {policy.name:<13} {policy.description}")
+                if self.scanner is not None:
+                    stats = self.scanner.scheduler.stats()
+                    print(
+                        f"  tracking {stats['tracked']} devices "
+                        f"({stats['peers']} peers, {stats['unknown']} unidentified)"
+                    )
+                return
+            chosen = scanpolicy.by_name(parts[1])
+            if chosen is None:
+                names = ", ".join(scanpolicy.POLICIES)
+                print(f"Unknown scan mode: {parts[1]}. Choose one of: {names}")
+                return
+            if self.scanner is not None:
+                self.scanner.set_policy(chosen)
+            scanpolicy.store(self.conn_mgr.storage, chosen)
+            print(f"Scan mode: {chosen.label} — {chosen.description}")
+
         elif cmd == "/help":
             print("Commands:")
             print("  /dm <name|addr>         — switch to DM")
@@ -541,6 +573,7 @@ class ChatUI:
                 f"  /history [N]            — show last N msgs (default {HISTORY_DEFAULT})"
             )
             print("  /whoami                 — your address, name and link state")
+            print("  /scanmode [mode]        — how hard to hunt for peers")
 
         else:
             print(f"Unknown command: {cmd}. Type /help")
@@ -650,14 +683,14 @@ def main():
     bt.create_server()
 
     stop = threading.Event()
+    policy = scanpolicy.resolve(storage)
+    scanner = Scanner(conn_mgr, local_mac, stop, policy)
     threading.Thread(target=acceptor, args=(conn_mgr,), daemon=True).start()
-    threading.Thread(
-        target=scanner, args=(conn_mgr, local_mac, stop), daemon=True
-    ).start()
+    threading.Thread(target=scanner.run, daemon=True).start()
 
-    print("Scanning for peers... (type /help for commands)")
+    print(f"Scanning for peers ({policy.label.lower()})... (type /help for commands)")
 
-    ui = ChatUI(conn_mgr, group_store, local_mac)
+    ui = ChatUI(conn_mgr, group_store, local_mac, scanner=scanner)
     try:
         ui.run()
     except KeyboardInterrupt:

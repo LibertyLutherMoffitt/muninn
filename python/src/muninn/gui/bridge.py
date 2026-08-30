@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Property, QObject, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
-from muninn import presence
+from muninn import presence, scanpolicy
 from muninn.peers import GROUP_ZERO
 from muninn.protocol import FrameTooLarge
 
@@ -81,6 +81,9 @@ class ChatBridge(QObject):
         self._cm = conn_mgr
         self._gs = group_store
         self._storage = storage
+        # Set by attach_scanner() once the discovery loop exists. A reader
+        # instance never starts one, so this stays None there.
+        self._scanner = None
         self._local_mac = local_mac
         self._is_writer = is_writer
         self._peer_model = peer_model
@@ -280,6 +283,11 @@ class ChatBridge(QObject):
         )
         self._peer_model.set_last_message(conv_id, text, ts)
 
+    def attach_scanner(self, scanner) -> None:
+        """Give the UI a handle on the discovery loop so :scanmode can retune
+        it live rather than only at the next start."""
+        self._scanner = scanner
+
     @Slot(str, result="QVariantMap")
     def peerPresence(self, addr: str) -> dict:
         """Reachability of one peer, for the chat header.
@@ -370,6 +378,7 @@ class ChatBridge(QObject):
         "peers",
         "known",
         "whoami",
+        "scanmode",
         "history",
         "scan",
         "clear",
@@ -397,6 +406,7 @@ class ChatBridge(QObject):
         (':nick <peer> ""', "clear a local override"),
         (":list", "list conversations"),
         (":whoami", "your address, name and link state"),
+        (":scanmode [mode]", "how hard to hunt for peers"),
         (":peers", "show direct + relay peers"),
         (":known", "show every known peer"),
         (":history [N]", "reload last N messages"),
@@ -424,7 +434,8 @@ class ChatBridge(QObject):
         candidates = known | {
             a
             for a, st in statuses.items()
-            if st.state != presence.OFFLINE or st.last_seen is not None
+            if st.advertises_muninn
+            and (st.state != presence.OFFLINE or st.last_seen is not None)
         }
 
         order = {
@@ -707,6 +718,50 @@ class ChatBridge(QObject):
                     }
                 ]
             self.infoMenuRequested.emit("conversations", items)
+            return
+        if head == "scanmode":
+            current = (
+                self._scanner.policy
+                if self._scanner is not None
+                else scanpolicy.resolve(self._storage)
+            )
+            if args:
+                chosen = scanpolicy.by_name(args[0])
+                if chosen is None:
+                    names = ", ".join(scanpolicy.POLICIES)
+                    self.errorOccurred.emit(
+                        f"unknown scan mode: {args[0]} (try {names})"
+                    )
+                    return
+                if self._scanner is not None:
+                    self._scanner.set_policy(chosen)
+                scanpolicy.store(self._storage, chosen)
+                self.notify.emit(f"scan mode: {chosen.label}")
+                return
+            items = [
+                {
+                    "label": ("● " if p.name == current.name else "○ ") + p.label,
+                    "sub": p.description,
+                    "convId": "",
+                    "action": "",
+                }
+                for p in scanpolicy.POLICIES.values()
+            ]
+            if self._scanner is not None:
+                stats = self._scanner.scheduler.stats()
+                items.append(
+                    {
+                        "label": f"tracking {stats['tracked']} devices",
+                        "sub": (
+                            f"{stats['peers']} peers · "
+                            f"{stats['unknown']} unidentified · "
+                            f"{stats['backing_off']} backing off"
+                        ),
+                        "convId": "",
+                        "action": "",
+                    }
+                )
+            self.infoMenuRequested.emit("scan mode  ·  :scanmode <name>", items)
             return
         if head == "whoami":
             # The first pairing is manual on every platform and needs this.

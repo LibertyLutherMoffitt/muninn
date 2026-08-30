@@ -48,6 +48,11 @@ Pre-commit hooks run automatically via prek, which enters the nix dev shell itse
 
 ## Intentional Decisions (don't "fix" these)
 
+- **The scanner dials devices that never advertised the Muninn UUID.** Adapter
+  service caches are unreliable — BlueZ routinely omits 128-bit UUIDs from
+  inquiry EIR, and only browses SDP after a pair or connect — so filtering on
+  them loses peers permanently. Probing is rationed by `dialer.py`, not removed.
+
 - **Static keypairs** — generated once, persisted to the SQLite `identity` table, reused across restarts and reconnects. Same shared secret every handshake. Intentional for simplicity.
 - **SQLite write-through persistence** — messages, pubkeys, groups, display names, unacked state, and seen-dedup are all persisted via `storage.py`. WAL mode, `threading.Lock` serialization. The DB file growing is not a bug; pruning is out of scope.
 - **D-Bus pairing via Device1.Pair()** — not bluetoothctl subprocess. Required: subprocess pairing uses store_hint=0 so link keys aren't persisted, causing br-connection-key-missing on ConnectProfile.
@@ -71,6 +76,10 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 
 - `discovery.py` — the accept/scan loops, shared by CLI and GUI (do not re-copy
   them into an entry point; they drifted last time)
+- `dialer.py` — `DialScheduler`: who to dial next and when to give up. Mirrored
+  by `DialScheduler.kt`; a conformance test compares the two
+- `scanpolicy.py` — aggressive / balanced / conservative presets. Mirrored by
+  `ScanPolicy.kt`, and the numbers are compared by that same test
 - `presence.py` — `PresenceTracker`: connected / relay / nearby / offline per peer
 
 - `peers.py` — `ConnectionManager`: all BT connections, relay, ACKs, read receipts

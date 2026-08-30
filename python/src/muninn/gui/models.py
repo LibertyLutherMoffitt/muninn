@@ -143,10 +143,15 @@ class PeerListModel(QAbstractListModel):
         # Devices seen in a scan that we hold no key for still belong in the
         # list — that is a peer who has not been paired yet, not a non-event.
         known = [a for a in self._gs.pubkeys if a != self._cm.local_mac]
+        # Only devices that have actually advertised Muninn. The scanner
+        # probes every radio it can hear, so without this filter the sidebar
+        # fills with other passengers' headsets.
         seen_only = [
             a
             for a, st in statuses.items()
-            if a not in self._gs.pubkeys and st.state != presence.OFFLINE
+            if a not in self._gs.pubkeys
+            and st.advertises_muninn
+            and st.state != presence.OFFLINE
         ]
 
         for addr in known + seen_only:
