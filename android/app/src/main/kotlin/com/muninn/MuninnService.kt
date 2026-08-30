@@ -115,8 +115,10 @@ class MuninnService : Service() {
                     if (!isActive) break
                     if (alreadyConnected(addr)) continue
                     val device = bt.remoteDevice(addr) ?: continue
+                    ChatRepository.book.recordSighting(addr)
                     tryConnect(device)
                 }
+                ChatRepository.refreshPresence()
                 delay(15_000)
             }
         }
@@ -149,6 +151,10 @@ class MuninnService : Service() {
             withContext(Dispatchers.IO) { bt.connect(device) }
         } catch (e: Throwable) {
             Log.d(tag, "connect ${device.address} failed: ${e.message}")
+            // The radio can see it but no session forms — that is the state
+            // worth surfacing, not silence.
+            ChatRepository.book.recordDialFailure(device.address, e.message ?: "connect failed")
+            ChatRepository.refreshPresence()
             return
         }
         Log.i(tag, "connected to ${device.address}")
@@ -170,8 +176,13 @@ class MuninnService : Service() {
         val session = PeerSession(
             sock,
             identity,
+            ChatRepository.book,
             scope,
-            onClosed = { sessions.remove(it) },
+            displayName = deviceDisplayName(),
+            onClosed = {
+                sessions.remove(it)
+                ChatRepository.refreshPresence()
+            },
         )
         sessions.add(session)
         session.start()
@@ -201,6 +212,17 @@ class MuninnService : Service() {
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.notify(NOTIFICATION_ID, buildNotification(text))
     }
+
+    /**
+     * The name peers see. The Bluetooth adapter name is what the user already
+     * chose for this phone, so it needs no separate setting.
+     */
+    private fun deviceDisplayName(): String =
+        runCatching { android.provider.Settings.Global.getString(contentResolver, "device_name") }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: android.os.Build.MODEL
+            ?: ""
 
     companion object {
         private const val CHANNEL_ID = "muninn.radio"

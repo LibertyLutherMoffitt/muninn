@@ -14,6 +14,7 @@ from PySide6.QtCore import QUrl
 from muninn import bt
 from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import GroupStore
+from muninn.discovery import acceptor, scanner
 from muninn.peers import ConnectionManager
 from muninn.storage import Storage
 
@@ -36,64 +37,6 @@ _THEME = {
     "success": "#10b981",
     "error": "#ef4444",
 }
-
-
-def _acceptor(conn_mgr: ConnectionManager) -> None:
-    while True:
-        try:
-            sock, addr = bt.accept()
-            conn_mgr.add_peer(sock, addr)
-        except ConnectionError:
-            break
-
-
-def _scanner(
-    conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event
-) -> None:
-    import time
-
-    try:
-        bt.scan_devices(duration=5)
-    except Exception:
-        pass
-
-    deferred: dict[str, float] = {}
-    cycles = 0
-
-    while not stop.is_set():
-        cycles += 1
-        if cycles % 8 == 0:
-            try:
-                bt.scan_devices(duration=5, quiet=True)
-            except Exception:
-                pass
-        try:
-            services = bt.discover()
-        except Exception:
-            services = []
-
-        for addr, _name in services:
-            addr = addr.upper()
-            if addr == local_mac:
-                continue
-            if conn_mgr.is_connected(addr):
-                deferred.pop(addr, None)
-                continue
-            if not bt.should_keep_outgoing(local_mac, addr):
-                if addr not in deferred:
-                    deferred[addr] = time.time()
-                    continue
-                if time.time() - deferred[addr] < 10:
-                    continue
-            deferred.pop(addr, None)
-            try:
-                bt.ensure_paired(addr)
-                sock, peer_addr = bt.connect(addr)
-                conn_mgr.add_peer(sock, peer_addr)
-            except (ConnectionError, OSError):
-                pass
-
-        stop.wait(15)
 
 
 def main() -> None:
@@ -165,9 +108,9 @@ def main() -> None:
     stop = threading.Event()
     if is_writer:
         bt.create_server()
-        threading.Thread(target=_acceptor, args=(conn_mgr,), daemon=True).start()
+        threading.Thread(target=acceptor, args=(conn_mgr,), daemon=True).start()
         threading.Thread(
-            target=_scanner, args=(conn_mgr, local_mac, stop), daemon=True
+            target=scanner, args=(conn_mgr, local_mac, stop), daemon=True
         ).start()
 
     ret = app.exec()

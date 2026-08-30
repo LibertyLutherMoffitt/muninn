@@ -550,3 +550,31 @@ def test_send_to_a_vanished_peer_reports_failure(node_factory):
     a, b = node_factory(A), node_factory(B)
     link(a, b)
     assert a.cm.send_to(C, b"\x00\x00\x00") is False
+
+
+# --- Robustness ---
+
+
+def test_a_malformed_stored_address_does_not_abort_the_introduction(node_factory):
+    """_send_peer_annc runs inside add_peer, on the accept/scan thread.
+
+    A bad row must not stop a peer from connecting — that would take the whole
+    accept loop down and look identical to being out of range.
+    """
+    a, b = node_factory(A), node_factory(B)
+    a.groups.pubkeys["not-a-mac"] = b"\x01" * 32
+    a.groups.pubkeys["11:22:33:44:55:66"] = b"\x02" * 32
+    link(a, b)
+    assert B in a.cm.peers
+    # The valid third-party entry still reached the peer.
+    assert wait_for(lambda: b.groups.get_pubkey("11:22:33:44:55:66") == b"\x02" * 32)
+
+
+def test_more_than_255_known_peers_still_announces(node_factory):
+    # peer_count is a uint8, so the roster has to be capped rather than raising.
+    a, b = node_factory(A), node_factory(B)
+    for i in range(300):
+        a.groups.pubkeys[f"AA:BB:CC:{i // 256:02X}:{i % 256:02X}:01"] = bytes([i % 256]) * 32
+    link(a, b)
+    assert B in a.cm.peers
+    assert wait_for(lambda: len(b.groups.pubkeys) > 200)

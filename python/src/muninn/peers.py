@@ -628,13 +628,21 @@ class ConnectionManager:
     def _send_peer_annc(self, to_addr: str) -> None:
         """Send our known peers (MAC+pubkey+name) to a single peer."""
         entries = []
-        for addr, pubkey in self.group_store.pubkeys.items():
+        for addr, pubkey in list(self.group_store.pubkeys.items()):
             if addr == self.local_mac or addr == to_addr:
                 continue
-            name = self.group_store.names.get(addr, "")
-            entries.append((protocol.mac_to_bytes(addr), pubkey, name))
+            try:
+                mac_bytes = protocol.mac_to_bytes(addr)
+            except ValueError:
+                # A row written by an older build, or hand-edited. Skip it
+                # rather than letting one bad address abort the introduction —
+                # this runs inside add_peer, on the accept/scan thread.
+                continue
+            entries.append((mac_bytes, pubkey, self.group_store.names.get(addr, "")))
+        # peer_count is a uint8; announce the first 255 and let the rest
+        # propagate on later connections.
         if entries:
-            self.send_to(to_addr, protocol.encode_peer_annc(entries))
+            self.send_to(to_addr, protocol.encode_peer_annc(entries[:255]))
 
     def _handle_peer_annc(self, from_addr: str, payload: bytes) -> None:
         pairs = protocol.decode_peer_annc(payload)

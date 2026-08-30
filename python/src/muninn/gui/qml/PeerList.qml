@@ -114,10 +114,16 @@ Rectangle {
                     anchors.right: avatar.right
                     anchors.bottom: avatar.bottom
                     width: 10; height: 10; radius: 5
-                    color: model.status === "direct"  ? Theme.success
-                         : model.status === "relay"   ? "#f59e0b"
-                         : model.status === "group"   ? Theme.accent
-                                                      : Theme.textMuted
+                    // "unreachable" earns its own colour: the device is
+                    // right there and still won't connect, which is a
+                    // different problem from being out of range.
+                    color: model.status === "direct"      ? Theme.success
+                         : model.status === "relay"       ? "#f59e0b"
+                         : model.status === "unreachable" ? Theme.error
+                         : model.status === "nearby"      ? "#f59e0b"
+                         : model.status === "group"       ? Theme.accent
+                                                          : Theme.textMuted
+                    opacity: model.status === "nearby" ? 0.65 : 1.0
                     border.color: Theme.surface
                     border.width: 2
                 }
@@ -145,6 +151,16 @@ Rectangle {
                         font.pixelSize: 11
                         elide: Text.ElideRight
                         visible: model.lastMessage !== ""
+                    }
+                    // Falls back to connectivity when there is no history yet,
+                    // so a new or unreachable peer still says something useful.
+                    Text {
+                        width: parent.width
+                        text: model.presenceText || ""
+                        color: model.status === "unreachable" ? Theme.error : Theme.textMuted
+                        font.pixelSize: 10
+                        elide: Text.ElideRight
+                        visible: model.lastMessage === "" && (model.presenceText || "") !== ""
                     }
                 }
 

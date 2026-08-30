@@ -273,3 +273,42 @@ def test_sync_records_relay_routes(node_factory):
 )
 def test_relative_time_formatting(seconds, expected):
     assert format_ago(seconds) == expected
+
+
+# --- Discovery loop wiring ---
+
+
+def test_the_acceptor_survives_a_peer_that_blows_up(node_factory, monkeypatch):
+    """If the accept loop dies the device stops answering, silently."""
+    import threading
+
+    from muninn import discovery
+
+    a = node_factory(LOCAL)
+    calls = {"n": 0}
+
+    class FakeSock:
+        def close(self):
+            pass
+
+    def fake_accept():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return FakeSock(), PEER
+        raise ConnectionError("closed")
+
+    def boom(_sock, _addr):
+        raise RuntimeError("peer sent nonsense")
+
+    monkeypatch.setattr(discovery.bt, "accept", fake_accept, raising=False)
+    monkeypatch.setattr(a.cm, "add_peer", boom)
+
+    done = threading.Event()
+
+    def run():
+        discovery.acceptor(a.cm)
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    assert done.wait(5), "acceptor did not keep going after a failing peer"
+    assert calls["n"] == 2, "it stopped accepting after the first failure"

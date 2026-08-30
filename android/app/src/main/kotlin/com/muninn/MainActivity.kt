@@ -134,18 +134,31 @@ private fun ChatScreen(discovery: BtDiscovery) {
     val identity = remember { Identity.load(ctx) }
     val messages by ChatRepository.messages.collectAsState()
     val peers by ChatRepository.peers.collectAsState()
+    val presence by ChatRepository.presence.collectAsState()
     var draft by remember { mutableStateOf("") }
     var showPairing by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+        // The conversation is on screen, so anything that just arrived has been
+        // presented — that is what separates a READ from the ACK the receive
+        // loop already sent.
+        ChatRepository.markConversationRead()
     }
 
     val connected = peers.isNotEmpty()
+    // Devices the radio can see but that refuse every connection. Worth saying
+    // out loud: it usually means the peer needs to open the app or turn
+    // Bluetooth on, which the user can act on.
+    val unreachable = presence.filter { it.unreachableNearby }
     val statusText = when {
-        connected && peers.size == 1 -> "Connected to ${peers.first().shortId()}"
+        connected && peers.size == 1 ->
+            "Connected to ${ChatRepository.displayName(peers.first())}"
         connected -> "${peers.size} peers connected"
+        unreachable.size == 1 ->
+            "${ChatRepository.displayName(unreachable.first().wireId)} is nearby but won't connect"
+        unreachable.isNotEmpty() -> "${unreachable.size} devices nearby, none connecting"
         else -> "Not connected · you are ${identity.wireMacStr}"
     }
 
@@ -156,7 +169,7 @@ private fun ChatScreen(discovery: BtDiscovery) {
                     Column {
                         Text("Muninn", fontWeight = FontWeight.SemiBold)
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            StatusDot(connected)
+                            StatusDot(connected, unreachable.isNotEmpty())
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 statusText,
@@ -224,8 +237,14 @@ private fun ChatScreen(discovery: BtDiscovery) {
 }
 
 @Composable
-private fun StatusDot(connected: Boolean) {
-    val color = if (connected) Color(0xFF4CAF50) else MaterialTheme.colorScheme.outline
+private fun StatusDot(connected: Boolean, nearbyUnreachable: Boolean = false) {
+    // Three states, not two: "nobody around" and "someone is around but we
+    // can't reach them" call for different actions from the user.
+    val color = when {
+        connected -> Color(0xFF4CAF50)
+        nearbyUnreachable -> Color(0xFFF59E0B)
+        else -> MaterialTheme.colorScheme.outline
+    }
     Box(
         modifier = Modifier
             .size(8.dp)
@@ -287,7 +306,8 @@ private fun MessageBubble(msg: ChatRepository.Message) {
             Text(msg.text, color = textColor, style = MaterialTheme.typography.bodyMedium)
         }
         Text(
-            formatTime(msg.timestamp),
+            if (outgoing) "${formatTime(msg.timestamp)} ${msg.ack.tick()}"
+            else formatTime(msg.timestamp),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -498,3 +518,10 @@ private fun formatTime(ts: Long): String =
 
 /** Short, readable form of a wire id for the status line. */
 private fun String.shortId(): String = takeLast(8)
+
+/** Delivery state as the desktop client renders it: sent, received, read. */
+private fun ChatRepository.Ack.tick(): String = when (this) {
+    ChatRepository.Ack.SENT -> "·"
+    ChatRepository.Ack.ACKED -> "\u2713"
+    ChatRepository.Ack.READ -> "\u2713\u2713"
+}

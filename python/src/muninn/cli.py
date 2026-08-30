@@ -14,6 +14,7 @@ except ImportError:
     _HAS_READLINE = False
 
 from muninn import bt, presence
+from muninn.discovery import acceptor, scanner
 from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import Group, GroupStore
 from muninn.peers import GROUP_ZERO, ConnectionManager
@@ -114,6 +115,10 @@ class ChatUI:
         # Connect announcements held back until the peer's Profile arrives.
         self._pending_connects: dict[str, threading.Timer] = {}
         self._pending_lock = threading.Lock()
+        # The label we last showed for each peer. Announcing a rename is only
+        # useful when what the user sees actually changes — a reconnect re-sends
+        # PROFILE, and an override can mean the peer's own new name is invisible.
+        self._shown_names: dict[str, str] = {}
         # Blocks _input_reader from drawing the next prompt until the current
         # command has finished printing all output.
         self._ready_for_prompt = threading.Event()
@@ -201,8 +206,16 @@ class ChatUI:
         # instead of printing a MAC and correcting it a moment later.
         if self._resolve_pending_connect(addr):
             return
+        if addr not in self._shown_names:
+            # Their Profile beat our add_peer(). The connect line is still to
+            # come and will carry the name, so saying it twice is noise.
+            return
+        current = self._name(addr)
+        if current == self._shown_names[addr]:
+            return  # a local override, or a name we already displayed
+        self._shown_names[addr] = current
         if name:
-            self._display(f"  {addr} is now known as {name}")
+            self._display(f"  {addr} is now known as {current}")
         else:
             self._display(f"  {addr} cleared their display name")
 
@@ -218,6 +231,7 @@ class ChatUI:
 
     def _announce_connected(self, addr: str) -> None:
         label = self._name(addr)
+        self._shown_names[addr] = label
         self._display(f"+ {label} connected")
         if self.active_conv is None:
             self.active_conv = ("dm", addr)
@@ -575,80 +589,6 @@ class ChatUI:
 
         except KeyboardInterrupt:
             pass
-
-
-def acceptor(conn_mgr: ConnectionManager) -> None:
-    """Accept incoming connections and hand to ConnectionManager."""
-    while True:
-        try:
-            sock, addr = bt.accept()
-            conn_mgr.add_peer(sock, addr)
-        except ConnectionError:
-            break
-
-
-def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) -> None:
-    """Periodically discover and connect to new Muninn peers."""
-    # Initial scan to populate the BlueZ cache. Its results are sightings too —
-    # discarding them left a device visible at launch looking offline until the
-    # first periodic re-scan, two minutes later.
-    try:
-        for addr, _name in bt.scan_devices(duration=5):
-            conn_mgr.presence.record_sighting(addr)
-    except Exception:
-        pass
-
-    deferred: dict[str, float] = {}  # MAC tiebreaker deferral
-    cycles = 0
-    presence = conn_mgr.presence
-
-    while not stop.is_set():
-        cycles += 1
-        # Refresh BT cache every ~2 min so UUIDs stay current and newly-online
-        # peers are discoverable even if they missed the initial scan window.
-        # Every device the inquiry returns counts as a sighting, Muninn or not —
-        # that is what lets the UI say "nearby but can't connect" rather than
-        # silently showing a peer as offline.
-        if cycles % 8 == 0:
-            try:
-                for addr, _name in bt.scan_devices(duration=5, quiet=True):
-                    presence.record_sighting(addr)
-            except Exception:
-                pass
-        try:
-            services = bt.discover()
-        except Exception:
-            services = []
-
-        for addr, _name in services:
-            addr = addr.upper()
-            if addr == local_mac:
-                continue
-            presence.record_sighting(addr)
-            if conn_mgr.is_connected(addr):
-                deferred.pop(addr, None)
-                continue
-
-            # Higher MAC defers 10s to let lower MAC initiate
-            if not bt.should_keep_outgoing(local_mac, addr):
-                if addr not in deferred:
-                    deferred[addr] = time.time()
-                    continue
-                if time.time() - deferred[addr] < 10:
-                    continue
-
-            deferred.pop(addr, None)
-            try:
-                bt.ensure_paired(addr)
-                sock, peer_addr = bt.connect(addr)
-                if not conn_mgr.add_peer(sock, peer_addr):
-                    presence.record_dial_failure(addr, "handshake failed")
-            except (ConnectionError, OSError) as e:
-                # Visible to the radio but unreachable. Recorded so the peer
-                # list can distinguish this from "out of range entirely".
-                presence.record_dial_failure(addr, str(e))
-
-        stop.wait(15)
 
 
 def main():

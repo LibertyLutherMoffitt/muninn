@@ -5,12 +5,18 @@ by the modules under test (protocol/crypto/storage/groups/peers/presence), so
 the suite runs on any platform.
 """
 
+import os
 import socket
 import sys
 import threading
 from pathlib import Path
 
 import pytest
+
+# Resolve `muninn.bt` to the loopback backend for the whole session. Importing
+# it must not require a D-Bus system bus (Linux) or Windows, and any test that
+# touches the discovery loops needs *a* backend to import.
+os.environ.setdefault("MUNINN_BT_BACKEND", "loopback")
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:

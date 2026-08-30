@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import Property, QObject, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
+from muninn import presence
 from muninn.peers import GROUP_ZERO
 from muninn.protocol import FrameTooLarge
 
@@ -371,6 +372,56 @@ class ChatBridge(QObject):
         (":q  /  :wq  /  :x", "quit (wq/x sends pending buffer first)"),
     )
 
+    def _presence_items(self, reachable_only: bool) -> list:
+        """Peer rows for the :peers / :known info menus, ordered by reachability.
+
+        Uses the presence tracker rather than the peers table so a device the
+        radio can see but cannot connect to is shown as such, instead of being
+        indistinguishable from one that is out of range.
+        """
+        tracker = self._cm.presence
+        tracker.sync_from_manager(self._cm)
+        statuses = tracker.all_statuses()
+
+        known = {a for a in self._gs.pubkeys if a != self._local_mac}
+        candidates = known | {
+            a
+            for a, st in statuses.items()
+            if st.state != presence.OFFLINE or st.last_seen is not None
+        }
+
+        order = {
+            presence.CONNECTED: 0,
+            presence.RELAY: 1,
+            presence.NEARBY: 2,
+            presence.OFFLINE: 3,
+        }
+        rows = []
+        for addr in candidates:
+            status = statuses.get(addr) or tracker.status(addr)
+            if reachable_only and status.state not in (presence.CONNECTED, presence.RELAY):
+                continue
+            label = self._gs.display_name(addr)
+            detail = status.describe()
+            if status.state == presence.RELAY and status.via:
+                detail = f"relay via {self._gs.display_name(status.via)}"
+            if addr not in known:
+                detail += " · not paired"
+            rows.append(
+                (
+                    order.get(status.state, 9),
+                    label.lower(),
+                    {
+                        "label": label,
+                        "sub": f"{detail} · {addr}",
+                        "convId": "dm:" + addr if addr in known else "",
+                        "action": "",
+                    },
+                )
+            )
+        rows.sort(key=lambda r: (r[0], r[1]))
+        return [r[2] for r in rows]
+
     def _candidates_for(self, head: str, arg_index: int) -> list[str]:
         if head in ("dm", "nick") and arg_index == 1:
             return self._peer_candidates()
@@ -621,62 +672,15 @@ class ChatBridge(QObject):
             self.infoMenuRequested.emit("conversations", items)
             return
         if head == "peers":
-            with self._cm.peers_lock:
-                direct = list(self._cm.peers.keys())
-            direct_set = set(direct)
-            relay = [
-                a
-                for a in self._gs.pubkeys
-                if a != self._local_mac and a not in direct_set
-            ]
-            items = []
-            for a in direct:
-                items.append(
-                    {
-                        "label": self._gs.display_name(a),
-                        "sub": f"direct · {a}",
-                        "convId": "dm:" + a,
-                        "action": "",
-                    }
-                )
-            for a in relay:
-                via = self._cm.indirect_via.get(a, "")
-                via_str = self._gs.display_name(via) if via else "?"
-                items.append(
-                    {
-                        "label": self._gs.display_name(a),
-                        "sub": f"relay via {via_str} · {a}",
-                        "convId": "dm:" + a,
-                        "action": "",
-                    }
-                )
+            items = self._presence_items(reachable_only=True)
             if not items:
-                items = [{"label": "(no peers)", "sub": "", "convId": "", "action": ""}]
+                items = [
+                    {"label": "(no peers reachable)", "sub": "", "convId": "", "action": ""}
+                ]
             self.infoMenuRequested.emit("peers", items)
             return
         if head == "known":
-            with self._cm.peers_lock:
-                direct_set = set(self._cm.peers.keys())
-            items = []
-            for a in sorted(self._gs.pubkeys):
-                if a == self._local_mac:
-                    continue
-                if a in direct_set:
-                    status = "connected"
-                elif a in self._cm.indirect_via:
-                    status = (
-                        f"relay via {self._gs.display_name(self._cm.indirect_via[a])}"
-                    )
-                else:
-                    status = "offline"
-                items.append(
-                    {
-                        "label": self._gs.display_name(a),
-                        "sub": f"{status} · {a}",
-                        "convId": "dm:" + a,
-                        "action": "",
-                    }
-                )
+            items = self._presence_items(reachable_only=False)
             if not items:
                 items = [
                     {"label": "(no known peers)", "sub": "", "convId": "", "action": ""}

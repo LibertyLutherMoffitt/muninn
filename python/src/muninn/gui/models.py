@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
+from muninn import presence
+
 if TYPE_CHECKING:
     from muninn.groups import GroupStore
     from muninn.peers import ConnectionManager
@@ -32,6 +34,7 @@ _PEER_ROLES = {
     _R.BASE + 6: b"unreadCount",
     _R.BASE + 7: b"status",
     _R.BASE + 8: b"via",
+    _R.BASE + 9: b"presenceText",
 }
 _PEER_ROLE_BY_NAME = {v: k for k, v in _PEER_ROLES.items()}
 
@@ -128,14 +131,33 @@ class PeerListModel(QAbstractListModel):
                 dm_last = {}
                 grp_last = {}
 
-        for addr in self._gs.pubkeys:
-            if addr == self._cm.local_mac:
-                continue
+        # Presence is the source of truth for the row's dot and subtitle: it
+        # knows the difference between "gone" and "the radio can see it but no
+        # session will form", which peers_lock alone cannot tell us.
+        tracker = self._cm.presence
+        tracker.sync_from_manager(self._cm)
+        statuses = tracker.all_statuses()
+
+        # Devices seen in a scan that we hold no key for still belong in the
+        # list — that is a peer who has not been paired yet, not a non-event.
+        known = [a for a in self._gs.pubkeys if a != self._cm.local_mac]
+        seen_only = [
+            a
+            for a, st in statuses.items()
+            if a not in self._gs.pubkeys and st.state != presence.OFFLINE
+        ]
+
+        for addr in known + seen_only:
             conv_id = "dm:" + addr
+            status_obj = statuses.get(addr) or tracker.status(addr)
             if addr in direct:
                 status = "direct"
-            elif addr in self._cm.indirect_via:
+            elif status_obj.state == presence.RELAY or addr in self._cm.indirect_via:
                 status = "relay"
+            elif status_obj.unreachable_nearby:
+                status = "unreachable"
+            elif status_obj.state == presence.NEARBY:
+                status = "nearby"
             else:
                 status = "offline"
             preview, last_ts = dm_last.get(addr, ("", 0))
@@ -150,6 +172,7 @@ class PeerListModel(QAbstractListModel):
                     "unreadCount": self._unread.get(conv_id, 0),
                     "status": status,
                     "via": self._cm.indirect_via.get(addr, ""),
+                    "presenceText": status_obj.describe(),
                 }
             )
 
@@ -167,6 +190,7 @@ class PeerListModel(QAbstractListModel):
                     "unreadCount": self._unread.get(conv_id, 0),
                     "status": "group",
                     "via": "",
+                    "presenceText": f"{len(group.members)} members",
                 }
             )
 
