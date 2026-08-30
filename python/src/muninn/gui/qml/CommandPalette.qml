@@ -65,7 +65,7 @@ Rectangle {
                 height: 36
                 color: Theme.bg
                 radius: 6
-                border.color: root.isRawCommand ? "#f59e0b" : "transparent"
+                border.color: root.isRawCommand ? Theme.warning : "transparent"
                 border.width: 1
 
                 // ":" prompt shown only in command mode. Sized so the
@@ -77,7 +77,7 @@ Rectangle {
                     anchors.leftMargin: 10
                     anchors.verticalCenter: parent.verticalCenter
                     text: ":"
-                    color: "#f59e0b"
+                    color: Theme.warning
                     font.pixelSize: 16
                     font.bold: true
                 }

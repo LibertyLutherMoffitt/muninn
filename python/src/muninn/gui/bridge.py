@@ -59,6 +59,10 @@ class ChatBridge(QObject):
     # title, items: each item = {label, sub, convId?, action?}
     infoMenuRequested = Signal(str, list)
 
+    # Emitted whenever any peer's reachability may have changed, so views
+    # showing it (the chat header) can re-read without polling.
+    presenceChanged = Signal()
+
     _isWriterChanged = Signal(bool)
     _connCountChanged = Signal(int)
 
@@ -175,6 +179,7 @@ class ChatBridge(QObject):
         return app.focusWindow() is not None
 
     def _on_peer_changed(self, addr: str, connected: bool) -> None:
+        self.presenceChanged.emit()
         self._peer_model.refresh()
         with self._cm.peers_lock:
             self._conn_count = len(self._cm.peers)
@@ -274,6 +279,36 @@ class ChatBridge(QObject):
             is_outbound=True,
         )
         self._peer_model.set_last_message(conv_id, text, ts)
+
+    @Slot(str, result="QVariantMap")
+    def peerPresence(self, addr: str) -> dict:
+        """Reachability of one peer, for the chat header.
+
+        Returns the same vocabulary the peer list uses — keeping the two in
+        step matters more than the exact wording, because a header that
+        disagrees with the row it was opened from reads as a bug.
+        """
+        if not addr:
+            return {"state": "none", "text": "", "reachable": False}
+        addr = addr.upper()
+        tracker = self._cm.presence
+        status = tracker.status(addr)
+        with self._cm.peers_lock:
+            direct = addr in self._cm.peers
+        if direct:
+            state = "direct"
+        elif status.state == presence.RELAY:
+            state = "relay"
+        elif status.unreachable_nearby:
+            state = "unreachable"
+        elif status.state == presence.NEARBY:
+            state = "nearby"
+        else:
+            state = "offline"
+        text = status.describe()
+        if state == "relay" and status.via:
+            text = f"relay via {self._gs.display_name(status.via)}"
+        return {"state": state, "text": text, "reachable": status.is_reachable}
 
     @Slot(str, result=str)
     def displayName(self, addr: str) -> str:

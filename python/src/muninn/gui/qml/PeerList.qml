@@ -28,12 +28,32 @@ Rectangle {
         return null
     }
 
+    // A divider against the chat pane, so the two surfaces read as panes
+    // rather than as one flat field.
+    Rectangle {
+        anchors.right: parent.right
+        width: 1
+        height: parent.height
+        color: Theme.border
+        z: 2
+    }
+
+    EmptyState {
+        anchors.centerIn: parent
+        width: parent.width - Theme.spaceLg * 2
+        visible: listView.count === 0
+        glyph: "⌁"
+        title: "No peers yet"
+        subtitle: "Muninn scans in the background. Peers running it nearby appear here on their own."
+    }
+
     ListView {
         id: listView
         anchors.fill: parent
         model: peerModel
         clip: true
         currentIndex: -1
+        visible: count > 0
 
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
@@ -109,23 +129,11 @@ Rectangle {
                     }
                 }
 
-                // Status dot
-                Rectangle {
+                // Shared with the chat header — see PresenceDot.qml.
+                PresenceDot {
                     anchors.right: avatar.right
                     anchors.bottom: avatar.bottom
-                    width: 10; height: 10; radius: 5
-                    // "unreachable" earns its own colour: the device is
-                    // right there and still won't connect, which is a
-                    // different problem from being out of range.
-                    color: model.status === "direct"      ? Theme.success
-                         : model.status === "relay"       ? "#f59e0b"
-                         : model.status === "unreachable" ? Theme.error
-                         : model.status === "nearby"      ? "#f59e0b"
-                         : model.status === "group"       ? Theme.accent
-                                                          : Theme.textMuted
-                    opacity: model.status === "nearby" ? 0.65 : 1.0
-                    border.color: Theme.surface
-                    border.width: 2
+                    presenceState: model.status
                 }
 
                 Column {

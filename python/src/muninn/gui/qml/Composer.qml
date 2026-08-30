@@ -41,7 +41,7 @@ Rectangle {
                 case "INSERT":      return Theme.accent
                 case "VISUAL":
                 case "VISUAL_LINE": return Theme.success
-                case "CMDLINE":     return "#f59e0b"
+                case "CMDLINE":     return Theme.warning
                 default:            return "transparent"
             }
         }
@@ -61,7 +61,7 @@ Rectangle {
                 case "INSERT":      return Theme.accent
                 case "VISUAL":
                 case "VISUAL_LINE": return Theme.success
-                case "CMDLINE":     return "#f59e0b"
+                case "CMDLINE":     return Theme.warning
                 default:            return "transparent"
             }
         }

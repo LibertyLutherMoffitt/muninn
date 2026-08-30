@@ -10,7 +10,7 @@ ApplicationWindow {
     minimumWidth: 800
     minimumHeight: 500
     visible: true
-    color: "#0f1115"
+    color: Theme.bg
 
     // Helper to check if we are in navigation mode
     property bool isNormalMode: vimEditor && vimEditor.mode === "NORMAL"
@@ -36,7 +36,7 @@ ApplicationWindow {
 
             PeerList {
                 id: peerList
-                Layout.preferredWidth: 240
+                Layout.preferredWidth: Theme.sidebarWidth
                 Layout.fillHeight: true
                 onConvSelected: (cid) => {
                     const prev = bridge.activeConvId
@@ -69,121 +69,64 @@ ApplicationWindow {
         Rectangle {
             id: statusBar
             Layout.fillWidth: true
-            Layout.preferredHeight: 24
+            Layout.preferredHeight: Theme.statusBarHeight
             color: Theme.surfaceRaised
             z: 5
 
             Row {
                 anchors.left: parent.left
-                anchors.leftMargin: 12
+                anchors.leftMargin: Theme.spaceMd
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: 20
+                spacing: Theme.spaceXl - 4
 
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: bridge.localName ? "nick: " + bridge.localName : "nick: (none)"
                     color: Theme.textMuted
-                    font.pixelSize: 11
+                    font.pixelSize: Theme.fontSmall
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: "peers: " + bridge.connectedPeerCount + " connected"
                     color: Theme.textMuted
-                    font.pixelSize: 11
+                    font.pixelSize: Theme.fontSmall
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: "mode: " + (bridge.isWriter ? "WRITER" : "READER")
                     color: bridge.isWriter ? Theme.success : Theme.textMuted
-                    font.pixelSize: 11
+                    font.pixelSize: Theme.fontSmall
                     font.bold: bridge.isWriter
                 }
             }
 
-            // Manual palette opener — keyboard shortcut is <space>f, but a
-            // visible button helps discoverability for new users.
-            Rectangle {
+            // Keyboard shortcuts exist for both, but a visible control is
+            // what a new user finds first.
+            PillButton {
                 id: paletteBtn
                 anchors.right: parent.right
-                anchors.rightMargin: 8
+                anchors.rightMargin: Theme.spaceSm
                 anchors.verticalCenter: parent.verticalCenter
-                width: paletteBtnLabel.implicitWidth + 18
-                height: 18
-                radius: 4
-                color: paletteBtnArea.containsMouse
-                    ? Theme.accent : Theme.surface
-                border.color: Theme.accent
-                border.width: 1
-
-                Behavior on color {
-                    ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
-                }
-
-                Text {
-                    id: paletteBtnLabel
-                    anchors.centerIn: parent
-                    text: "⌘  palette  ·  ␣f"
-                    color: paletteBtnArea.containsMouse
-                        ? "white" : Theme.textMuted
-                    font.pixelSize: 10
-                    font.bold: true
-                }
-
-                MouseArea {
-                    id: paletteBtnArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (cmdPalette.visible) return
-                        // Trail starts from the button so the comet flies
-                        // from the click point (not from the composer caret
-                        // the user isn't looking at).
-                        const c = paletteBtn.mapToItem(cursorTrail,
-                            paletteBtn.width / 2, paletteBtn.height / 2)
-                        root._paletteTrailStart = c
-                        cmdPalette.open("")
-                    }
+                label: "\u2318  palette"
+                shortcut: "\u2423f"
+                onClicked: (cx, cy) => {
+                    if (cmdPalette.visible) return
+                    // Trail starts from the button so the comet flies from the
+                    // click point, not the composer caret nobody is looking at.
+                    root._paletteTrailStart =
+                        paletteBtn.mapToItem(cursorTrail, cx, cy)
+                    cmdPalette.open("")
                 }
             }
 
-            // About button — sits to the left of the palette button. Routes
-            // through bridge.runCommand("about") so the popup styling matches
-            // every other info menu.
-            Rectangle {
-                id: aboutBtn
+            PillButton {
                 anchors.right: paletteBtn.left
-                anchors.rightMargin: 6
+                anchors.rightMargin: Theme.spaceXs + 2
                 anchors.verticalCenter: parent.verticalCenter
-                width: aboutBtnLabel.implicitWidth + 18
-                height: 18
-                radius: 4
-                color: aboutBtnArea.containsMouse
-                    ? Theme.accent : Theme.surface
-                border.color: Theme.accent
-                border.width: 1
-
-                Behavior on color {
-                    ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
-                }
-
-                Text {
-                    id: aboutBtnLabel
-                    anchors.centerIn: parent
-                    text: "?  about"
-                    color: aboutBtnArea.containsMouse
-                        ? "white" : Theme.textMuted
-                    font.pixelSize: 10
-                    font.bold: true
-                }
-
-                MouseArea {
-                    id: aboutBtnArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: bridge.runCommand("about")
-                }
+                label: "?  about"
+                // Routed through runCommand so the popup styling matches every
+                // other info menu.
+                onClicked: bridge.runCommand("about")
             }
         }
     }

@@ -25,17 +25,51 @@ from .writer_lock import WriterLock
 
 _QML_DIR = pathlib.Path(__file__).parent / "qml"
 
+# Design tokens. Every colour, radius and type size in the QML comes from
+# here — a literal in a .qml file is a bug, because it cannot be restyled and
+# it drifts from whatever the rest of the app does.
 _THEME = {
+    # Surfaces, from furthest back to nearest front.
     "bg": "#0f1115",
     "surface": "#151820",
     "surfaceRaised": "#1b1f2a",
+    "surfaceHover": "#232838",
+    "border": "#262b38",
+    # Text.
     "textPrimary": "#e5e7eb",
     "textMuted": "#9ca3af",
+    "textFaint": "#6b7280",
+    "onAccent": "#ffffff",
+    # Brand.
     "accent": "#7c3aed",
+    "accentMuted": "#3b2a6a",
+    # Bubbles.
     "incomingBubble": "#1f2330",
     "outgoingBubble": "#3b2a6a",
+    # Status. `warning` was previously hardcoded as #f59e0b in five places.
     "success": "#10b981",
+    "warning": "#f59e0b",
     "error": "#ef4444",
+    # Type scale.
+    "fontTiny": 10,
+    "fontSmall": 11,
+    "fontBody": 13,
+    "fontTitle": 15,
+    "fontLarge": 20,
+    # Spacing scale.
+    "spaceXs": 4,
+    "spaceSm": 8,
+    "spaceMd": 12,
+    "spaceLg": 16,
+    "spaceXl": 24,
+    # Radii.
+    "radiusSm": 4,
+    "radiusMd": 8,
+    "radiusLg": 12,
+    # Chrome.
+    "sidebarWidth": 260,
+    "headerHeight": 52,
+    "statusBarHeight": 24,
 }
 
 

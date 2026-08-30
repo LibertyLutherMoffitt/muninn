@@ -81,7 +81,7 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 - `bt/bluez.py` — BlueZ D-Bus backend
 - `bt/winrt.py` — WinRT backend (written, not yet hardware-tested)
 - `bt/loopback.py` — TCP backend for running and testing without a radio
-- `gui/main.py` — GUI entrypoint, QML engine, theme dict, default font (JetBrains Mono)
+- `gui/main.py` — GUI entrypoint, QML engine, `_THEME` design tokens, default font
 - `gui/bridge.py` — `ChatBridge`: Qt signals ↔ `ConnectionManager` callbacks; also the
   single command dispatcher (`runCommand`) and tab-completion engine (`completeCommand`)
   shared by the vim cmdline (`:`) and the `<space>f` palette
@@ -91,7 +91,21 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 - `gui/qml/Main.qml` — window, status bar, global shortcuts, overlay wiring
 - `gui/qml/CommandPalette.qml` — `<space>f` fuzzy palette with raw `:` mode
 - `gui/qml/InfoMenu.qml` — popup used by `:list` / `:peers` / `:known` / `:help`
-- `gui/qml/ChatView.qml` — top-to-bottom message list, auto-scroll, bubble delegate
+- `gui/qml/ChatView.qml` — presence header, day dividers, message runs, bubble delegate
+- `gui/qml/PresenceDot.qml`, `PillButton.qml`, `EmptyState.qml` — shared pieces; use
+  these rather than re-styling a Rectangle in place
+
+## GUI style rules
+
+- **Every colour, size and radius comes from `Theme`** (the `_THEME` dict in
+  `gui/main.py`). A hex literal in a `.qml` file fails `test_gui_theme.py`.
+- **Never declare a QML property called `state`** — it shadows the built-in
+  `Item.state` and silently binds the wrong value. Same test catches it.
+- Presence is drawn by `PresenceDot` in both the sidebar and the chat header;
+  the two disagreeing about one peer reads as a bug, not as two views.
+- Don't read a sibling binding (`isDm`, `peerAddr`) inside an `onXChanged`
+  handler — the handler can run before those re-evaluate. Derive from the
+  property that changed.
 
 ## GUI command surface (don't drift from this)
 

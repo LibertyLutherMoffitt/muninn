@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import datetime as _dt
+
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
 from muninn import presence
@@ -213,12 +215,49 @@ _MSG_ROLES = {
     _R.BASE + 4: b"timestamp",
     _R.BASE + 5: b"isOutbound",
     _R.BASE + 6: b"ackState",
+    _R.BASE + 7: b"daySection",
+    _R.BASE + 8: b"showSender",
 }
 _MSG_ROLE_BY_NAME = {v: k for k, v in _MSG_ROLES.items()}
 
 ACK_SENT = "sent"
 ACK_ACKED = "acked"
 ACK_READ = "read"
+
+# Messages closer together than this from the same sender are drawn as one
+# run: the name is shown once, at the top.
+RUN_GAP_SECONDS = 300
+
+
+def _day_section(ts: int) -> str:
+    """Label for the day divider: Today, Yesterday, or an explicit date."""
+    day = _dt.date.fromtimestamp(ts)
+    today = _dt.date.today()
+    delta = (today - day).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Yesterday"
+    if delta < 7:
+        return day.strftime("%A")
+    if day.year == today.year:
+        return day.strftime("%a %d %b")
+    return day.strftime("%d %b %Y")
+
+
+def _starts_run(msg: dict, prev: dict | None) -> bool:
+    """True when this message should carry a sender label.
+
+    A run is broken by a different sender, a day boundary, or a long enough
+    pause that the two no longer read as one burst.
+    """
+    if prev is None:
+        return True
+    if prev["senderMac"] != msg["senderMac"]:
+        return True
+    if prev["daySection"] != msg["daySection"]:
+        return True
+    return msg["timestamp"] - prev["timestamp"] > RUN_GAP_SECONDS
 
 
 class MessageListModel(QAbstractListModel):
@@ -250,18 +289,20 @@ class MessageListModel(QAbstractListModel):
         is_outbound: bool,
     ) -> None:
         row = len(self._messages)
+        entry = {
+            "msgId": msg_id,
+            "senderMac": sender_mac,
+            "senderName": sender_name,
+            "text": text,
+            "timestamp": ts,
+            "isOutbound": is_outbound,
+            "ackState": ACK_SENT,
+            "daySection": _day_section(ts),
+        }
+        prev = self._messages[-1] if self._messages else None
+        entry["showSender"] = _starts_run(entry, prev)
         self.beginInsertRows(QModelIndex(), row, row)
-        self._messages.append(
-            {
-                "msgId": msg_id,
-                "senderMac": sender_mac,
-                "senderName": sender_name,
-                "text": text,
-                "timestamp": ts,
-                "isOutbound": is_outbound,
-                "ackState": ACK_SENT,
-            }
-        )
+        self._messages.append(entry)
         self.endInsertRows()
 
     def update_ack(self, msg_id: str, state: str) -> None:
@@ -296,9 +337,14 @@ class MessageListModel(QAbstractListModel):
                 "timestamp": ts,
                 "isOutbound": sender == local_mac,
                 "ackState": ack,
+                "daySection": _day_section(ts),
             }
             for mid, sender, body, ts, ack in rows
         ]
+        prev = None
+        for msg in self._messages:
+            msg["showSender"] = _starts_run(msg, prev)
+            prev = msg
         self.endResetModel()
 
     def clear(self) -> None:
