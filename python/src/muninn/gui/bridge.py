@@ -334,6 +334,7 @@ class ChatBridge(QObject):
         "list",
         "peers",
         "known",
+        "whoami",
         "history",
         "scan",
         "clear",
@@ -360,6 +361,7 @@ class ChatBridge(QObject):
         (":nick <peer> <name>", "local override for a peer"),
         (':nick <peer> ""', "clear a local override"),
         (":list", "list conversations"),
+        (":whoami", "your address, name and link state"),
         (":peers", "show direct + relay peers"),
         (":known", "show every known peer"),
         (":history [N]", "reload last N messages"),
@@ -670,6 +672,38 @@ class ChatBridge(QObject):
                     }
                 ]
             self.infoMenuRequested.emit("conversations", items)
+            return
+        if head == "whoami":
+            # The first pairing is manual on every platform and needs this.
+            name = self._gs.display_name(self._local_mac)
+            tracker = self._cm.presence
+            tracker.sync_from_manager(self._cm)
+            unreachable = tracker.nearby_unreachable()
+            items = [
+                {
+                    "label": self._local_mac,
+                    "sub": "your address — give this to a peer when pairing",
+                    "convId": "",
+                    "action": "",
+                },
+                {
+                    "label": name if name != self._local_mac else "(no display name)",
+                    "sub": "display name · :nick <name> to change",
+                    "convId": "",
+                    "action": "",
+                },
+                {
+                    "label": f"{len(tracker.connected())} connected",
+                    "sub": (
+                        f"{len(unreachable)} nearby but unreachable"
+                        if unreachable
+                        else "no unreachable peers nearby"
+                    ),
+                    "convId": "",
+                    "action": "",
+                },
+            ]
+            self.infoMenuRequested.emit("whoami", items)
             return
         if head == "peers":
             items = self._presence_items(reachable_only=True)

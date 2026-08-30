@@ -16,6 +16,24 @@ tree; new QML files (or any new source) must be `git add`-ed before
 `python/pyproject.toml` and `flake.nix` whenever you need to invalidate the
 build cache.
 
+### Testing
+
+```bash
+cd python && python -m pytest tests/ -q          # unit + full-stack integration
+cd spec/kotlin-conformance && gradle test        # wire conformance, no Android SDK needed
+```
+
+Run both after touching anything in `protocol.py`, `Protocol.kt`, `peers.py` or
+`PeerBook.kt` — `spec/wire-vectors.json` is the shared fixture that keeps the
+desktop and Android clients speaking the same protocol, and only the two suites
+together catch a divergence. Regenerate it with `python3 spec/generate_vectors.py`
+**only** when `PROTOCOL.md` changes on purpose.
+
+`MUNINN_BT_BACKEND=loopback` runs the CLI or GUI over TCP with no Bluetooth, so
+two clients can talk on one machine. See `TESTING.md` for the environment
+variables, including `MUNINN_LOOPBACK_GHOSTS` for faking a device that is
+visible but unreachable.
+
 ### Linting
 
 Run all pre-commit hooks (ruff format, ruff check, ty check, alejandra, nix flake check):
@@ -45,9 +63,15 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 
 - `DESIGN.md` — motivation, decisions, architecture, implementation steps
 - `PROTOCOL.md` — wire spec only (the cross-platform contract)
+- `TESTING.md` — how to run each layer, and how to run the apps without hardware
+- `docs/REVIEW.md` — cross-platform review; Linux vs Windows behavioural differences
 - `python/src/muninn/gui/GUI_PLAN.md` — GUI design, Vim keybindings, layout, milestones
 
 ## Key files (Python client)
+
+- `discovery.py` — the accept/scan loops, shared by CLI and GUI (do not re-copy
+  them into an entry point; they drifted last time)
+- `presence.py` — `PresenceTracker`: connected / relay / nearby / offline per peer
 
 - `peers.py` — `ConnectionManager`: all BT connections, relay, ACKs, read receipts
 - `groups.py` — `GroupStore`: in-memory cache of peers/groups/names, write-through to `Storage`
@@ -56,6 +80,7 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 - `cli.py` — readline CLI + `ChatUI` (uses `/`-prefixed commands)
 - `bt/bluez.py` — BlueZ D-Bus backend
 - `bt/winrt.py` — WinRT backend (written, not yet hardware-tested)
+- `bt/loopback.py` — TCP backend for running and testing without a radio
 - `gui/main.py` — GUI entrypoint, QML engine, theme dict, default font (JetBrains Mono)
 - `gui/bridge.py` — `ChatBridge`: Qt signals ↔ `ConnectionManager` callbacks; also the
   single command dispatcher (`runCommand`) and tab-completion engine (`completeCommand`)
@@ -79,3 +104,12 @@ through `bridge.runCommand`. Adding a new command means:
    `notify` for success and `errorOccurred` for failure.
 
 CLI commands stay `/`-prefixed in `cli.py` — no plan to unify.
+
+## Android client
+
+`Protocol.kt` and `PeerBook.kt` deliberately import nothing from `android.*` so
+`spec/kotlin-conformance` can compile and unit-test them on a plain JVM. Keep
+them that way: they hold the rules that must match the desktop client, and rules
+that cannot be tested drift. Anything needing Android APIs belongs in
+`PeerSession.kt`, `MuninnService.kt` or `MainActivity.kt`, which need the SDK to
+build and are not covered by tests.

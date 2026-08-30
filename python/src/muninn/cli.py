@@ -30,6 +30,7 @@ COMMANDS = [
     "/peers",
     "/known",
     "/history",
+    "/whoami",
     "/help",
 ]
 
@@ -507,6 +508,24 @@ class ChatUI:
                 limit = min(limit, HISTORY_MAX)
             self._render_history(self.active_conv, limit=limit)
 
+        elif cmd == "/whoami":
+            # The first pairing is manual on every platform, and it needs this
+            # address. Printing it only at startup means scrolling back for it.
+            name = self.group_store.display_name(self.local_mac)
+            print(f"You are {self.local_mac}")
+            if name != self.local_mac:
+                print(f"  display name: {name}")
+            else:
+                print("  display name: (unset — use /nick <name>)")
+            tracker = self.conn_mgr.presence
+            tracker.sync_from_manager(self.conn_mgr)
+            live = len(tracker.connected())
+            unreachable = tracker.nearby_unreachable()
+            print(f"  connected peers: {live}")
+            if unreachable:
+                names = ", ".join(self._name(a) for a in unreachable)
+                print(f"  nearby but unreachable: {names}")
+
         elif cmd == "/help":
             print("Commands:")
             print("  /dm <name|addr>         — switch to DM")
@@ -521,6 +540,7 @@ class ChatUI:
             print(
                 f"  /history [N]            — show last N msgs (default {HISTORY_DEFAULT})"
             )
+            print("  /whoami                 — your address, name and link state")
 
         else:
             print(f"Unknown command: {cmd}. Type /help")

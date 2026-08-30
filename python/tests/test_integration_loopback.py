@@ -284,3 +284,12 @@ def test_a_message_sent_while_the_peer_is_away_is_delivered_on_reconnect(clients
     time.sleep(1)
     revived = clients("BB:BB:BB:BB:BB:02", "bob")
     assert revived.wait_for("sent while you were gone", timeout=90), revived.output()
+
+
+def test_whoami_reports_the_address_needed_for_pairing(clients):
+    alice = clients("AA:AA:AA:AA:AA:01", "alice")
+    assert alice.wait_for("Scanning for peers")
+    alice.send("/whoami")
+    assert alice.wait_for("You are AA:AA:AA:AA:AA:01"), alice.output()
+    assert alice.wait_for("display name: alice"), alice.output()
+    assert alice.wait_for("connected peers:"), alice.output()

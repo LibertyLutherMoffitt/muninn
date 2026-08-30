@@ -4,7 +4,9 @@
 
 - **Byte order:** big-endian (network order) for all multi-byte integers
 - **Text encoding:** UTF-8 for all plaintext message content
-- **MAC addresses:** 6 bytes, MSB first (e.g. `AA:BB:CC:DD:EE:FF` → `0xAA 0xBB 0xCC 0xDD 0xEE 0xFF`)
+- **MAC addresses:** 6 bytes, MSB first (e.g. `AA:BB:CC:DD:EE:FF` → `0xAA 0xBB 0xCC 0xDD 0xEE 0xFF`).
+  Every address field is exactly 6 bytes; both clients reject a malformed address
+  rather than emitting a short field, which would shift every field after it.
 - **UUIDs:** 16 bytes, big-endian (RFC 4122 binary representation)
 
 ---
@@ -38,6 +40,25 @@ Maximum payload: 65,535 bytes.
 | Read         | `0x05` | Reader → Sender       | No                       |
 | Profile      | `0x06` | Peer → Peer           | No (metadata only)       |
 | Peer Annc    | `0x07` | Peer → Peer           | No (metadata only)       |
+
+### Client support
+
+| Frame | Python (CLI + GUI) | Android |
+|-------|--------------------|---------|
+| Handshake, Message, ACK | full | full |
+| Read | full | full |
+| Profile | full | full |
+| Peer Annc | full | receive + send; no onward relay |
+| Group Setup | full, including forwarding | member keys recorded, no group chat |
+
+Relaying a `Message` toward another device is desktop-only. Android drops any
+frame not addressed to it.
+
+**Conformance.** `spec/wire-vectors.json` pins one canonical encoding per frame
+type plus an X25519 / NaCl-Box vector. Both clients decode it in their test
+suites (`python/tests/test_wire_vectors.py`,
+`spec/kotlin-conformance/…/WireVectorsTest.kt`). Change the spec and the
+vectors together; a diff in that file is a compatibility break.
 
 ---
 
@@ -84,7 +105,8 @@ Order of send/receive does not matter — both sides send and read concurrently.
 [ 16 bytes: msg_id     ]  — UUID v4, unique per message
 [  6 bytes: sender_id  ]  — BT MAC of originating device
 [  6 bytes: final_dest ]  — BT MAC of intended recipient
-[  4 bytes: timestamp  ]  — uint32, unix seconds (UTC)
+[  4 bytes: timestamp  ]  — uint32, unix seconds (UTC); read as **unsigned**
+                            (a signed read reports dates before 1970 after 2038)
 [ 24 bytes: nonce      ]  — random, generated per message
 [  N bytes: ciphertext ]  — NaCl Box encrypted UTF-8 text
 ```
@@ -213,6 +235,12 @@ For each peer:
 ```
 
 Per-peer entry size varies: 39 + name_length bytes. An empty list (`peer_count = 0`) is valid and a no-op.
+
+`name_length` is a uint8, so a longer name must be truncated **on a UTF-8
+codepoint boundary** — a naive byte slice can split a multi-byte sequence, which
+the receiver renders as U+FFFD. `peer_count` is also a uint8: a sender with more
+than 255 known peers sends the first 255 and lets the rest propagate on later
+connections.
 
 Recipients apply the following rules:
 - **Pubkeys** — `setdefault` semantics. A pubkey from a direct handshake is never
