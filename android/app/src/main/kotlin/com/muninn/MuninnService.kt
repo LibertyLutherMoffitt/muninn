@@ -42,6 +42,7 @@ class MuninnService : Service() {
     private lateinit var identity: Identity.Loaded
     private lateinit var discovery: BtDiscovery
     private val scheduler = DialScheduler()
+    private lateinit var notifier: Notifier
     private var serverSocket: BluetoothServerSocket? = null
     private var acceptJob: Job? = null
     private var connectJob: Job? = null
@@ -52,8 +53,11 @@ class MuninnService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        ensureChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("starting…"))
+        notifier = Notifier(this)
+        notifier.ensureChannels()
+        startForeground(Notifier.RADIO_ID, notifier.radioNotification("starting…"))
+        ChatRepository.onConversationRead = { notifier.clearAll() }
+        watchArrivals()
 
         bt = Bt(this)
         identity = Identity.load(this)
@@ -65,14 +69,14 @@ class MuninnService : Service() {
 
         if (!bt.isReady) {
             Log.w(tag, "Bluetooth not enabled; service will idle")
-            updateNotification("Bluetooth disabled")
+            notifier.updateRadio("Bluetooth is off")
             return
         }
         discovery.start()
         watchDiscoveries()
         startAcceptLoop()
         startConnectLoop()
-        updateNotification("listening on Muninn UUID")
+        notifier.updateRadio(radioStatus())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -119,6 +123,18 @@ class MuninnService : Service() {
      * Android's SDP cache frequently never resolves for a device we have not
      * connected to, and a blind dial is the only sure test.
      */
+    /**
+     * Raise a notification for each arriving message, unless the user is
+     * already looking at the conversation.
+     */
+    private fun watchArrivals() {
+        scope.launch {
+            ChatRepository.arrivals.collect { message ->
+                if (!ChatRepository.uiVisible) notifier.notifyMessage(message)
+            }
+        }
+    }
+
     private fun watchDiscoveries() {
         scope.launch {
             discovery.devices.collect { devices ->
@@ -162,6 +178,7 @@ class MuninnService : Service() {
                     dial(addr, probe = true)
                 }
                 ChatRepository.refreshPresence()
+                notifier.updateRadio(radioStatus())
                 delay(policy.dialIntervalMs)
             }
         }
@@ -186,6 +203,18 @@ class MuninnService : Service() {
         // Remember it so we dial it directly next time without waiting on SDP.
         KnownPeers.add(this, address)
         spawnSession(sock)
+    }
+
+    /** One line describing what the radio is doing, for the ongoing notice. */
+    private fun radioStatus(): String {
+        val connected = ChatRepository.book.connected().size
+        val stuck = ChatRepository.book.nearbyUnreachable().size
+        return when {
+            connected == 1 -> "Connected to 1 peer"
+            connected > 1 -> "Connected to $connected peers"
+            stuck > 0 -> "$stuck nearby, none connecting"
+            else -> "Looking for peers nearby"
+        }
     }
 
     /** Change how hard to hunt, and remember the choice. */
@@ -245,29 +274,6 @@ class MuninnService : Service() {
 
     // --- notification ---
 
-    private fun ensureChannel() {
-        val mgr = getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Muninn radio",
-            NotificationManager.IMPORTANCE_LOW,
-        ).apply { description = "Keeps the Bluetooth socket alive in the background." }
-        mgr.createNotificationChannel(channel)
-    }
-
-    private fun buildNotification(text: String): Notification =
-        Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Muninn")
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setOngoing(true)
-            .build()
-
-    private fun updateNotification(text: String) {
-        val mgr = getSystemService(NotificationManager::class.java)
-        mgr.notify(NOTIFICATION_ID, buildNotification(text))
-    }
-
     /**
      * The name peers see. The Bluetooth adapter name is what the user already
      * chose for this phone, so it needs no separate setting.
@@ -278,11 +284,6 @@ class MuninnService : Service() {
             ?.takeIf { it.isNotBlank() }
             ?: android.os.Build.MODEL
             ?: ""
-
-    companion object {
-        private const val CHANNEL_ID = "muninn.radio"
-        private const val NOTIFICATION_ID = 1
-    }
 }
 
 private fun ByteArray.toHex8(): String =

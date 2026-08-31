@@ -137,7 +137,9 @@ CLI commands stay `/`-prefixed in `cli.py` — no plan to unify.
 ## Android client
 
 UI lives in `com.muninn.ui` (one composable family per file); `MainActivity.kt`
-holds only the activity — permissions, lifecycle, discoverability. Colours come
+holds only the activity — permissions, lifecycle, discoverability, and telling
+`ChatRepository` whether the chat is on screen (which is how `Notifier`
+knows to stay quiet). Colours come
 from `MaterialTheme.colorScheme` or `MaterialTheme.accents` (Theme.kt); the
 accents exist because Material has no slot for "reachable" vs "visible but not".
 

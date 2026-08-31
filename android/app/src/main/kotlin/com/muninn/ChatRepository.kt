@@ -1,7 +1,10 @@
 package com.muninn
 
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -55,6 +58,10 @@ object ChatRepository {
     /** Shared peer state. The service seeds it; the UI reads it. */
     val book = PeerBook()
 
+    /** Set by the service so reading a thread also clears its notification. */
+    @Volatile
+    var onConversationRead: (() -> Unit)? = null
+
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages.asStateFlow()
 
@@ -65,6 +72,21 @@ object ChatRepository {
     /** Every peer we know of, with how reachable it is right now. */
     private val _presence = MutableStateFlow<List<PeerBook.PeerStatus>>(emptyList())
     val presence: StateFlow<List<PeerBook.PeerStatus>> = _presence.asStateFlow()
+
+    /**
+     * Each arriving message, once. A StateFlow of the whole list would re-emit
+     * on every change and notify twice for the same message.
+     */
+    private val _arrivals = MutableSharedFlow<Message>(extraBufferCapacity = 64)
+    val arrivals: SharedFlow<Message> = _arrivals.asSharedFlow()
+
+    /**
+     * True while the chat is actually on screen. Notifying someone about a
+     * message they are watching arrive is the fastest way to get an app
+     * muted, so the service checks this before posting.
+     */
+    @Volatile
+    var uiVisible: Boolean = false
 
     private class Session(
         val send: (String) -> Boolean,
@@ -109,10 +131,12 @@ object ChatRepository {
 
     fun onIncoming(wireId: String, text: String, msgId: ByteArray? = null, tsSeconds: Long = 0) {
         val ts = if (tsSeconds > 0) tsSeconds * 1000L else System.currentTimeMillis()
-        append(Message(wireId, text, outgoing = false, timestamp = ts, msgId = msgId))
+        val message = Message(wireId, text, outgoing = false, timestamp = ts, msgId = msgId)
+        append(message)
         if (msgId != null) {
             unread.getOrPut(wireId) { mutableListOf() }.add(msgId)
         }
+        _arrivals.tryEmit(message)
     }
 
     fun onAck(fromWireId: String, msgId: ByteArray) = advance(msgId, Ack.ACKED)
@@ -125,6 +149,7 @@ object ChatRepository {
      * what separates a READ from the ACK the recv loop already sent.
      */
     fun markConversationRead() {
+        onConversationRead?.invoke()
         for ((wireId, ids) in unread) {
             val session = sessions[wireId] ?: continue
             val pending = synchronized(ids) { ids.toList().also { ids.clear() } }

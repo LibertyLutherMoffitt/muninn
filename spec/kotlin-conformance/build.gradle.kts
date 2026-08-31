@@ -29,6 +29,7 @@ dependencies {
     // live alongside them, so the JVM harness needs coroutines too.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     testImplementation("org.json:json:20240303")
     // lazysodium-java is the desktop twin of the app's lazysodium-android and
     // wraps the identical libsodium primitives, so a crypto vector that passes

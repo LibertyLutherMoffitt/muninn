@@ -95,9 +95,14 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         discovery.start()
+        // On screen: the service stops posting notifications for arrivals the
+        // user can already see.
+        ChatRepository.uiVisible = true
+        ChatRepository.markConversationRead()
     }
 
     override fun onStop() {
+        ChatRepository.uiVisible = false
         discovery.stop()
         super.onStop()
     }
