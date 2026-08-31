@@ -18,11 +18,16 @@ sourceSets {
             "com/muninn/PeerBook.kt",
             "com/muninn/ScanPolicy.kt",
             "com/muninn/DialScheduler.kt",
+            "com/muninn/MessageGrouping.kt",
+            "com/muninn/ChatRepository.kt",
         )
     }
 }
 
 dependencies {
+    // ChatRepository exposes StateFlows; the grouping rules under test
+    // live alongside them, so the JVM harness needs coroutines too.
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     testImplementation(kotlin("test"))
     testImplementation("org.json:json:20240303")
     // lazysodium-java is the desktop twin of the app's lazysodium-android and

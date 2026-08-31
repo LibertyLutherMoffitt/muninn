@@ -21,7 +21,13 @@ build cache.
 ```bash
 cd python && python -m pytest tests/ -q          # unit + full-stack integration
 cd spec/kotlin-conformance && gradle test        # wire conformance, no Android SDK needed
+cd android && gradle assembleDebug               # the real app (needs an SDK)
 ```
+
+Build the Android app after touching anything under `android/`. Compose errors
+are compile errors, so this catches most mistakes in ~25s — and everything
+outside the pure-JVM files has no other check at all. `TESTING.md` has the
+one-time SDK setup.
 
 Run both after touching anything in `protocol.py`, `Protocol.kt`, `peers.py` or
 `PeerBook.kt` — `spec/wire-vectors.json` is the shared fixture that keeps the
@@ -130,7 +136,13 @@ CLI commands stay `/`-prefixed in `cli.py` — no plan to unify.
 
 ## Android client
 
-`Protocol.kt` and `PeerBook.kt` deliberately import nothing from `android.*` so
+UI lives in `com.muninn.ui` (one composable family per file); `MainActivity.kt`
+holds only the activity — permissions, lifecycle, discoverability. Colours come
+from `MaterialTheme.colorScheme` or `MaterialTheme.accents` (Theme.kt); the
+accents exist because Material has no slot for "reachable" vs "visible but not".
+
+`Protocol.kt`, `PeerBook.kt`, `ScanPolicy.kt`, `DialScheduler.kt` and
+`MessageGrouping.kt` deliberately import nothing from `android.*` so
 `spec/kotlin-conformance` can compile and unit-test them on a plain JVM. Keep
 them that way: they hold the rules that must match the desktop client, and rules
 that cannot be tested drift. Anything needing Android APIs belongs in

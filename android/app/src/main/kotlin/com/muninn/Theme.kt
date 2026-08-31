@@ -9,6 +9,10 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -62,10 +66,48 @@ private val MuninnTypography = Typography().run {
             fontSize = 22.sp,
             letterSpacing = 0.sp,
         ),
+        titleMedium = titleMedium.copy(fontFamily = display, fontWeight = FontWeight.SemiBold),
         bodyMedium = bodyMedium.copy(fontSize = 15.sp, lineHeight = 21.sp),
+        bodySmall = bodySmall.copy(fontSize = 13.sp, lineHeight = 18.sp),
         labelSmall = labelSmall.copy(letterSpacing = 0.4.sp),
     )
 }
+
+/**
+ * Colours Material's scheme has no slot for.
+ *
+ * Presence is a three-state idea — reachable, visible-but-not, gone — and
+ * Material only offers error. Putting these behind a CompositionLocal keeps
+ * literals out of the UI, which is what lets the whole app be restyled (and
+ * lets a test assert that no widget invents its own green).
+ */
+@Immutable
+data class MuninnAccents(
+    val success: Color,
+    val warning: Color,
+    /** Divider chips, hairlines — quieter than `outline`. */
+    val hairline: Color,
+)
+
+private val DarkAccents = MuninnAccents(
+    success = Color(0xFF4ADE80),
+    warning = Color(0xFFFBBF24),
+    hairline = Color(0xFF2A2730),
+)
+
+private val LightAccents = MuninnAccents(
+    success = Color(0xFF15803D),
+    warning = Color(0xFFB45309),
+    hairline = Color(0xFFE2DEE9),
+)
+
+val LocalMuninnAccents = staticCompositionLocalOf { DarkAccents }
+
+/** `MaterialTheme.accents` — reads like the rest of the theme API. */
+val MaterialTheme.accents: MuninnAccents
+    @Composable
+    @ReadOnlyComposable
+    get() = LocalMuninnAccents.current
 
 @Composable
 fun MuninnTheme(content: @Composable () -> Unit) {
@@ -78,5 +120,7 @@ fun MuninnTheme(content: @Composable () -> Unit) {
         dark -> DarkColors
         else -> LightColors
     }
-    MaterialTheme(colorScheme = colors, typography = MuninnTypography, content = content)
+    CompositionLocalProvider(LocalMuninnAccents provides if (dark) DarkAccents else LightAccents) {
+        MaterialTheme(colorScheme = colors, typography = MuninnTypography, content = content)
+    }
 }

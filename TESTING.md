@@ -16,7 +16,26 @@ cd python && python -m pytest tests/ -q
 
 # Kotlin: wire conformance + peer-state rules (needs a JDK; no Android SDK)
 cd spec/kotlin-conformance && gradle test
+
+# Android app: compiles the real thing (needs an SDK, see below)
+cd android && gradle assembleDebug
 ```
+
+### Building the Android app
+
+Everything in `android/app` outside the pure-JVM files is only checked by the
+compiler, so building it is the difference between "looks right" and "is right".
+
+```bash
+# One-time, on a machine without Android Studio:
+export ANDROID_HOME=/opt/android-sdk
+sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+echo "sdk.dir=$ANDROID_HOME" > android/local.properties   # gitignored
+```
+
+`gradle assembleDebug` then produces `app/build/outputs/apk/debug/app-debug.apk`.
+Run it after any change under `android/`; a Compose mistake is a compile error,
+not a runtime surprise, so this catches most of them for the price of ~25s.
 
 Inside the nix dev shell, `nix develop --command prek run --all-files` runs the
 linters. The Python suite has no dependency on `dbus` or WinRT: `tests/conftest.py`
