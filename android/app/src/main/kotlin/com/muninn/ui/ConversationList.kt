@@ -123,7 +123,7 @@ fun ConversationListScreen(
                 subtitle = "Muninn keeps scanning in the background. Anyone running it " +
                     "within Bluetooth range shows up here on their own — and so " +
                     "does anyone they can reach.",
-                hint = "The first time, one of you may need to tap Pair.",
+                hint = "The first time, one of you may need \u22ee \u203a Pair a device.",
                 modifier = Modifier.padding(padding),
             )
         } else {

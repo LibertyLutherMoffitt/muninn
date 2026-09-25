@@ -484,15 +484,34 @@ class ChatUI:
                 )
 
         elif cmd == "/list":
+            # Everyone you can write to right now, plus anyone you have a
+            # history with — a DM to someone out of range still works, it
+            # just waits.
             print("Conversations:")
-            with self.conn_mgr.peers_lock:
-                for addr in self.conn_mgr.peers:
-                    marker = " *" if self.active_conv == ("dm", addr) else ""
-                    print(f"  DM: {self._name(addr)}{marker}")
+            history = (
+                self.conn_mgr.storage.last_message_per_dm(self.local_mac)
+                if self.conn_mgr.storage is not None
+                else {}
+            )
+            dms = sorted(
+                a
+                for a in self.group_store.pubkeys
+                if a != self.local_mac
+                and (self.conn_mgr.is_reachable(a) or a in history)
+            )
+            for addr in dms:
+                marker = " *" if self.active_conv == ("dm", addr) else ""
+                print(
+                    f"  DM: {self._name(addr)} — {self._presence_label(addr)}{marker}"
+                )
             for gid, group in self.group_store.groups.items():
                 marker = " *" if self.active_conv == ("group", gid) else ""
-                n = len(group.members)
-                print(f"  Group: {group.name} ({n} members){marker}")
+                others = [a for a in group.members if a != self.local_mac]
+                reach = sum(1 for a in others if self.conn_mgr.is_reachable(a))
+                print(
+                    f"  Group: {group.name} ({len(group.members)} members, "
+                    f"{reach} of {len(others)} in reach){marker}"
+                )
 
         elif cmd == "/history":
             if self.active_conv is None:

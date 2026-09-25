@@ -25,6 +25,8 @@ def test_alice_writes_to_carol_through_bob(clients, tmp_path):
     assert carol.wait_for("bob connected"), diagnose(alice, bob, carol)
 
     assert poll(alice, "/peers", "relay via bob"), diagnose(alice, bob, carol)
+    # Someone reachable only through a relay is still a conversation.
+    assert poll(alice, "/list", "DM: carol — relay via bob"), alice.output()
     alice.send("/dm carol")
     assert alice.wait_for("Switched to DM with carol"), alice.output()
     alice.send("hello from two rows back")

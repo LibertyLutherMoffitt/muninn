@@ -41,3 +41,6 @@ captures/
 .venv-test/
 spec/kotlin-conformance/.gradle/
 spec/kotlin-conformance/build/
+
+# Paparazzi renders (gradle :app:recordPaparazziDebug) — regenerated on demand
+android/app/src/test/snapshots/

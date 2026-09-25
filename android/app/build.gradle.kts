@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("app.cash.paparazzi")
 }
 
 android {
@@ -63,4 +64,6 @@ dependencies {
     // libsodium — wire-compatible with PyNaCl Box on the desktop client.
     implementation("com.goterl:lazysodium-android:5.1.0@aar")
     implementation("net.java.dev.jna:jna:5.13.0@aar")
+
+    testImplementation("junit:junit:4.13.2")
 }

@@ -145,8 +145,10 @@ fun ChatScreen(conv: String, onBack: () -> Unit) {
                     draft = draft,
                     onDraftChange = { draft = it },
                     enabled = recipients.isNotEmpty(),
+                    // The banner above explains the wait; the hint stays short
+                    // enough to fit a phone.
                     placeholder = if (unreachable.size == recipients.size && recipients.isNotEmpty()) {
-                        "Message — goes out when they're in reach"
+                        "Message (will wait)"
                     } else {
                         "Message"
                     },
@@ -283,13 +285,24 @@ private fun headerLine(
     }
 }
 
+/** The header line takes the colour of the dot beside it, so the two agree. */
 @Composable
 private fun headerColor(
     isGroup: Boolean,
     recipients: List<String>,
     statuses: Map<String, PeerBook.PeerStatus>,
-) = when {
-    !isGroup && statuses[recipients.firstOrNull()]?.unreachableNearby == true -> MaterialTheme.colorScheme.error
-    recipients.any { statuses[it]?.isReachable == true } -> presenceColor(PeerBook.State.CONNECTED)
-    else -> MaterialTheme.colorScheme.onSurfaceVariant
+): androidx.compose.ui.graphics.Color {
+    if (isGroup) {
+        return if (recipients.any { statuses[it]?.isReachable == true }) {
+            presenceColor(PeerBook.State.CONNECTED)
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        }
+    }
+    val s = statuses[recipients.firstOrNull()] ?: return MaterialTheme.colorScheme.onSurfaceVariant
+    return if (s.state == PeerBook.State.OFFLINE) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else {
+        presenceColor(s.state, s.unreachableNearby)
+    }
 }

@@ -259,10 +259,17 @@ internal fun formatTime(ts: Long): String =
     android.text.format.DateFormat.format("HH:mm", ts).toString()
 
 /** "14:05" today, "Tue" this week, "3 Mar" before that. For list rows. */
-internal fun formatWhen(ts: Long, now: Long = System.currentTimeMillis()): String = when {
-    android.text.format.DateUtils.isToday(ts) -> formatTime(ts)
-    now - ts < 6 * 24 * 3600 * 1000L -> android.text.format.DateFormat.format("EEE", ts).toString()
-    else -> android.text.format.DateFormat.format("d MMM", ts).toString()
+internal fun formatWhen(ts: Long, now: Long = System.currentTimeMillis()): String {
+    val day = java.util.Calendar.getInstance()
+    fun dayOf(ms: Long): Int {
+        day.timeInMillis = ms
+        return day.get(java.util.Calendar.YEAR) * 1000 + day.get(java.util.Calendar.DAY_OF_YEAR)
+    }
+    return when {
+        dayOf(ts) == dayOf(now) -> formatTime(ts)
+        now - ts < 6 * 24 * 3600 * 1000L -> android.text.format.DateFormat.format("EEE", ts).toString()
+        else -> android.text.format.DateFormat.format("d MMM", ts).toString()
+    }
 }
 
 /** Short, readable form of a wire id. */

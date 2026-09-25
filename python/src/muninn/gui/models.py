@@ -179,7 +179,11 @@ class PeerListModel(QAbstractListModel):
                     "unreadCount": self._unread.get(conv_id, 0),
                     "status": status,
                     "via": self._cm.indirect_via.get(addr, ""),
-                    "presenceText": status_obj.describe(),
+                    "presenceText": (
+                        presence.relay_text(status_obj, self._gs.display_name)
+                        if status == "relay"
+                        else status_obj.describe()
+                    ),
                 }
             )
 

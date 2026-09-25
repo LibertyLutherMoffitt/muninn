@@ -110,12 +110,17 @@ val MaterialTheme.accents: MuninnAccents
     get() = LocalMuninnAccents.current
 
 @Composable
-fun MuninnTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
+fun MuninnTheme(
+    dark: Boolean = isSystemInDarkTheme(),
+    // Off only for screenshots, which should show Muninn's own palette rather
+    // than whatever wallpaper colours the renderer happens to have.
+    dynamic: Boolean = true,
+    content: @Composable () -> Unit,
+) {
     val context = LocalContext.current
     val colors = when {
         // Material You on Android 12+ — blends with the user's wallpaper.
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+        dynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
             if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         dark -> DarkColors
         else -> LightColors
