@@ -14,7 +14,7 @@ except ImportError:
     _HAS_READLINE = False
 
 from muninn import bt, presence, scanpolicy
-from muninn.discovery import Scanner, acceptor
+from muninn.discovery import Scanner, acceptor, maintainer
 from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import Group, GroupStore
 from muninn.peers import GROUP_ZERO, ConnectionManager
@@ -290,8 +290,7 @@ class ChatUI:
         if status.state == presence.CONNECTED:
             return "connected"
         if status.state == presence.RELAY:
-            via = status.via
-            return f"relay via {self._name(via)}" if via else "relay"
+            return presence.relay_text(status, self._name)
         return status.describe()
 
     def _print_presence(self, reachable_only: bool) -> None:
@@ -634,8 +633,14 @@ class ChatUI:
                             msg_id, sent, skipped = result
                             self.outbound[msg_id] = set(sent)
                             for addr in skipped:
+                                self._status(f"! waiting for {self._name(addr)}'s key")
+                            away = [
+                                a for a in sent if not self.conn_mgr.is_reachable(a)
+                            ]
+                            if away:
+                                who = ", ".join(self._name(a) for a in away)
                                 self._status(
-                                    f"! skipped {self._name(addr)} (no pubkey)"
+                                    f"\u29d7 held for {who} — goes when they're in reach"
                                 )
                 finally:
                     self._ready_for_prompt.set()
@@ -687,6 +692,7 @@ def main():
     scanner = Scanner(conn_mgr, local_mac, stop, policy)
     threading.Thread(target=acceptor, args=(conn_mgr,), daemon=True).start()
     threading.Thread(target=scanner.run, daemon=True).start()
+    threading.Thread(target=maintainer, args=(conn_mgr, stop), daemon=True).start()
 
     print(f"Scanning for peers ({policy.label.lower()})... (type /help for commands)")
 

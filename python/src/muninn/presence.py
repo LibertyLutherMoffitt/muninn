@@ -24,7 +24,7 @@ sightings and dial failures while the recv threads record connect/disconnect.
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -55,6 +55,9 @@ class PeerStatus:
     last_seen: float | None = None
     last_connected: float | None = None
     via: str | None = None
+    # Hops to reach it through `via` (2 = one relay in between). None when
+    # connected directly or not reachable.
+    hops: int | None = None
     rssi: int | None = None
     failed_dials: int = 0
     last_error: str | None = None
@@ -87,7 +90,8 @@ class PeerStatus:
         if self.state == CONNECTED:
             return "connected"
         if self.state == RELAY:
-            return f"via {self.via}" if self.via else "via relay"
+            base = f"via {self.via}" if self.via else "via relay"
+            return f"{base} · {self.hops} hops" if self.hops and self.hops > 2 else base
         ago = self.seconds_since_seen(now)
         if self.state == NEARBY:
             detail = "nearby, can't connect" if self.unreachable_nearby else "nearby"
@@ -95,6 +99,18 @@ class PeerStatus:
         if ago is None:
             return "never seen"
         return f"last seen {format_ago(ago)}"
+
+
+def relay_text(status: PeerStatus, name_of=lambda a: a) -> str:
+    """ "relay via Bob", or "relay via Bob · 3 hops" when the path is long.
+
+    Shared by the CLI and the GUI so both say the same thing about one peer.
+    """
+    via = name_of(status.via) if status.via else None
+    text = f"relay via {via}" if via else "relay"
+    if status.hops and status.hops > 2:
+        text += f" · {status.hops} hops"
+    return text
 
 
 def format_ago(seconds: float | None) -> str:
@@ -195,6 +211,7 @@ class PresenceTracker:
             status.last_seen = now
             status.last_connected = now
             status.via = None
+            status.hops = None
             status.failed_dials = 0
             status.last_error = None
         if self.storage is not None:
@@ -228,7 +245,7 @@ class PresenceTracker:
             self.storage.record_sighting(addr, int(now))
         self._notify(addr)
 
-    def record_relay(self, addr: str, via: str) -> None:
+    def record_relay(self, addr: str, via: str, hops: int | None = None) -> None:
         """Reachable through `via`. Never downgrades a live direct session."""
         addr = addr.upper()
         with self._lock:
@@ -237,7 +254,29 @@ class PresenceTracker:
                 return
             status.state = RELAY
             status.via = via.upper()
+            status.hops = hops
+            # Only a Muninn peer can be routed to.
+            status.advertises_muninn = True
         self._notify(addr)
+
+    def note_known(self, addrs) -> None:
+        """We learned these peers' keys from someone else.
+
+        Not reachable, not seen — but they are people you can write to, and a
+        message will ride along to them, so they belong in the peer list.
+        """
+        changed = []
+        with self._lock:
+            for addr in addrs:
+                addr = addr.upper()
+                if addr == self.local_mac:
+                    continue
+                status = self._entry(addr)
+                if not status.advertises_muninn:
+                    status.advertises_muninn = True
+                    changed.append(addr)
+        for addr in changed:
+            self._notify(addr)
 
     def clear_relay(self, addr: str) -> None:
         addr = addr.upper()
@@ -246,6 +285,7 @@ class PresenceTracker:
             if status is None or status.state != RELAY:
                 return
             status.via = None
+            status.hops = None
             status.state = NEARBY if self._is_recent(status) else OFFLINE
         self._notify(addr)
 
@@ -259,7 +299,9 @@ class PresenceTracker:
     def _is_recent(status: PeerStatus, now: float | None = None) -> bool:
         if status.last_seen is None:
             return False
-        return (now if now is not None else time.time()) - status.last_seen < NEARBY_WINDOW
+        return (
+            now if now is not None else time.time()
+        ) - status.last_seen < NEARBY_WINDOW
 
     def _aged(self, status: PeerStatus, now: float) -> PeerStatus:
         """Apply the nearby-window timeout without mutating stored state.
@@ -269,7 +311,7 @@ class PresenceTracker:
         the window expiring and someone asking.
         """
         if status.state == NEARBY and not self._is_recent(status, now):
-            return PeerStatus(**{**status.__dict__, "state": OFFLINE})
+            return replace(status, state=OFFLINE)
         return status
 
     def status(self, addr: str) -> PeerStatus:
@@ -291,9 +333,7 @@ class PresenceTracker:
 
     def muninn_devices(self) -> dict[str, PeerStatus]:
         """Statuses worth showing a user: peers, not passing headsets."""
-        return {
-            a: s for a, s in self.all_statuses().items() if s.advertises_muninn
-        }
+        return {a: s for a, s in self.all_statuses().items() if s.advertises_muninn}
 
     def nearby_unreachable(self) -> list[str]:
         """Devices the radio can see but we have repeatedly failed to reach."""
@@ -313,6 +353,7 @@ class PresenceTracker:
         with conn_mgr.peers_lock:
             live = set(conn_mgr.peers)
         relays = dict(conn_mgr.indirect_via)
+        hops = dict(getattr(conn_mgr, "_hops", {}))
         with self._lock:
             for addr in live:
                 if self._entry(addr).state != CONNECTED:
@@ -322,4 +363,7 @@ class PresenceTracker:
                     self.record_disconnected(addr)
             for addr, via in relays.items():
                 if addr not in live:
-                    self.record_relay(addr, via)
+                    self.record_relay(addr, via, hops=hops.get(addr))
+            for addr, status in self._peers.items():
+                if status.state == RELAY and addr not in relays:
+                    self.clear_relay(addr)

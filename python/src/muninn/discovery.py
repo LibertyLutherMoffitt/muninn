@@ -31,6 +31,9 @@ TIEBREAK_DEFER = 10.0
 
 INQUIRY_SECONDS = 5.0
 
+# How often ConnectionManager.maintain() runs: relay retries, expiry.
+MAINTAIN_INTERVAL = 5.0
+
 
 def acceptor(conn_mgr: ConnectionManager) -> None:
     """Accept inbound connections and hand each to the ConnectionManager.
@@ -45,13 +48,26 @@ def acceptor(conn_mgr: ConnectionManager) -> None:
         except ConnectionError:
             break
         try:
-            conn_mgr.add_peer(sock, addr)
+            conn_mgr.add_peer(sock, addr, outbound=False)
         except Exception as e:
             print(f"[accept {addr}] handshake failed: {e!r}")
             try:
                 sock.close()
             except Exception:
                 pass
+
+
+def maintainer(conn_mgr: ConnectionManager, stop: threading.Event) -> None:
+    """Run ConnectionManager.maintain() every MAINTAIN_INTERVAL until stopped.
+
+    Its own thread rather than part of the scan loop: a sweep can spend tens
+    of seconds inside blocking dials, and relay retries should not wait on it.
+    """
+    while not stop.wait(MAINTAIN_INTERVAL):
+        try:
+            conn_mgr.maintain()
+        except Exception as e:
+            print(f"[maintain] failed: {e!r}")
 
 
 class Scanner:
@@ -145,7 +161,7 @@ class Scanner:
             self.scheduler.failed(addr, now, str(e))
             return
 
-        if self.conn_mgr.add_peer(sock, peer_addr):
+        if self.conn_mgr.add_peer(sock, peer_addr, outbound=True):
             self.scheduler.succeeded(addr)
         else:
             self.scheduler.failed(addr, now, "handshake failed")

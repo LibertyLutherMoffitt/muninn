@@ -10,6 +10,7 @@ TYPE_GROUP_SETUP = 0x04
 TYPE_READ = 0x05
 TYPE_PROFILE = 0x06
 TYPE_PEER_ANNC = 0x07
+TYPE_ROUTES = 0x08
 
 MAX_PAYLOAD = 0xFFFF  # uint16 — see PROTOCOL.md
 
@@ -17,8 +18,24 @@ MAX_PAYLOAD = 0xFFFF  # uint16 — see PROTOCOL.md
 GROUP_ZERO_ID = b"\x00" * 16
 
 
+# Routes are advertised out to this many hops from the advertiser, so a
+# receiver learns about devices up to MAX_HOPS + 1 hops away. Four covers a
+# chain of people strung along an aisle; the cap also bounds how long a stale
+# route can bounce around after a device leaves.
+MAX_ROUTE_HOPS = 3
+
+
 class FrameTooLarge(ValueError):
     """Payload exceeds the 65535-byte wire limit for a single frame."""
+
+
+class MalformedFrame(ValueError):
+    """A peer sent a frame whose payload does not match its type's layout.
+
+    Never fatal: the receive loop drops the one frame and keeps the session.
+    A peer running a newer build must not be able to disconnect us by sending
+    something we do not fully understand.
+    """
 
 
 def encode_frame(frame_type: int, payload: bytes) -> bytes:
@@ -86,7 +103,12 @@ def encode_message(
     return encode_frame(TYPE_MESSAGE, payload)
 
 
+MESSAGE_HEADER_BYTES = 16 + 16 + 6 + 6 + 4
+
+
 def decode_message(payload: bytes):
+    if len(payload) < MESSAGE_HEADER_BYTES:
+        raise MalformedFrame(f"message payload too short: {len(payload)}")
     group_id = payload[0:16]
     msg_id = payload[16:32]
     sender_id = payload[32:38]
@@ -103,7 +125,13 @@ def encode_ack(msg_id: bytes, from_mac: bytes) -> bytes:
     return encode_frame(TYPE_ACK, msg_id + from_mac)
 
 
+def _check_receipt(payload: bytes, what: str) -> None:
+    if len(payload) < 22:
+        raise MalformedFrame(f"{what} payload too short: {len(payload)}")
+
+
 def decode_ack(payload: bytes):
+    _check_receipt(payload, "ack")
     msg_id = payload[0:16]
     from_mac = payload[16:22]
     return msg_id, from_mac
@@ -117,6 +145,7 @@ def encode_read(msg_id: bytes, from_mac: bytes) -> bytes:
 
 
 def decode_read(payload: bytes):
+    _check_receipt(payload, "read")
     msg_id = payload[0:16]
     from_mac = payload[16:22]
     return msg_id, from_mac
@@ -144,9 +173,13 @@ def encode_group_setup(
 def decode_group_setup(
     payload: bytes,
 ) -> tuple[bytes, list[tuple[bytes, bytes]], str]:
+    if len(payload) < 17:
+        raise MalformedFrame(f"group setup payload too short: {len(payload)}")
     group_id = payload[0:16]
     member_count = payload[16]
     offset = 17
+    if len(payload) < offset + member_count * 38 + 2:
+        raise MalformedFrame(f"group setup truncated: {member_count} members won't fit")
     members = []
     for _ in range(member_count):
         mac = payload[offset : offset + 6]
@@ -155,7 +188,9 @@ def decode_group_setup(
         offset += 38
     name_length = struct.unpack("!H", payload[offset : offset + 2])[0]
     offset += 2
-    name = payload[offset : offset + name_length].decode("utf-8")
+    if len(payload) < offset + name_length:
+        raise MalformedFrame("group name truncated")
+    name = payload[offset : offset + name_length].decode("utf-8", errors="replace")
     return group_id, members, name
 
 
@@ -168,7 +203,7 @@ def encode_profile(name: str) -> bytes:
 
 
 def decode_profile(payload: bytes) -> str:
-    return payload.decode("utf-8")
+    return payload.decode("utf-8", errors="replace")
 
 
 # --- Peer announcement ---
@@ -206,10 +241,16 @@ def encode_peer_annc(peers: list[tuple[bytes, bytes, str]]) -> bytes:
 
 
 def decode_peer_annc(payload: bytes) -> list[tuple[bytes, bytes, str]]:
+    if not payload:
+        raise MalformedFrame("peer annc payload is empty")
     count = payload[0]
     offset = 1
     peers = []
     for _ in range(count):
+        if len(payload) < offset + 39:
+            raise MalformedFrame(f"peer annc truncated after {len(peers)} entries")
+        if len(payload) < offset + 39 + payload[offset + 38]:
+            raise MalformedFrame("peer annc name truncated")
         mac = payload[offset : offset + 6]
         pubkey = payload[offset + 6 : offset + 38]
         name_len = payload[offset + 38]
@@ -219,6 +260,42 @@ def decode_peer_annc(payload: bytes) -> list[tuple[bytes, bytes, str]]:
         peers.append((mac, pubkey, name))
         offset += 39 + name_len
     return peers
+
+
+# --- Routes ---
+
+
+def encode_routes(routes: list[tuple[bytes, int]]) -> bytes:
+    """routes: list of (wire_id_6_bytes, hops). hops=1 means the sender holds a
+    live session with that device. A full snapshot: the receiver replaces
+    whatever this sender told it before."""
+    if len(routes) > 255:
+        raise ValueError(f"route count is a uint8; got {len(routes)}")
+    parts = [struct.pack("!B", len(routes))]
+    for wire_id, hops in routes:
+        if len(wire_id) != 6:
+            raise ValueError("route wire id must be 6 bytes")
+        if not 1 <= hops <= 255:
+            raise ValueError(f"hops must be 1..255, got {hops}")
+        parts.append(wire_id)
+        parts.append(struct.pack("!B", hops))
+    return encode_frame(TYPE_ROUTES, b"".join(parts))
+
+
+def decode_routes(payload: bytes) -> list[tuple[bytes, int]]:
+    if not payload:
+        raise MalformedFrame("routes payload is empty")
+    count = payload[0]
+    if len(payload) < 1 + count * 7:
+        raise MalformedFrame(f"routes truncated: {count} entries won't fit")
+    routes = []
+    for i in range(count):
+        offset = 1 + i * 7
+        hops = payload[offset + 6]
+        if hops == 0:
+            raise MalformedFrame("route with zero hops")
+        routes.append((payload[offset : offset + 6], hops))
+    return routes
 
 
 # --- Helpers ---

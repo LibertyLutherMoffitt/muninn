@@ -59,6 +59,9 @@ class UnackedMessage:
     group_id: bytes
     body: str
     recipients: list[str]  # recipients still missing an ACK
+    # When the user sent it. A resend carries the original time so the
+    # recipient files it where it was written, not where it finally arrived.
+    ts: int = 0
 
 
 class Storage:
@@ -488,14 +491,14 @@ class Storage:
         """Messages we sent that still have recipients without an ACK."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT m.msg_id, m.group_id, m.body, r.recipient "
+                "SELECT m.msg_id, m.group_id, m.body, r.recipient, m.ts "
                 "FROM messages m JOIN message_recipients r ON m.msg_id = r.msg_id "
                 "WHERE m.sender = ? AND r.acked_at IS NULL "
                 "ORDER BY m.ts",
                 (local_mac,),
             ).fetchall()
         by_msg: dict[bytes, UnackedMessage] = {}
-        for msg_id, group_id, body, recipient in rows:
+        for msg_id, group_id, body, recipient, ts in rows:
             msg_id_b = bytes(msg_id)
             if msg_id_b not in by_msg:
                 by_msg[msg_id_b] = UnackedMessage(
@@ -503,6 +506,7 @@ class Storage:
                     group_id=bytes(group_id),
                     body=body,
                     recipients=[],
+                    ts=int(ts or 0),
                 )
             by_msg[msg_id_b].recipients.append(recipient)
         return list(by_msg.values())

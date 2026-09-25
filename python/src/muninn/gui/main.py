@@ -15,7 +15,7 @@ from muninn import bt
 from muninn.crypto import generate_keypair, privkey_from_bytes
 from muninn.groups import GroupStore
 from muninn import scanpolicy
-from muninn.discovery import Scanner, acceptor
+from muninn.discovery import Scanner, acceptor, maintainer
 from muninn.peers import ConnectionManager
 from muninn.storage import Storage
 
@@ -147,6 +147,7 @@ def main() -> None:
         bridge.attach_scanner(scanner)
         threading.Thread(target=acceptor, args=(conn_mgr,), daemon=True).start()
         threading.Thread(target=scanner.run, daemon=True).start()
+        threading.Thread(target=maintainer, args=(conn_mgr, stop), daemon=True).start()
 
     ret = app.exec()
 

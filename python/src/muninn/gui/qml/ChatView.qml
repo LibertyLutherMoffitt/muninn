@@ -20,9 +20,9 @@ Item {
         const cid = root.convId
         presence = cid.startsWith("dm:")
             ? bridge.peerPresence(cid.substring(3))
-            : cid === ""
-                ? ({ state: "none", text: "", reachable: false })
-                : ({ state: "group", text: "", reachable: true })
+            : cid.startsWith("group:")
+                ? bridge.groupPresence(cid.substring(6))
+                : ({ state: "none", text: "", reachable: false })
     }
     onConvIdChanged: _refreshPresence()
     Component.onCompleted: _refreshPresence()
@@ -89,7 +89,7 @@ Item {
                         text: root.convId
                                 ? (root.isDm
                                     ? bridge.displayName(root.peerAddr)
-                                    : root.convId.substring(6))
+                                    : (root.presence.title || "group"))
                                 : "no conversation"
                         color: root.convId ? Theme.textPrimary : Theme.textFaint
                         font.pixelSize: Theme.fontTitle

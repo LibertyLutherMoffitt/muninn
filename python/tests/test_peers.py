@@ -213,7 +213,10 @@ def test_a_replayed_message_is_delivered_once_but_acked_again(node_factory):
 
     wire = record_peer_wire(b, A)
     replay = protocol.encode_message(
-        GROUP_ZERO_ID, msg_id, protocol.mac_to_bytes(A), protocol.mac_to_bytes(B),
+        GROUP_ZERO_ID,
+        msg_id,
+        protocol.mac_to_bytes(A),
+        protocol.mac_to_bytes(B),
         b"\x00" * 40,
     )[3:]
     b.cm._handle_message(A, replay)
@@ -237,8 +240,11 @@ def test_a_decrypt_failure_releases_the_dedup_claim(node_factory):
     link(a, b)
     msg_id = protocol.new_msg_id()
     garbage = protocol.encode_message(
-        GROUP_ZERO_ID, msg_id, protocol.mac_to_bytes(A),
-        protocol.mac_to_bytes(B), b"\xff" * 60,
+        GROUP_ZERO_ID,
+        msg_id,
+        protocol.mac_to_bytes(A),
+        protocol.mac_to_bytes(B),
+        b"\xff" * 60,
     )[3:]
     b.cm._handle_message(A, garbage)
     assert b.messages == []
@@ -249,8 +255,11 @@ def test_a_message_from_an_unknown_sender_releases_its_claim(node_factory):
     b = node_factory(B)
     msg_id = protocol.new_msg_id()
     frame = protocol.encode_message(
-        GROUP_ZERO_ID, msg_id, protocol.mac_to_bytes(C),
-        protocol.mac_to_bytes(B), b"\xff" * 60,
+        GROUP_ZERO_ID,
+        msg_id,
+        protocol.mac_to_bytes(C),
+        protocol.mac_to_bytes(B),
+        b"\xff" * 60,
     )[3:]
     b.cm._handle_message(C, frame)
     assert b.messages == []
@@ -275,7 +284,9 @@ def test_unacked_messages_are_resent_when_the_peer_returns(node_factory):
     assert wait_for(lambda: msg_id not in a.cm.unacked)
 
 
-def test_unacked_messages_are_rebuilt_from_storage_after_a_restart(node_factory, tmp_path):
+def test_unacked_messages_are_rebuilt_from_storage_after_a_restart(
+    node_factory, tmp_path
+):
     a, b = node_factory(A), node_factory(B)
     link(a, b)
     a.cm.send_message(GROUP_ZERO_ID, "before restart", [B])
@@ -367,8 +378,8 @@ def test_a_peer_broadcasting_its_own_mac_as_a_name_is_ignored(node_factory):
 
 def test_peers_learn_about_each_others_contacts(node_factory):
     a, b, c = node_factory(A), node_factory(B), node_factory(C)
-    link(a, b)          # A knows B
-    link(b, c)          # B knows C, and tells A about C
+    link(a, b)  # A knows B
+    link(b, c)  # B knows C, and tells A about C
     # The route is recorded after the pubkey, so gate on the later of the two.
     assert wait_for(lambda: a.cm.indirect_via.get(C) == B)
     assert a.groups.get_pubkey(C) == bytes(c.key.public_key)
@@ -439,8 +450,11 @@ def test_a_relay_forwards_each_message_only_once(node_factory):
     assert wait_for(lambda: a.groups.get_pubkey(C) is not None)
     msg_id = protocol.new_msg_id()
     frame = protocol.encode_message(
-        GROUP_ZERO_ID, msg_id, protocol.mac_to_bytes(A),
-        protocol.mac_to_bytes(C), b"\x00" * 40,
+        GROUP_ZERO_ID,
+        msg_id,
+        protocol.mac_to_bytes(A),
+        protocol.mac_to_bytes(C),
+        b"\x00" * 40,
     )[3:]
     b.cm._handle_message(A, frame)
     b.cm._handle_message(A, frame)
@@ -452,7 +466,7 @@ def test_a_message_for_an_offline_peer_is_queued_until_it_returns(node_factory):
     a.groups.add_pubkey(C, bytes(c.key.public_key))
     msg_id, sent, _ = a.cm.send_message(GROUP_ZERO_ID, "held for you", [C])
     assert sent == [C]
-    assert a.cm.relay_queue.get(C), "frame was not queued"
+    assert msg_id in a.cm.unacked, "message was not kept for resend"
     link(a, c)
     assert wait_for(lambda: c.messages), "queued frame was not flushed on connect"
     assert c.messages[0][2] == "held for you"
@@ -463,8 +477,11 @@ def test_a_relay_does_not_bounce_a_frame_back_to_its_sender(node_factory):
     link(a, b)
     # A frame addressed to B but delivered by B is nonsense — drop it.
     frame = protocol.encode_message(
-        GROUP_ZERO_ID, protocol.new_msg_id(), protocol.mac_to_bytes(A),
-        protocol.mac_to_bytes(B), b"\x00" * 40,
+        GROUP_ZERO_ID,
+        protocol.new_msg_id(),
+        protocol.mac_to_bytes(A),
+        protocol.mac_to_bytes(B),
+        b"\x00" * 40,
     )[3:]
     b_peers_before = dict(a.cm.relay_queue)
     a.cm._handle_message(B, frame)
@@ -509,7 +526,12 @@ def test_a_group_setup_is_not_forwarded_twice(node_factory):
     link(a, b)
     gid = protocol.new_group_id()
     payload = protocol.encode_group_setup(
-        gid, [(protocol.mac_to_bytes(A), b"\x01" * 32)], "Dup"
+        gid,
+        [
+            (protocol.mac_to_bytes(A), b"\x01" * 32),
+            (protocol.mac_to_bytes(B), b"\x02" * 32),
+        ],
+        "Dup",
     )[3:]
     b.cm._handle_group_setup(A, payload)
     b.cm._handle_group_setup(A, payload)
@@ -543,7 +565,7 @@ def test_a_dropped_link_removes_the_peer(node_factory):
     _s1, s2 = link(a, b)
     drop_link(s2)
     assert wait_for(lambda: B not in a.cm.peers)
-    assert (B, False) in a.peer_changes
+    assert wait_for(lambda: (B, False) in a.peer_changes)
 
 
 def test_send_to_a_vanished_peer_reports_failure(node_factory):
@@ -574,7 +596,9 @@ def test_more_than_255_known_peers_still_announces(node_factory):
     # peer_count is a uint8, so the roster has to be capped rather than raising.
     a, b = node_factory(A), node_factory(B)
     for i in range(300):
-        a.groups.pubkeys[f"AA:BB:CC:{i // 256:02X}:{i % 256:02X}:01"] = bytes([i % 256]) * 32
+        a.groups.pubkeys[f"AA:BB:CC:{i // 256:02X}:{i % 256:02X}:01"] = (
+            bytes([i % 256]) * 32
+        )
     link(a, b)
     assert B in a.cm.peers
     assert wait_for(lambda: len(b.groups.pubkeys) > 200)

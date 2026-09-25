@@ -40,19 +40,26 @@ Maximum payload: 65,535 bytes.
 | Read         | `0x05` | Reader → Sender       | No                       |
 | Profile      | `0x06` | Peer → Peer           | No (metadata only)       |
 | Peer Annc    | `0x07` | Peer → Peer           | No (metadata only)       |
+| Routes       | `0x08` | Peer → Peer           | No (metadata only)       |
+
+**Unknown frame types are ignored.** A receiver skips any frame whose type it
+does not recognise (the header says how long it is) and keeps the session.
+Likewise a frame whose payload does not match its type's layout is dropped on
+its own; it never ends the session. This is what lets a newer client add a
+frame type without disconnecting older ones.
 
 ### Client support
 
 | Frame | Python (CLI + GUI) | Android |
 |-------|--------------------|---------|
-| Handshake, Message, ACK | full | full |
-| Read | full | full |
-| Profile | full | full |
-| Peer Annc | full | receive + send; no onward relay |
-| Group Setup | full, including forwarding | member keys recorded, no group chat |
+| Handshake, Message, ACK, Read | full | full |
+| Profile, Peer Annc | full | full |
+| Routes | full | full |
+| Group Setup | full, including relaying for groups it is not in | full |
 
-Relaying a `Message` toward another device is desktop-only. Android drops any
-frame not addressed to it.
+Every client can be the middle device in a relay chain. `spec/kotlin-conformance`
+runs the Android client's protocol core against Python clients over TCP, so
+this table is tested, not aspirational.
 
 **Conformance.** `spec/wire-vectors.json` pins one canonical encoding per frame
 type plus an X25519 / NaCl-Box vector. Both clients decode it in their test
@@ -250,24 +257,88 @@ Recipients apply the following rules:
   name changes to propagate to indirect peers via the re-announcement mechanism above.
   A local override always wins on display regardless of what Peer Annc carries.
 
-Peer Annc frames are **not** forwarded — they are point-to-point between directly
-connected devices. The information propagates one hop at a time as devices connect.
+Peer Annc frames are not forwarded as-is. But when a Peer Annc teaches the receiver
+a **key it did not have**, the receiver announces those new entries to its other
+neighbours. Only new keys travel, so each key crosses the mesh once and the flood
+ends by itself — and a device several hops away can be written to as soon as a
+Routes frame says it is reachable. Names still propagate one hop at a time; a
+second-hand name never overwrites the name a directly connected peer announced.
+
+---
+
+## Routes Frame (`0x08`)
+
+Who the sender can reach right now. Sent after Peer Annc on every new session,
+and again to every neighbour whenever what the sender would advertise to that
+neighbour changes. Plaintext metadata.
+
+**Payload:**
+
+```
+[ 1 byte: route_count ]  — uint8
+For each route:
+    [ 6 bytes: wire_id ]
+    [ 1 byte:  hops    ]  — 1 = the sender holds a live session with it
+```
+
+Total payload: 1 + 7 × route_count bytes.
+
+Rules:
+
+- **A full snapshot.** The receiver replaces whatever this sender advertised
+  before. An empty list (`route_count = 0`) withdraws everything.
+- **Split horizon.** A sender never advertises the receiver itself, nor any route
+  whose next hop is the receiver.
+- **Bounded.** A sender advertises routes of at most 3 hops, so a receiver learns
+  about devices up to 4 hops away. The cap also bounds how long a stale route can
+  circulate after a device leaves.
+- The receiver's distance to a destination is `hops + 1` through that neighbour;
+  it keeps the smallest, ties broken by the lower neighbour wire id.
+- A route is reachability, not identity: it carries no key. Keys come from the
+  handshake, Peer Annc and Group Setup.
+
+Peer Annc lists everyone the sender has *ever* met; Routes lists who it can
+reach *now*. Presence ("reachable via Bob") comes only from Routes.
 
 ---
 
 ## Relay & Routing
 
-`final_dest` in the message frame identifies the intended recipient. Any connected peer
-may forward:
+`final_dest` in the message frame identifies the intended recipient. Every
+client forwards frames that are not addressed to it:
 
-1. On receipt, peer compares `final_dest` to its own MAC.
-2. If equal → decrypt + deliver + send ACK.
-3. If not equal → re-emit the frame toward another peer connected to `final_dest`, or
-   queue the frame for delivery when `final_dest` reconnects.
+1. On receipt, compare `final_dest` to our own wire id. Equal → decrypt, deliver,
+   ACK to the neighbour it came from.
+2. Otherwise forward it: to `final_dest` directly if connected; else to the
+   neighbour advertising the fewest hops to it (Routes); else to **every**
+   neighbour except the one it came from, and keep a copy for `final_dest` in
+   case it connects to us first (store-and-forward, bounded in size and age).
+3. Never forward a frame back to the neighbour it came from, and drop any frame
+   whose `sender_id` is our own (it came back around a loop).
+4. **Dedup.** A relay forwards a given `(msg_id, final_dest)` at most once per
+   ~10 s window — except a frame handed over by its own sender, which is always
+   passed on. A sender only resends deliberately, and a loop can never bring a
+   frame back *from* its sender.
 
-`GROUP_SETUP` forwards similarly, bounded by the per-peer "already have this group_id"
-check. `ACK` and `READ` flood back through all connected peers (deduplicated by
-`(msg_id, from)`).
+`ACK` and `READ` travel back the same way. A relay that forwarded the message
+knows its sender and steers the receipt there (or holds it until the sender is
+back); otherwise it floods. Each receipt crosses each link at most once per
+~5 s window, which ends any loop. A relay that sees an ACK drops the copies it
+was holding for that recipient.
+
+The **sender** keeps every message until the recipient's ACK arrives, and resends
+it: on a direct reconnect, the moment a relay path to the recipient appears, and
+every ~30 s while one exists. Relays are best-effort; the sender's retry is what
+makes delivery reliable. A resend keeps its `msg_id` and timestamp and is sealed
+afresh; if the recipient's key changed (reinstall), the sender reseals for the new
+key.
+
+`GROUP_SETUP` has no `final_dest`. A member that receives a new group adopts it and
+forwards it to the other members; a device that is **not** a member forwards it
+toward the members without adopting it (dedup by `group_id`, same window as
+receipts). Senders also send the setup ahead of a group message to any member not
+yet known to hold the group, and remind a member of every shared group when a
+session with it comes up, so a member who missed creation still gets it.
 
 ---
 
@@ -299,8 +370,9 @@ On socket error or EOF:
 1. Both sides return to listen/connect state
 2. New RFCOMM connection established
 3. Fresh handshake (static keys → same shared secret)
-4. Sender resends all messages that never received an ACK
-5. Receiver checks `msg_id` against previously seen messages:
+4. Profile, Peer Annc, Routes, then a Group Setup for every group both are in
+5. Sender resends all messages that never received an ACK
+6. Receiver checks `msg_id` against previously seen messages:
    - **Already seen:** silently drop, send ACK again
    - **New:** process normally, send ACK
 
@@ -310,18 +382,19 @@ On socket error or EOF:
 
 To reduce the chance of both devices initiating at the same time, the device with the higher
 MAC address defers: it waits up to 10 seconds for the lower-MAC device to initiate before
-calling `ConnectProfile` itself. This deferral is the primary mechanism — simultaneous
-connects are rare in practice.
+dialling itself.
 
-If two sockets do form anyway, the recommended tiebreak is:
+Two sockets still form sometimes — after a link drop both sides notice at once.
+Each side resolves it independently, after both handshakes, with the same rule:
 
-- Compare local BT MAC addresses (as 6-byte unsigned integers)
-- The socket initiated by the device with the **higher** MAC address is closed
-- Both sides apply this rule independently — result is deterministic
+- If the two sessions completed within 10 s of each other **and** in opposite
+  directions (one we dialled, one we accepted), it was a crossed dial: keep the
+  session **initiated by the lower wire id**, compared as 6-byte unsigned integers.
+- Otherwise the newer session replaces the older one: the old socket is most likely
+  dead and has not noticed yet.
 
-**Current Python client behavior:** the 10-second deferral prevents most simultaneous
-connects. If two sockets still form, the Python client uses last-wins replacement (the
-newer `add_peer` call replaces the stale entry) rather than a strict MAC-based tiebreak.
+Both ends reach the same answer, so the losing socket is closed at both ends and
+nobody is left holding a dead half.
 
 ---
 

@@ -32,6 +32,19 @@ Environment:
                                  instance's advertisement, modelling an adapter
                                  whose SDP cache never learns the UUID
     MUNINN_LOOPBACK_PAIRING      set to 1 to require ensure_paired() first
+
+**Range.** By default every instance can hear every other. A
+`topology.json` in the rendezvous directory restricts that, the way seats and
+bulkheads do on a plane:
+
+    {"links": [["AA:..:01", "BB:..:02"], ["BB:..:02", "CC:..:03"]]}
+
+Only listed pairs are in range of each other (links are symmetric). Out of
+range means invisible to scans, refused on connect, and — because the file is
+re-read continuously — a live connection is cut the moment its pair is removed.
+That is how a test models someone walking down the aisle. Other clients that
+join the loopback (the Kotlin test node in `spec/kotlin-conformance`) read the
+same file with the same rules.
 """
 
 import json
@@ -53,6 +66,12 @@ _stop = threading.Event()
 _registered: Path | None = None
 _paired: set[str] = set()
 _paired_lock = threading.Lock()
+# Every live socket and the peer at its far end, so the range watcher can cut
+# links whose pair leaves topology.json.
+_links: list[tuple[str, socket.socket]] = []
+_links_lock = threading.Lock()
+_watcher: threading.Thread | None = None
+_last_topology: set[frozenset[str]] | None = None
 
 
 # --- Identity / rendezvous ---
@@ -78,7 +97,14 @@ def get_local_mac() -> str:
     if configured:
         return configured.upper()
     pid = os.getpid() & 0xFFFFFFFF
-    octets = [0x02, 0x00, (pid >> 24) & 0xFF, (pid >> 16) & 0xFF, (pid >> 8) & 0xFF, pid & 0xFF]
+    octets = [
+        0x02,
+        0x00,
+        (pid >> 24) & 0xFF,
+        (pid >> 16) & 0xFF,
+        (pid >> 8) & 0xFF,
+        pid & 0xFF,
+    ]
     return ":".join(f"{o:02X}" for o in octets)
 
 
@@ -110,11 +136,63 @@ def _read_records() -> list[dict]:
             record = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
+        if not isinstance(record, dict) or "mac" not in record:
+            continue  # topology.json, or something else sharing the directory
         if not _alive(int(record.get("pid", 0))):
             path.unlink(missing_ok=True)
             continue
         records.append(record)
     return records
+
+
+def _topology() -> set[frozenset[str]] | None:
+    """Pairs in range of each other, or None when everyone hears everyone."""
+    global _last_topology
+    path = _rendezvous_dir() / "topology.json"
+    try:
+        raw = json.loads(path.read_text())
+    except FileNotFoundError:
+        _last_topology = None
+        return None
+    except (OSError, ValueError):
+        # Caught mid-write. Keep the last good answer rather than cutting
+        # every link for one unlucky read.
+        return _last_topology
+    _last_topology = {
+        frozenset(m.upper() for m in pair)
+        for pair in raw.get("links", [])
+        if isinstance(pair, list) and len(pair) == 2
+    }
+    return _last_topology
+
+
+def in_range(a: str, b: str) -> bool:
+    links = _topology()
+    return links is None or frozenset((a.upper(), b.upper())) in links
+
+
+def _track(peer: str, sock: socket.socket) -> None:
+    with _links_lock:
+        _links.append((peer.upper(), sock))
+
+
+def _watch_range() -> None:
+    """Cut live links whose pair has gone out of range."""
+    while not _stop.wait(0.1):
+        me = get_local_mac()
+        with _links_lock:
+            live = []
+            for peer, sock in _links:
+                if sock.fileno() == -1:
+                    continue
+                if in_range(me, peer):
+                    live.append((peer, sock))
+                    continue
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            _links[:] = live
 
 
 def _ghosts() -> list[tuple[str, str]]:
@@ -209,10 +287,17 @@ def create_server() -> None:
                 conn.close()
                 continue
             addr = raw.decode("ascii", "replace").strip().upper() or "00:00:00:00:00:00"
+            if not in_range(mac, addr):
+                conn.close()
+                continue
+            _track(addr, conn)
             _incoming.put((conn, addr))
 
     _accept_thread = threading.Thread(target=accept_loop, daemon=True)
     _accept_thread.start()
+    global _watcher
+    _watcher = threading.Thread(target=_watch_range, daemon=True)
+    _watcher.start()
 
 
 def close_server() -> None:
@@ -251,7 +336,9 @@ def discover() -> list[tuple[str, str]]:
     live = [
         (r["mac"].upper(), r.get("name") or r["mac"])
         for r in _read_records()
-        if r["mac"].upper() != me and r.get("uuid") == SERVICE_UUID
+        if r["mac"].upper() != me
+        and r.get("uuid") == SERVICE_UUID
+        and in_range(me, r["mac"])
     ]
     return live + [g for g in _ghosts() if g[0] != me]
 
@@ -273,7 +360,7 @@ def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str,
     found = [
         (r["mac"].upper(), r.get("name") or r["mac"])
         for r in _read_records()
-        if r["mac"].upper() != me
+        if r["mac"].upper() != me and in_range(me, r["mac"])
     ] + [g for g in _ghosts() + _noise() if g[0] != me]
     seen: set[str] = set()
     out = []
@@ -334,6 +421,8 @@ def connect(addr: str) -> tuple:
     record = next((r for r in _read_records() if r["mac"].upper() == addr), None)
     if record is None:
         raise ConnectionError(f"No Muninn service advertised by {addr}")
+    if not in_range(get_local_mac(), addr):
+        raise ConnectionError(f"Connect failed: {addr} is out of range (page timeout)")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(10)
     try:
@@ -345,4 +434,5 @@ def connect(addr: str) -> tuple:
     except OSError as e:
         sock.close()
         raise ConnectionError(f"Connect failed: {e}") from e
+    _track(addr, sock)
     return sock, addr

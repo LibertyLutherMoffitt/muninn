@@ -267,10 +267,15 @@ class ChatBridge(QObject):
             return
 
         msg_id, sent, skipped = result
-        if not sent:
-            self.errorOccurred.emit("No reachable recipient (no pubkey)")
-        elif skipped:
-            self.errorOccurred.emit(f"Skipped {len(skipped)} recipients (no pubkey)")
+        if skipped:
+            self.notify.emit(
+                f"Waiting for {len(skipped)} key{'s' if len(skipped) != 1 else ''}"
+                " — sends once they're known"
+            )
+        away = [a for a in sent if not self._cm.is_reachable(a)]
+        if away:
+            names = ", ".join(self._gs.display_name(a) for a in away[:3])
+            self.notify.emit(f"Held for {names} — goes when they're in reach")
 
         ts = int(time.time())
         self._msg_model.add_message(
@@ -314,9 +319,43 @@ class ChatBridge(QObject):
         else:
             state = "offline"
         text = status.describe()
-        if state == "relay" and status.via:
-            text = f"relay via {self._gs.display_name(status.via)}"
+        if state == "relay":
+            text = presence.relay_text(status, self._gs.display_name)
+        elif state != "direct":
+            text += " · messages wait until they're in reach"
         return {"state": state, "text": text, "reachable": status.is_reachable}
+
+    @Slot(str, result="QVariantMap")
+    def groupPresence(self, gid_hex: str) -> dict:
+        """How much of a group a message sent now would reach."""
+        try:
+            group = self._gs.groups.get(bytes.fromhex(gid_hex))
+        except ValueError:
+            group = None
+        if group is None:
+            return {"state": "group", "text": "", "reachable": False, "title": gid_hex}
+        others = [a for a in group.members if a != self._local_mac]
+        reachable = [a for a in others if self._cm.is_reachable(a)]
+        if not others:
+            text = "just you"
+        elif len(reachable) == len(others):
+            text = "everyone in reach" if len(others) > 1 else "in reach"
+        elif not reachable:
+            text = "nobody in reach · messages wait"
+        else:
+            away = [self._gs.display_name(a) for a in others if a not in reachable]
+            text = (
+                f"{len(reachable)} of {len(others)} in reach · waiting on "
+                + ", ".join(away[:3])
+            )
+            if len(away) > 3:
+                text += f" +{len(away) - 3}"
+        return {
+            "state": "group",
+            "text": text,
+            "reachable": bool(reachable),
+            "title": group.name or "group",
+        }
 
     @Slot(str, result=str)
     def displayName(self, addr: str) -> str:
@@ -447,12 +486,15 @@ class ChatBridge(QObject):
         rows = []
         for addr in candidates:
             status = statuses.get(addr) or tracker.status(addr)
-            if reachable_only and status.state not in (presence.CONNECTED, presence.RELAY):
+            if reachable_only and status.state not in (
+                presence.CONNECTED,
+                presence.RELAY,
+            ):
                 continue
             label = self._gs.display_name(addr)
             detail = status.describe()
-            if status.state == presence.RELAY and status.via:
-                detail = f"relay via {self._gs.display_name(status.via)}"
+            if status.state == presence.RELAY:
+                detail = presence.relay_text(status, self._gs.display_name)
             if addr not in known:
                 detail += " · not paired"
             rows.append(
@@ -799,7 +841,12 @@ class ChatBridge(QObject):
             items = self._presence_items(reachable_only=True)
             if not items:
                 items = [
-                    {"label": "(no peers reachable)", "sub": "", "convId": "", "action": ""}
+                    {
+                        "label": "(no peers reachable)",
+                        "sub": "",
+                        "convId": "",
+                        "action": "",
+                    }
                 ]
             self.infoMenuRequested.emit("peers", items)
             return

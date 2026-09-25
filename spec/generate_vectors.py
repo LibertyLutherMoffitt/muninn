@@ -158,6 +158,26 @@ def main() -> None:
             "peers": [],
             "frame": h(protocol.encode_peer_annc([])),
         },
+        "routes": {
+            "note": "who the sender can reach right now; hops=1 is a live session",
+            "routes": [
+                {"wire_id": MAC_A, "hops": 1},
+                {"wire_id": MAC_B, "hops": 3},
+            ],
+            "frame": h(
+                protocol.encode_routes(
+                    [
+                        (protocol.mac_to_bytes(MAC_A), 1),
+                        (protocol.mac_to_bytes(MAC_B), 3),
+                    ]
+                )
+            ),
+        },
+        "routes_empty": {
+            "note": "legal; withdraws every route this sender advertised",
+            "routes": [],
+            "frame": h(protocol.encode_routes([])),
+        },
     }
 
     doc = {
@@ -174,6 +194,7 @@ def main() -> None:
             "read": 5,
             "profile": 6,
             "peer_annc": 7,
+            "routes": 8,
         },
         "crypto": {
             "note": (

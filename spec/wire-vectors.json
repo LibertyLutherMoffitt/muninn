@@ -8,7 +8,8 @@
     "group_setup": 4,
     "read": 5,
     "profile": 6,
-    "peer_annc": 7
+    "peer_annc": 7,
+    "routes": 8
   },
   "crypto": {
     "note": "X25519 + NaCl Box (XSalsa20-Poly1305). `sealed` is nonce||ciphertext, exactly what goes on the wire after the 48-byte message metadata.",
@@ -115,6 +116,25 @@
     "peer_annc_empty": {
       "peers": [],
       "frame": "07000100"
+    },
+    "routes": {
+      "note": "who the sender can reach right now; hops=1 is a live session",
+      "routes": [
+        {
+          "wire_id": "AA:BB:CC:DD:EE:FF",
+          "hops": 1
+        },
+        {
+          "wire_id": "02:11:22:33:44:55",
+          "hops": 3
+        }
+      ],
+      "frame": "08000f02aabbccddeeff0102112233445503"
+    },
+    "routes_empty": {
+      "note": "legal; withdraws every route this sender advertised",
+      "routes": [],
+      "frame": "08000100"
     }
   }
 }

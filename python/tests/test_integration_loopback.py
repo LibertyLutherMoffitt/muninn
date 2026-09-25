@@ -10,136 +10,13 @@ Bluetooth backend and ConnectionManager, which is where most real breakage has
 historically lived.
 """
 
-import os
-import subprocess
-import sys
-import threading
 import time
-from pathlib import Path
 
 import pytest
+from cli_harness import diagnose as _diagnose
 
-SRC = Path(__file__).resolve().parents[1] / "src"
 GHOST_MAC = "DE:AD:BE:EF:00:01"
 GHOST_NAME = "Phantom Pixel"
-
-
-class Client:
-    """A Muninn CLI subprocess with line-buffered capture."""
-
-    def __init__(
-        self,
-        mac: str,
-        name: str,
-        rendezvous: Path,
-        home: Path,
-        ghosts="",
-        noise="",
-        hide_uuid=False,
-    ):
-        env = dict(os.environ)
-        env.update(
-            PYTHONPATH=str(SRC),
-            PYTHONUNBUFFERED="1",
-            MUNINN_BT_BACKEND="loopback",
-            MUNINN_LOOPBACK_DIR=str(rendezvous),
-            MUNINN_LOOPBACK_MAC=mac,
-            MUNINN_LOOPBACK_NAME=name,
-            MUNINN_LOOPBACK_GHOSTS=ghosts,
-            MUNINN_LOOPBACK_NOISE=noise,
-            MUNINN_LOOPBACK_HIDE_UUID="1" if hide_uuid else "",
-            MUNINN_NAME=name,
-            XDG_DATA_HOME=str(home),
-            TERM="dumb",
-        )
-        home.mkdir(parents=True, exist_ok=True)
-        self.mac = mac.upper()
-        self.name = name
-        self.lines: list[str] = []
-        self._lock = threading.Lock()
-        self.proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "muninn.cli"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            text=True,
-            bufsize=1,
-        )
-        self._reader = threading.Thread(target=self._pump, daemon=True)
-        self._reader.start()
-
-    def _pump(self) -> None:
-        assert self.proc.stdout is not None
-        for raw in self.proc.stdout:
-            with self._lock:
-                self.lines.append(raw.rstrip("\n"))
-
-    def send(self, line: str) -> None:
-        assert self.proc.stdin is not None
-        try:
-            self.proc.stdin.write(line + "\n")
-            self.proc.stdin.flush()
-        except (BrokenPipeError, ValueError):
-            pass
-
-    def output(self) -> str:
-        with self._lock:
-            return "\n".join(self.lines)
-
-    def wait_for(self, needle: str, timeout: float = 30.0) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if needle in self.output():
-                return True
-            if self.proc.poll() is not None:
-                return needle in self.output()
-            time.sleep(0.05)
-        return needle in self.output()
-
-    def close(self) -> None:
-        try:
-            if self.proc.stdin and not self.proc.stdin.closed:
-                self.proc.stdin.close()
-            self.proc.wait(timeout=10)
-        except Exception:
-            self.proc.kill()
-            try:
-                self.proc.wait(timeout=5)
-            except Exception:
-                pass
-
-
-@pytest.fixture
-def clients(tmp_path):
-    made: list[Client] = []
-
-    def spawn(
-        mac: str,
-        name: str,
-        ghosts: str = "",
-        noise: str = "",
-        hide_uuid: bool = False,
-    ) -> Client:
-        client = Client(
-            mac,
-            name,
-            tmp_path / "rendezvous",
-            tmp_path / name,
-            ghosts,
-            noise,
-            hide_uuid,
-        )
-        made.append(client)
-        return client
-
-    yield spawn
-    for c in made:
-        c.close()
-
-
-def _diagnose(*cs: Client) -> str:
-    return "\n\n".join(f"--- {c.name} ---\n{c.output()}" for c in cs)
 
 
 @pytest.fixture

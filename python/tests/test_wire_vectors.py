@@ -46,6 +46,7 @@ def test_frame_type_numbers_match(vectors):
         "read": protocol.TYPE_READ,
         "profile": protocol.TYPE_PROFILE,
         "peer_annc": protocol.TYPE_PEER_ANNC,
+        "routes": protocol.TYPE_ROUTES,
     }
 
 
@@ -56,7 +57,7 @@ def test_every_vector_frame_has_a_well_formed_header(vectors):
         raw = bytes.fromhex(spec["frame"])
         declared = struct.unpack("!H", raw[1:3])[0]
         assert declared == len(raw) - 3, f"{name}: header length disagrees with payload"
-        assert 1 <= raw[0] <= 7, f"{name}: unknown frame type {raw[0]}"
+        assert 1 <= raw[0] <= 8, f"{name}: unknown frame type {raw[0]}"
 
 
 # --- Crypto interop ---
@@ -96,6 +97,7 @@ def test_handshake_vector(vectors):
     spec = vectors["frames"]["handshake"]
     pubkey, wire_id = protocol.decode_handshake(payload(vectors, "handshake"))
     assert pubkey.hex() == spec["pubkey"]
+    assert wire_id is not None
     assert protocol.bytes_to_mac(wire_id) == spec["wire_id"]
     assert protocol.encode_handshake(
         pubkey, protocol.mac_to_bytes(spec["wire_id"])
@@ -118,9 +120,9 @@ def test_message_vector(vectors, key):
     assert protocol.bytes_to_mac(dest) == spec["dest"]
     assert ts == spec["timestamp"]
     assert enc.hex() == spec["encrypted"]
-    assert protocol.encode_message(
-        gid, mid, sender, dest, enc, timestamp=ts
-    ) == frame(vectors, key)
+    assert protocol.encode_message(gid, mid, sender, dest, enc, timestamp=ts) == frame(
+        vectors, key
+    )
 
 
 def test_a_dm_uses_the_zero_group_id(vectors):
@@ -187,3 +189,19 @@ def test_the_checked_in_vectors_are_current(vectors, tmp_path, monkeypatch):
     assert VECTORS_PATH.read_text() == before, (
         "spec/wire-vectors.json is stale — re-run python3 spec/generate_vectors.py"
     )
+
+
+# --- Routes ---
+
+
+@pytest.mark.parametrize("key", ["routes", "routes_empty"])
+def test_routes_decode_and_reencode(vectors, key):
+    spec = vectors["frames"][key]
+    decoded = protocol.decode_routes(payload(vectors, key))
+    assert [(protocol.bytes_to_mac(w), h) for w, h in decoded] == [
+        (r["wire_id"], r["hops"]) for r in spec["routes"]
+    ]
+    rebuilt = protocol.encode_routes(
+        [(protocol.mac_to_bytes(r["wire_id"]), r["hops"]) for r in spec["routes"]]
+    )
+    assert rebuilt == frame(vectors, key)

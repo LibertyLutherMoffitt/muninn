@@ -22,6 +22,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from cli_harness import clients  # noqa: E402, F401  (fixture: real client processes)
 from muninn import protocol  # noqa: E402
 from muninn.crypto import generate_keypair  # noqa: E402
 from muninn.groups import GroupStore  # noqa: E402
