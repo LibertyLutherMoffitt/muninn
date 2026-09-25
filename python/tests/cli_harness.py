@@ -160,5 +160,16 @@ def clients(tmp_path):
         c.close()
 
 
+def poll(client, command: str, needle: str, timeout: float = 60.0) -> bool:
+    """Re-run a command until its fresh output contains `needle`."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        mark = len(client.output())
+        client.send(command)
+        if client.wait_for_after(mark, needle, timeout=2.0):
+            return True
+    return False
+
+
 def diagnose(*cs) -> str:
     return "\n\n".join(f"--- {c.name} ---\n{c.output()}" for c in cs)

@@ -28,9 +28,17 @@ class PeerBook {
         val lastSeen: Long? = null,
         val lastConnected: Long? = null,
         val via: String? = null,
+        /** Hops through [via] (2 = one relay between). Null unless relayed. */
+        val hops: Int? = null,
         val rssi: Int? = null,
         val failedDials: Int = 0,
         val lastError: String? = null,
+        /**
+         * Known to speak Muninn: it advertised the service, we hold its key, or
+         * it is routable. The radio sees every headset in the cabin; only these
+         * belong in a peer list. Mirrors `advertises_muninn` in presence.py.
+         */
+        val advertisesMuninn: Boolean = false,
     ) {
         /** True when a message sent right now has a path to this peer. */
         val isReachable: Boolean get() = state == State.CONNECTED || state == State.RELAY
@@ -44,12 +52,18 @@ class PeerBook {
 
         fun describe(now: Long = System.currentTimeMillis()): String = when {
             state == State.CONNECTED -> "connected"
-            state == State.RELAY -> via?.let { "via $it" } ?: "via relay"
+            state == State.RELAY -> relayText { it }
             state == State.NEARBY && unreachableNearby ->
                 "nearby, can't connect · seen ${formatAgo(agoMillis(now))}"
             state == State.NEARBY -> "nearby · seen ${formatAgo(agoMillis(now))}"
             lastSeen == null -> "never seen"
             else -> "last seen ${formatAgo(agoMillis(now))}"
+        }
+
+        /** "relay via Bob", or "relay via Bob · 3 hops" — as `presence.relay_text`. */
+        fun relayText(nameOf: (String) -> String): String {
+            val base = via?.let { "relay via ${nameOf(it)}" } ?: "relay"
+            return if (hops != null && hops > 2) "$base · $hops hops" else base
         }
 
         private fun agoMillis(now: Long): Long? = lastSeen?.let { maxOf(0L, now - it) }
@@ -61,6 +75,10 @@ class PeerBook {
     private val selfChosenNames = HashMap<String, String>()
     private val overrides = HashMap<String, String>()
     private val statuses = HashMap<String, PeerStatus>()
+    // Transport Bluetooth address -> wire id, for peers whose two differ (other
+    // Android phones). Sightings and dial results arrive by transport address;
+    // without this a phone would show up twice, once under each.
+    private val aliases = HashMap<String, String>()
     // Hex of msg_id. A ByteArray cannot be a sensible Set member — its
     // hashCode is identity-based, so every lookup would miss.
     private val seen = HashSet<String>()
@@ -102,6 +120,10 @@ class PeerBook {
             }
         }
     }
+
+    /** The name the peer announced for itself, if any. */
+    fun selfChosenName(wireId: String): String? =
+        synchronized(lock) { selfChosenNames[wireId.uppercase()] }
 
     /** A name chosen locally by this user. Always wins over the peer's own. */
     fun setOverride(wireId: String, name: String) {
@@ -149,8 +171,34 @@ class PeerBook {
 
     // --- Presence ---
 
-    private fun mutate(wireId: String, block: (PeerStatus) -> PeerStatus): PeerStatus {
+    /** Remember that `transport` is the radio address of `wireId`. */
+    fun alias(transport: String, wireId: String) {
+        val t = transport.uppercase()
         val id = wireId.uppercase()
+        if (t == id) return
+        synchronized(lock) {
+            aliases[t] = id
+            // Fold anything recorded under the radio address into the peer.
+            statuses.remove(t)?.let { old ->
+                val cur = statuses[id] ?: PeerStatus(id)
+                statuses[id] = cur.copy(
+                    lastSeen = maxOfNullable(cur.lastSeen, old.lastSeen),
+                    rssi = cur.rssi ?: old.rssi,
+                )
+            }
+        }
+    }
+
+    /** The wire id behind a radio address, or the address itself. */
+    fun resolveTransport(address: String): String {
+        val a = address.uppercase()
+        return synchronized(lock) { aliases[a] ?: a }
+    }
+
+    fun aliases(): Map<String, String> = synchronized(lock) { HashMap(aliases) }
+
+    private fun mutate(wireId: String, block: (PeerStatus) -> PeerStatus): PeerStatus {
+        val id = synchronized(lock) { wireId.uppercase().let { aliases[it] ?: it } }
         return synchronized(lock) {
             val next = block(statuses[id] ?: PeerStatus(id))
             statuses[id] = next
@@ -158,14 +206,28 @@ class PeerBook {
         }
     }
 
-    fun recordSighting(wireId: String, rssi: Int? = null, now: Long = System.currentTimeMillis()) {
+    fun recordSighting(
+        wireId: String,
+        rssi: Int? = null,
+        now: Long = System.currentTimeMillis(),
+        muninn: Boolean = false,
+    ) {
         mutate(wireId) {
             it.copy(
                 lastSeen = now,
                 rssi = rssi ?: it.rssi,
                 state = if (it.state == State.OFFLINE) State.NEARBY else it.state,
+                advertisesMuninn = it.advertisesMuninn || muninn,
             )
         }
+    }
+
+    /**
+     * We hold these peers' keys, learned from someone else. Not seen, not
+     * reachable — but people you can write to, so they belong in the list.
+     */
+    fun noteKnown(ids: Collection<String>) {
+        for (id in ids) mutate(id) { if (it.advertisesMuninn) it else it.copy(advertisesMuninn = true) }
     }
 
     fun recordConnected(wireId: String, now: Long = System.currentTimeMillis()) {
@@ -175,8 +237,10 @@ class PeerBook {
                 lastSeen = now,
                 lastConnected = now,
                 via = null,
+                hops = null,
                 failedDials = 0,
                 lastError = null,
+                advertisesMuninn = true,
             )
         }
     }
@@ -207,17 +271,26 @@ class PeerBook {
     }
 
     /** Reachable through `via`. Never downgrades a live direct session. */
-    fun recordRelay(wireId: String, via: String) {
+    fun recordRelay(wireId: String, via: String, hops: Int? = null) {
         mutate(wireId) {
             if (it.state == State.CONNECTED) it
-            else it.copy(state = State.RELAY, via = via.uppercase())
+            else it.copy(
+                state = State.RELAY,
+                via = via.uppercase(),
+                hops = hops,
+                advertisesMuninn = true,
+            )
         }
     }
 
     fun clearRelay(wireId: String, now: Long = System.currentTimeMillis()) {
         mutate(wireId) {
             if (it.state != State.RELAY) it
-            else it.copy(via = null, state = if (isRecent(it, now)) State.NEARBY else State.OFFLINE)
+            else it.copy(
+                via = null,
+                hops = null,
+                state = if (isRecent(it, now)) State.NEARBY else State.OFFLINE,
+            )
         }
     }
 
@@ -237,18 +310,24 @@ class PeerBook {
         }
 
     fun status(wireId: String, now: Long = System.currentTimeMillis()): PeerStatus {
-        val id = wireId.uppercase()
-        return synchronized(lock) { statuses[id]?.let { aged(it, now) } ?: PeerStatus(id) }
+        return synchronized(lock) {
+            val id = wireId.uppercase().let { aliases[it] ?: it }
+            statuses[id]?.let { aged(it, now) } ?: PeerStatus(id)
+        }
     }
 
     fun statuses(now: Long = System.currentTimeMillis()): Map<String, PeerStatus> =
         synchronized(lock) { statuses.mapValues { aged(it.value, now) } }
 
+    /** Statuses worth showing a user: peers, not passing headsets. */
+    fun muninnStatuses(now: Long = System.currentTimeMillis()): Map<String, PeerStatus> =
+        statuses(now).filterValues { it.advertisesMuninn }
+
     fun connected(): List<String> =
         statuses().filterValues { it.state == State.CONNECTED }.keys.sorted()
 
     fun nearbyUnreachable(): List<String> =
-        statuses().filterValues { it.unreachableNearby }.keys.sorted()
+        statuses().filterValues { it.unreachableNearby && it.advertisesMuninn }.keys.sorted()
 
     companion object {
         /**
@@ -276,4 +355,10 @@ class PeerBook {
             }
         }
     }
+}
+
+private fun maxOfNullable(a: Long?, b: Long?): Long? = when {
+    a == null -> b
+    b == null -> a
+    else -> maxOf(a, b)
 }

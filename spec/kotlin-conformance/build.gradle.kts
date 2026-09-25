@@ -7,11 +7,15 @@
 // CI and on any dev machine, not just ones with a full Android toolchain.
 plugins {
     kotlin("jvm") version "2.0.21"
+    application
 }
 
 sourceSets {
     main {
-        kotlin.setSrcDirs(listOf("../../android/app/src/main/kotlin"))
+        // The app's pure-JVM files, plus the headless node (src/node) that
+        // runs them over TCP so the Python tests can put a Kotlin client in
+        // the same cabin as Python ones.
+        kotlin.setSrcDirs(listOf("../../android/app/src/main/kotlin", "src/node/kotlin"))
         // Everything else in that tree pulls in android.* and cannot compile here.
         kotlin.include(
             "com/muninn/Protocol.kt",
@@ -20,6 +24,9 @@ sourceSets {
             "com/muninn/DialScheduler.kt",
             "com/muninn/MessageGrouping.kt",
             "com/muninn/ChatRepository.kt",
+            "com/muninn/Mesh.kt",
+            "com/muninn/MeshStore.kt",
+            "com/muninn/node/**",
         )
     }
 }
@@ -30,12 +37,20 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
-    testImplementation("org.json:json:20240303")
+    // The headless node reads the loopback rendezvous records (JSON).
+    implementation("org.json:json:20240303")
     // lazysodium-java is the desktop twin of the app's lazysodium-android and
     // wraps the identical libsodium primitives, so a crypto vector that passes
     // here is the same construction the phone performs.
-    testImplementation("com.goterl:lazysodium-java:5.1.4")
-    testImplementation("net.java.dev.jna:jna:5.14.0")
+    implementation("com.goterl:lazysodium-java:5.1.4")
+    implementation("net.java.dev.jna:jna:5.14.0")
+}
+
+application {
+    // `gradle installDist` builds build/install/muninn-wire-conformance/bin/…,
+    // which python/tests/kotlin_node.py launches.
+    mainClass.set("com.muninn.node.NodeKt")
+    applicationName = "muninn-node"
 }
 
 tasks.test {

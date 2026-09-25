@@ -55,6 +55,7 @@ class WireVectorsTest {
         assertEquals(TYPE_READ.toInt(), t.getInt("read"))
         assertEquals(TYPE_PROFILE.toInt(), t.getInt("profile"))
         assertEquals(TYPE_PEER_ANNC.toInt(), t.getInt("peer_annc"))
+        assertEquals(TYPE_ROUTES.toInt(), t.getInt("routes"))
     }
 
     @Test
@@ -68,7 +69,7 @@ class WireVectorsTest {
             val raw = frameBytes(name)
             val frame = readFrame(DataInputStream(ByteArrayInputStream(raw)))
             assertEquals(raw.size - 3, frame.payload.size, "$name: header length disagrees")
-            assertTrue(frame.type in 1..7, "$name: unknown frame type ${frame.type}")
+            assertTrue(frame.type in 1..8, "$name: unknown frame type ${frame.type}")
         }
     }
 
@@ -202,6 +203,35 @@ class WireVectorsTest {
             val ours = encoded { encodePeerAnnc(it, peers) }
             assertContentEquals(frameBytes(name), ours, "$name re-encode")
         }
+    }
+
+    @Test
+    fun `routes vectors round trip`() {
+        for (name in listOf("routes", "routes_empty")) {
+            val spec = frames().getJSONObject(name)
+            val routes = decodeRoutes(payload(name))
+            val expected = spec.getJSONArray("routes")
+            assertEquals(expected.length(), routes.size, "$name route count")
+            for (i in 0 until expected.length()) {
+                assertEquals(expected.getJSONObject(i).getString("wire_id"), bytesToMac(routes[i].wireId))
+                assertEquals(expected.getJSONObject(i).getInt("hops"), routes[i].hops)
+            }
+            assertContentEquals(frameBytes(name), routesFrame(routes), "$name re-encode")
+        }
+    }
+
+    @Test
+    fun `byte-array builders match the stream encoders`() {
+        // Mesh queues and forwards frames as byte arrays; the vectors were
+        // checked through the stream encoders. Both must agree.
+        val spec = frames().getJSONObject("group_setup")
+        val setup = decodeGroupSetup(payload("group_setup"))
+        assertContentEquals(frameBytes("group_setup"), groupSetupFrame(setup.groupId, setup.members, setup.name))
+        assertContentEquals(frameBytes("profile_unicode"), profileFrame(frames().getJSONObject("profile_unicode").getString("name")))
+        val (msgId, from) = decodeAck(payload("ack"))
+        assertContentEquals(frameBytes("ack"), ackFrame(msgId, from))
+        assertContentEquals(frameBytes("read"), readReceiptFrame(msgId, from))
+        assertEquals(spec.getString("name"), setup.name)
     }
 
     // --- Crypto interop ---

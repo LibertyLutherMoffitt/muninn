@@ -8,23 +8,12 @@ code: backend, scanner, dial scheduler, handshake, routing, SQLite, the CLI.
 
 import time
 
-from cli_harness import diagnose, set_topology
+from cli_harness import diagnose, poll, set_topology
 
 ALICE = "AA:AA:AA:AA:AA:01"
 BOB = "BB:BB:BB:BB:BB:02"
 CAROL = "CC:CC:CC:CC:CC:03"
 DAVE = "DD:DD:DD:DD:DD:04"
-
-
-def poll(client, command: str, needle: str, timeout: float = 60.0) -> bool:
-    """Re-run a command until its output contains `needle`."""
-    deadline = time.monotonic() + timeout
-    mark = len(client.output())
-    while time.monotonic() < deadline:
-        client.send(command)
-        if client.wait_for_after(mark, needle, timeout=2.0):
-            return True
-    return False
 
 
 def test_alice_writes_to_carol_through_bob(clients, tmp_path):

@@ -208,7 +208,7 @@ class PeerBookTest {
     @Test
     fun `repeated dial failures mark a visible peer unreachable`() {
         val book = PeerBook()
-        book.recordSighting(a)
+        book.recordSighting(a, muninn = true)
         repeat(PeerBook.UNREACHABLE_AFTER) { book.recordDialFailure(a, "key-missing") }
         val status = book.status(a)
         assertTrue(status.unreachableNearby)
@@ -277,5 +277,39 @@ class PeerBookTest {
         assertEquals("23h ago", PeerBook.formatAgo(86_399_000))
         assertEquals("1d ago", PeerBook.formatAgo(86_400_000))
         assertEquals("9d ago", PeerBook.formatAgo(9 * 86_400_000L))
+    }
+
+    @Test
+    fun `a headset that refuses us is never reported as a peer`() {
+        // The radio sees every device in the cabin; only Muninn peers belong
+        // in the list, exactly as presence.muninn_devices() on the desktop.
+        val book = PeerBook()
+        book.recordSighting(a)
+        repeat(PeerBook.UNREACHABLE_AFTER) { book.recordDialFailure(a, "refused") }
+        assertEquals(emptyList(), book.nearbyUnreachable())
+        assertTrue(book.muninnStatuses().isEmpty())
+    }
+
+    @Test
+    fun `a phone seen by its radio address folds into its wire id`() {
+        val book = PeerBook()
+        val radio = "11:22:33:44:55:66"
+        book.recordSighting(radio, rssi = -60, now = 5_000)
+        book.alias(radio, a)
+        book.recordSighting(radio, now = 6_000)
+        assertEquals(a, book.resolveTransport(radio))
+        assertEquals(6_000L, book.status(a).lastSeen)
+        assertEquals(-60, book.status(a).rssi)
+        assertFalse(radio in book.statuses())
+    }
+
+    @Test
+    fun `relay presence carries the hop count`() {
+        val book = PeerBook()
+        book.recordRelay(a, "BB:BB:BB:BB:BB:BB", hops = 3)
+        val s = book.status(a)
+        assertEquals(PeerBook.State.RELAY, s.state)
+        assertEquals("relay via BB:BB:BB:BB:BB:BB · 3 hops", s.describe())
+        assertTrue(s.advertisesMuninn)
     }
 }
