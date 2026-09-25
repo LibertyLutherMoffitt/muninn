@@ -19,9 +19,10 @@ build cache.
 ### Testing
 
 ```bash
-cd python && python -m pytest tests/ -q          # unit + full-stack integration
-cd spec/kotlin-conformance && gradle test        # wire conformance, no Android SDK needed
+cd python && python -m pytest tests/ -q          # unit, cabin scenarios, Python+Kotlin meshes
+cd spec/kotlin-conformance && gradle test        # wire conformance + Android mesh core, no SDK
 cd android && gradle assembleDebug               # the real app (needs an SDK)
+cd android && gradle :app:recordPaparazziDebug   # render the screens to PNG, no emulator
 ```
 
 Build the Android app after touching anything under `android/`. Compose errors
@@ -29,16 +30,19 @@ are compile errors, so this catches most mistakes in ~25s — and everything
 outside the pure-JVM files has no other check at all. `TESTING.md` has the
 one-time SDK setup.
 
-Run both after touching anything in `protocol.py`, `Protocol.kt`, `peers.py` or
-`PeerBook.kt` — `spec/wire-vectors.json` is the shared fixture that keeps the
-desktop and Android clients speaking the same protocol, and only the two suites
-together catch a divergence. Regenerate it with `python3 spec/generate_vectors.py`
+Run both after touching anything in `protocol.py`, `Protocol.kt`, `peers.py`,
+`Mesh.kt` or `PeerBook.kt` — `spec/wire-vectors.json` keeps the two codecs
+byte-identical, `test_routing.py` / `MeshTest.kt` hold the two relays to the
+same scenarios, and `test_interop_kotlin.py` runs them against each other (it
+rebuilds the Kotlin node when a source changes; skipped without a JDK). A
+routing change made on one side only is a bug. Regenerate it with `python3 spec/generate_vectors.py`
 **only** when `PROTOCOL.md` changes on purpose.
 
 `MUNINN_BT_BACKEND=loopback` runs the CLI or GUI over TCP with no Bluetooth, so
 two clients can talk on one machine. See `TESTING.md` for the environment
 variables, including `MUNINN_LOOPBACK_GHOSTS` for faking a device that is
-visible but unreachable.
+visible but unreachable, and `topology.json` for who can hear whom (rewritable
+mid-test to model someone walking away).
 
 ### Linting
 
@@ -88,7 +92,9 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
   `ScanPolicy.kt`, and the numbers are compared by that same test
 - `presence.py` — `PresenceTracker`: connected / relay / nearby / offline per peer
 
-- `peers.py` — `ConnectionManager`: all BT connections, relay, ACKs, read receipts
+- `peers.py` — `ConnectionManager`: all BT connections, ROUTES table, relay and
+  store-and-forward, sender retries, ACK/READ steering, group relaying, the
+  crossed-dial tiebreak. Mirrored rule for rule by `Mesh.kt`
 - `groups.py` — `GroupStore`: in-memory cache of peers/groups/names, write-through to `Storage`
 - `storage.py` — `Storage`: SQLite persistence layer, schema migrations
 - `protocol.py` — wire encoding/decoding
@@ -138,15 +144,21 @@ CLI commands stay `/`-prefixed in `cli.py` — no plan to unify.
 
 UI lives in `com.muninn.ui` (one composable family per file); `MainActivity.kt`
 holds only the activity — permissions, lifecycle, discoverability, and telling
-`ChatRepository` whether the chat is on screen (which is how `Notifier`
-knows to stay quiet). Colours come
-from `MaterialTheme.colorScheme` or `MaterialTheme.accents` (Theme.kt); the
-accents exist because Material has no slot for "reachable" vs "visible but not".
+`ChatRepository` which conversation is on screen (which is how `Notifier`
+knows to stay quiet). Colours come from `MaterialTheme.colorScheme` or
+`MaterialTheme.accents` (Theme.kt); the accents exist because Material has no
+slot for "reachable" vs "visible but not".
 
-`Protocol.kt`, `PeerBook.kt`, `ScanPolicy.kt`, `DialScheduler.kt` and
-`MessageGrouping.kt` deliberately import nothing from `android.*` so
-`spec/kotlin-conformance` can compile and unit-test them on a plain JVM. Keep
-them that way: they hold the rules that must match the desktop client, and rules
-that cannot be tested drift. Anything needing Android APIs belongs in
-`PeerSession.kt`, `MuninnService.kt` or `MainActivity.kt`, which need the SDK to
-build and are not covered by tests.
+`Protocol.kt`, `PeerBook.kt`, `Mesh.kt`, `MeshStore.kt`, `ScanPolicy.kt`,
+`DialScheduler.kt`, `MessageGrouping.kt` and `ChatRepository.kt` deliberately
+import nothing from `android.*` so `spec/kotlin-conformance` can compile and
+unit-test them on a plain JVM — and run `Mesh.kt` as a headless node against
+the Python client. Keep them that way: they hold the rules that must match the
+desktop client, and rules that cannot be tested drift. Anything needing Android
+APIs belongs in `MuninnService.kt` (radio), `SqliteMeshStore.kt` (disk),
+`AppGraph.kt` (wiring) or `MainActivity.kt`, which need the SDK to build and
+are not covered by tests.
+
+`AppGraph` owns the one `Mesh` per process; the service feeds it sockets and the
+UI reads it through `ChatRepository`. Conversation ids are `dm:<wire id>` and
+`group:<hex>`, as on the desktop GUI.

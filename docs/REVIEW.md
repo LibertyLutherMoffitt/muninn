@@ -164,27 +164,79 @@ the Muninn UUID); `scan_devices()` returning MACs, since
 `_parse_mac_from_device_id` guesses at an ID format that varies by driver; then
 `connect()`. The log at `%TEMP%\muninn-winrt.log` traces each step.
 
-**Dedup sets grow without bound.** `seen_acks`, `seen_reads` and `seen_relayed`
-never shrink. At real message volumes this is nothing; a long-lived relay node
-would leak slowly. Out of scope per `CLAUDE.md` (storage limits), noted for
-completeness.
-
 **A peer's wire id is asserted, not proven.** Any device can claim any wire id
 in its handshake and receive traffic addressed to that identity. Messages stay
 confidential — they are sealed to the *pubkey*, which a relayed announcement can
 never overwrite — so an impostor gets ciphertext it cannot read. MITM is
 explicitly out of scope.
 
-**`GROUP_SETUP` is recorded but not acted on by Android.** Member keys are
-learned so a later 1:1 works, but the phone cannot join a group conversation.
-Group support there needs the `storage.py` port.
+**What a relay carries lives in memory.** A bystander holding a message for
+someone out of range loses it if their app restarts. Nothing is lost overall —
+the sender keeps every message until it is ACKed and resends when a path
+appears — but the "rides along after the sender left" case then fails.
 
-**Android has no on-disk history.** `ChatRepository` is an in-memory list;
-restarting the app loses the thread, and unacked messages are not retransmitted.
-The desktop clients persist through `storage.py`. This is the largest remaining
-gap between the clients.
+**Names carry no version.** A second-hand name is accepted only from the next
+hop toward its owner (it flows outward along the route), which stops a stale
+name circulating, but two relays disagreeing after a rename can take a
+reconnect to settle. Keys are unaffected: a handshake key always wins.
+
+**Groups are fixed at creation.** There is no add/remove-member frame; a new
+member means a new group. Same on every client.
+
+**First contact with a phone needs one tap.** Android only answers inquiry while
+the user has made it discoverable (Android caps this at 300 s), and pairing a
+laptop with a phone shows a consent prompt. After that first meeting both sides
+redial each other unattended.
 
 **`sendMessage` ignores an unrecognised conversation id.** `bridge.sendMessage`
 returns silently if `conv_id` is neither `dm:` nor `group:`-prefixed. Only
 reachable from a QML bug, but it fails invisibly rather than surfacing through
 `errorOccurred`.
+
+---
+
+## 4. User scenarios
+
+The question behind this section: **does every client behave sensibly in the
+situations a flight actually produces, including the ones the protocol finds
+awkward?** "Desktop" is the Python core (Linux CLI + GUI, Windows); "Android"
+is the Kotlin core. Both follow the same rules (`PROTOCOL.md`, "Relay &
+Routing"), and each row names the tests that pin it down on both.
+
+| Situation | What happens | Tests |
+|---|---|---|
+| Two people in adjacent seats, never met | Scanner finds them unattended (probes devices whose SDP record doesn't show; see `dialer.py`). Windows needs a one-time pairing in Settings; a phone needs to be made discoverable once. | `test_integration_loopback`: discovery, hidden UUID, 40-headset cabin |
+| Weak signal: the link keeps dropping | Both sides redial (aggressive: every ~8 s, backoff capped at 45 s). Nothing typed in between is lost or duplicated, and order is kept. | `test_nothing_is_lost_on_a_link_that_keeps_dropping`; `nothing is lost or reordered…` (Kotlin); `test_a_dropped_link_mid_conversation_loses_nothing` |
+| Both phones notice each other at once and both dial | The crossed-dial tiebreak keeps the session the lower wire id opened, on both ends. Previously each side could keep a different one, so both dropped and redialled in a loop. | `test_a_crossed_dial_settles…` (Python and Kotlin, both orders) |
+| A ↔ B ↔ C: A writes to C, out of A's range | B advertises C in its Routes frame; A sends through B; B can't read it. C's ACK and READ come back through B. The UI says "relay via B". | `test_alice_writes_to_carol_through_bob`; `test_a_phone_relays_between_two_laptops`; `test_a_laptop_relays_between_two_phones` |
+| A chain of four seats | Routes reach four hops; C's key and name are passed along too, so A can write to D by name. | `test_a_chain_of_four_seats`; `test_a_mixed_chain_of_four` (laptop–phone–laptop–phone) |
+| A group that spans a relay | Members get the group through a relay that isn't in it. The relay passes it on without joining. Each member's reachability is shown ("2 of 3 in reach"). | `test_a_group_spans_a_relay`; `test_a_group_spans_both_implementations`; `test_a_phone_creates_a_group_for_two_laptops_it_bridges` |
+| Someone absent when the group is created | The setup is sent ahead of their first group message, and again whenever they connect to a member. | `test_a_member_offline_at_creation_…` (both cores) |
+| Writing to someone out of range | Allowed. The message waits ("⧗ waiting" on Android, "held for …" in the CLI, a banner in the GUI) and goes out as soon as any path appears. | `test_a_message_is_resent_the_moment_a_relay_path_appears` (both); `test_sending_works_with_nobody_in_range…` |
+| Sender goes offline before the recipient is back | Neighbours each keep a copy; whoever meets the recipient delivers it. | `test_a_message_rides_along_after_the_sender_closes_the_laptop`; `test_a_phone_carries_a_message_after_the_sender_leaves` |
+| Recipient walks to another row | The route moves with them; the conversation carries on through whoever is now near them. | `test_a_conversation_follows_someone_walking_down_the_aisle`; `test_a_walk_down_the_aisle_moves_the_route` |
+| A relay loses a frame (its own link died mid-send) | The sender retries every 30 s while a path exists. | `test_maintain_retries_down_a_relay_path` (both) |
+| The sender returns and resends | The relay passes on a frame handed over by its own sender even inside the dedup window. It also holds the recipient's ACK for a sender who is away. So the tick appears straight away, not after the next retry. | `test_the_ack_for_a_resent_message_reaches…` (both) |
+| Read while the sender is unreachable | The READ is held and sent when a path to the sender appears. | `test_read_receipts_wait_for_a_path…` (both) |
+| A peer reinstalls (new keys, same address) | Queued messages are resealed to the new key instead of being retried forever. | `test_a_peer_that_reinstalled_still_gets…` (both) |
+| Phone killed by the OS, or rebooted | History, keys, groups, unread state and the outbox are in SQLite. The service restarts (`START_STICKY`) and resends. | `unacked messages survive a restart`; `history survives a restart, unread and all` |
+| Bluetooth or airplane mode toggled mid-flight | Android stops the radio and resumes listening, scanning and dialling when Bluetooth returns. Messages typed meanwhile wait. | Needs a device: `MuninnService.bluetoothState` |
+| A newer client sends a frame type this one doesn't know | Ignored; the session continues. Malformed frames cost one frame, not the session. | `test_an_unknown_frame_type…`, `test_a_malformed_frame…` (both) |
+| A triangle of devices | A flood around the loop ends: each device forwards a given frame at most once per window, and drops its own frames. | `test_a_relay_never_forwards_a_frame_back_around_a_loop`; `a flood around a loop terminates…` |
+| A cabin full of headsets | Probes are rationed per sweep, known peers are always dialled first, and headsets never show in peer lists. | `test_dialer.py` / `DialSchedulerTest`; `a headset that refuses us is never reported as a peer` |
+
+### Client capability, after this pass
+
+| | Linux (CLI, GUI) | Windows | Android |
+|---|---|---|---|
+| Finds peers unattended | yes | paired devices only | yes |
+| Relays for others | yes | yes | yes |
+| Writes through a relay / multi-hop | yes | yes | yes |
+| Groups (create, join, relay) | yes | yes | yes |
+| Offline outbox, resend | yes | yes | yes (SQLite) |
+| Store-and-forward for others | yes (memory) | yes (memory) | yes (memory) |
+| Survives restart | yes | yes | yes |
+| Shows connected / via relay / nearby-unreachable / last seen | yes | yes | yes |
+| Notifications | GUI desktop notifications | GUI | yes, per conversation |
+| Radio off/on recovery | BlueZ keeps the profile registered | untested | yes |
+

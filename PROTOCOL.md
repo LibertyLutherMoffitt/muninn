@@ -253,16 +253,19 @@ Recipients apply the following rules:
 - **Pubkeys** — `setdefault` semantics. A pubkey from a direct handshake is never
   overwritten by a Peer Annc; this prevents any relay from redirecting encryption for
   another device.
-- **Names** — updated if the announced name differs from the stored name. This allows
-  name changes to propagate to indirect peers via the re-announcement mechanism above.
-  A local override always wins on display regardless of what Peer Annc carries.
+- **Names** — a name fills a gap from anyone, but a *changed* name is accepted
+  only from the neighbour that is the receiver's next hop toward the named
+  device (per Routes), and never for a device the receiver is directly
+  connected to (its own Profile is authoritative). Names therefore flow outward
+  from their owner along the route, and a stale name cannot circulate. A local
+  override always wins on display regardless of what Peer Annc carries.
 
 Peer Annc frames are not forwarded as-is. But when a Peer Annc teaches the receiver
-a **key it did not have**, the receiver announces those new entries to its other
-neighbours. Only new keys travel, so each key crosses the mesh once and the flood
-ends by itself — and a device several hops away can be written to as soon as a
-Routes frame says it is reachable. Names still propagate one hop at a time; a
-second-hand name never overwrites the name a directly connected peer announced.
+a **key it did not have**, or a name it accepts under the rule above, the receiver
+announces those entries to its other neighbours. Only changes travel, so each
+piece of news crosses the mesh once and the flood ends by itself — and a device
+several hops away can be written to, by name, as soon as a Routes frame says it
+is reachable.
 
 ---
 

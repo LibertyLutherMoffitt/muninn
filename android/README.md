@@ -65,23 +65,21 @@ non-system apps.
 The app:
 
 1. On launch, requests `BLUETOOTH_CONNECT` / `BLUETOOTH_SCAN` / `BLUETOOTH_ADVERTISE` and `POST_NOTIFICATIONS`.
-2. Starts a foreground service (`MuninnService`) that owns an RFCOMM listening socket on the Muninn service UUID.
-3. Polls bonded devices every 15 s; if one advertises the Muninn UUID and isn't already connected, it dials.
-4. On each accepted/dialed socket, exchanges X25519 handshake keys + wire ids, derives a NaCl Box, then loops on frames.
-5. Shows the conversation in a Compose chat view: type and **Send**, incoming MSG frames decrypt into bubbles, each ACKed back to the sender. (Plaintext still mirrors to Logcat under tag `PeerSession`.)
+2. Starts a foreground service (`MuninnService`) that listens on the Muninn RFCOMM UUID, runs its own inquiry, and dials peers on the schedule set by the scan mode (aggressive by default). It keeps doing this with the screen off, and picks up again when Bluetooth is turned back on.
+3. Hands every connected socket to the mesh (`Mesh.kt`) — the same routing, relaying and group rules as the desktop client, tested against it.
+4. Shows one conversation per person it knows and one per group. Anyone whose key it holds can be written to; if they are out of range the message waits and goes out on its own, directly or through someone in between.
 
-Once a peer is connected, the top bar status flips to **Connected** and the
-composer enables. Send a message from the phone, or from Linux:
+From Linux:
 
 ```
 nix run .#muninn-linux
-# Wait for the handshake to complete with the Android peer.
-/dm <android-wire-id>          # the wire id shown in the phone's status line when no peer is connected
+/list                          # the phone appears once connected (or relayed)
+/dm <phone's name>
 hello from linux
 ```
 
-The Linux side shows `⧗` then `✓` (delivered) once Android ACKs. The message
-appears as a bubble in the phone's chat view.
+The Linux side shows `⧗` then `✓` (delivered) once the phone ACKs, and `✓✓`
+when it is read.
 
 ## Identity
 
@@ -107,39 +105,35 @@ If you're using Android Studio:
 
 ## What works today
 
-- Foreground service owns an RFCOMM listening socket on the Muninn service UUID
-  (`320bcf9c-94fe-46f4-b9bf-83535cafcd55`).
-- Outgoing connect attempts every 15 s to bonded devices that advertise the
-  Muninn UUID, deduplicated against currently-active sessions.
-- X25519 key exchange + XSalsa20-Poly1305 (NaCl Box) via `lazysodium-android` —
-  wire-compatible with the Python client's PyNaCl.
-- Static keypair + 6-byte wire id, persisted across restarts.
-- In-app pairing — own classic discovery + per-device `fetchUuidsWithSdp()` to
-  flag Muninn peers, then `createBond()` (see `BtDiscovery.kt`).
-- Compose 1:1 chat UI — message bubbles, composer, live connection status,
-  Material You theming.
-- Bidirectional messaging — encrypt + send + ACK, decrypt incoming, fan-out via
-  `ChatRepository`.
-- Runtime Bluetooth permission grant + foreground-service notification.
+- Finds and connects to peers unattended, in the background, following
+  Bluetooth on/off.
+- Relays for others, and writes to people it can only reach through someone
+  else (Routes frames, multi-hop, store-and-forward).
+- 1:1 chats and groups: create, join, relay; per-member reachability.
+- An outbox: messages to someone out of range wait and resend when a path
+  appears; delivered/read ticks, per member in a group ("✓ 2/3").
+- History, keys, names, groups and the outbox in SQLite (`SqliteMeshStore`).
+- Presence: connected / via relay (with hop count) / nearby but not connecting
+  / last seen.
+- Notifications per conversation; tapping one opens it.
+- Your own display name (defaults to the device name) and local nicknames.
+
+The protocol core (`Protocol.kt`, `Mesh.kt`, `PeerBook.kt`, `DialScheduler.kt`,
+`ChatRepository.kt`) is tested on a plain JVM in `spec/kotlin-conformance` and
+run in mixed meshes with the Python client (`python/tests/test_interop_kotlin.py`).
+The screens are rendered by `gradle :app:recordPaparazziDebug`.
 
 ## What doesn't exist yet
 
-- ConnectionManager — multi-peer state, unacked tracking, dedup, reconnect
-  resend (port of `peers.py`).
-- Multi-conversation UI — today it is a single flat message log; no per-peer
-  threads or peer list.
-- Groups, group setup, relay, peer announcements.
-- Profile (display name) frames in or out.
-- Read receipts.
-- Storage on disk — currently `SharedPreferences` only; migration to Room
-  mirroring `storage.py` is on the roadmap.
+- Adding or removing group members after creation (same on every client).
 - Mitigations for OEM background-killers (Xiaomi, Oppo, OnePlus).
+- Anything verified on a real phone in this pass: the service, radio handling
+  and SQLite store compile and are reviewed, but have not run on hardware.
 
 ## Troubleshooting
 
-**"Bluetooth disabled" notification** — toggle Bluetooth on. The service today
-does not re-arm its listen socket when Bluetooth comes back; restart the app
-after enabling Bluetooth.
+**"Bluetooth is off" notification** — turn Bluetooth on; the service resumes
+listening and dialling by itself. Messages typed meanwhile wait and go out.
 
 **Pair sheet shows no devices** — the Linux peer must be running and
 discoverable, and its SDP record must include the Muninn service UUID. Hit the

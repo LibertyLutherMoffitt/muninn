@@ -1,12 +1,14 @@
 # Testing Muninn
 
-Muninn talks to itself across three clients on two wire-level implementations.
-Most of what breaks lives in the seams — between a Bluetooth backend and
-`ConnectionManager`, or between the Python codec and the Kotlin one — so the
-suites below are arranged by which seam they cover, not by which file they
-touch.
+Muninn talks to itself across three clients on two independent protocol
+implementations: Python (`peers.py`, used by the CLI, the Qt GUI and Windows)
+and Kotlin (`Mesh.kt`, used by the Android app). Most of what breaks lives in
+the seams — between a Bluetooth backend and the core, or between the Python
+relay and the Kotlin one — so the suites below are arranged by which seam they
+cover, not by which file they touch.
 
-Nothing here needs a Bluetooth radio, a second device, or an Android SDK.
+Nothing here needs a Bluetooth radio or a second device. Only building the
+Android app and rendering its screens needs the Android SDK.
 
 ## Quick start
 
@@ -14,12 +16,21 @@ Nothing here needs a Bluetooth radio, a second device, or an Android SDK.
 # Python: unit + integration (needs pytest and pynacl)
 cd python && python -m pytest tests/ -q
 
-# Kotlin: wire conformance + peer-state rules (needs a JDK; no Android SDK)
+# Kotlin: wire conformance, the Android mesh core, notification rules
+# (needs a JDK; no Android SDK)
 cd spec/kotlin-conformance && gradle test
 
 # Android app: compiles the real thing (needs an SDK, see below)
 cd android && gradle assembleDebug
+
+# Android screens, rendered to PNG with no emulator (needs the SDK)
+cd android && gradle :app:recordPaparazziDebug   # -> app/src/test/snapshots/images/
 ```
+
+The Python suite includes `test_interop_kotlin.py`, which puts Kotlin nodes and
+Python clients in one simulated cabin. It builds the Kotlin node with `gradle
+installDist` on first use (and again whenever a Kotlin source changes), and
+skips — rather than fails — when no JDK/Gradle is installed.
 
 ### Building the Android app
 
@@ -63,8 +74,9 @@ the same protocol", because no single-language suite can. It also proves
 lazysodium (Android) and PyNaCl (desktop) produce **byte-identical** ciphertext
 for the same key and nonce.
 
-`Protocol.kt` and `PeerBook.kt` deliberately import nothing from `android.*`, so
-the conformance project compiles them on a plain JVM. Keep them that way — the
+`Protocol.kt`, `PeerBook.kt`, `Mesh.kt`, `MeshStore.kt`, `DialScheduler.kt` and
+`ChatRepository.kt` deliberately import nothing from `android.*`, so the
+conformance project compiles them on a plain JVM. Keep them that way — the
 rules that must match the desktop client live there, and rules that cannot be
 tested drift.
 
@@ -94,6 +106,18 @@ Two in-process gotchas the fixtures handle for you, both in `conftest.py`:
 - **`RecordingSock`.** `socket.socket` attributes are read-only, so a test that
   needs to inspect the wire substitutes a proxy into `peers[addr].sock`.
 
+### 3b. Routing scenarios — `test_routing.py` and `MeshTest.kt`
+
+The situations a flight produces, one test each, written twice — once against
+the Python core and once against the Kotlin one — so the two relays are held
+to the same rules: a device two and three hops away, the shortest route
+winning, a route following someone down the aisle, a message carried by a
+bystander after the sender has gone, a resend the moment a relay path appears,
+an ACK reaching a sender who missed the first one, a relay that silently loses
+a frame, a flood around a loop terminating, read receipts waiting for a path,
+groups relayed by non-members, a member absent at creation, a crossed dial, a
+reinstalled peer, junk and unknown frames, and a link that keeps dropping.
+
 ### 4. Full stack — `python/tests/test_integration_loopback.py`
 
 Starts real `muninn.cli` subprocesses and drives them through stdin as a user
@@ -104,6 +128,35 @@ redelivery of a message sent while the peer was away.
 This is the layer that catches wiring bugs between the backend and the core —
 where most real breakage has historically lived. It is also the slowest
 (~60s); it runs real scan cycles.
+
+### 5. A cabin — `python/tests/test_integration_mesh.py`
+
+Real CLI processes where not everyone can hear everyone. `topology.json` in the
+rendezvous directory (see below) decides who is in range of whom, and the tests
+rewrite it mid-run: a three-seat relay, a four-seat chain, a group across a
+relay, someone walking from one row to another, a message that reaches its
+recipient after the sender has shut the laptop, and a link that flaps while
+someone keeps typing.
+
+### 6. Python and Kotlin together — `python/tests/test_interop_kotlin.py`
+
+`spec/kotlin-conformance/src/node` wraps the Android app's protocol core
+(`Mesh.kt`) in a headless process that joins the loopback cabin and is driven
+over stdin/stdout. Every test sends at least one message from one
+implementation to the other *through a third device*: a phone relaying between
+two laptops, a laptop relaying between two phones, groups created on either
+side, a phone carrying a message for someone who is away, and a
+laptop–phone–laptop–phone chain. This is the test that the two relays actually
+agree; conformance vectors alone cannot show that.
+
+### 7. Android screens — `android/app/src/test/.../ScreensTest.kt`
+
+Paparazzi renders the Compose screens on the JVM with Android's own layout
+engine, seeded with a cabin: someone connected, someone reachable only through
+them, someone visible who won't connect, someone who has left, and a group
+spanning them. It writes PNGs to look at, not goldens to diff (they contain
+the time of day). It exists because there is no emulator here, and it has
+already caught three layout bugs.
 
 ## Running the apps without a radio
 
@@ -171,6 +224,21 @@ MUNINN_LOOPBACK_GHOSTS="DE:AD:BE:EF:00:01=Row 12 Pixel" python -m muninn.cli
 # then: /known
 ```
 
+### Who can hear whom: `topology.json`
+
+By default every loopback instance is in range of every other. Write
+`topology.json` into the rendezvous directory to change that:
+
+```json
+{"links": [["AA:AA:AA:AA:AA:01", "BB:BB:BB:BB:BB:02"],
+           ["BB:BB:BB:BB:BB:02", "CC:CC:CC:CC:CC:03"]]}
+```
+
+Only listed pairs can see and connect to each other. The file is re-read
+continuously, so removing a pair cuts a live link within ~100 ms — that is how
+the tests model walking away. Write it atomically (`os.replace`), as
+`cli_harness.set_topology` does. The Kotlin node obeys the same file.
+
 ### Driving the GUI headless
 
 The Qt GUI runs under `QT_QPA_PLATFORM=offscreen`, which is enough to
@@ -186,7 +254,12 @@ screenshot it in CI or in a container. Grab from the `QQuickWindow`
 - **The WinRT backend.** No Windows host here, and no fake for the WinRT call
   surface. See `docs/REVIEW.md` for the behavioural differences to check by
   hand on first run.
-- **Android UI and service.** `Protocol.kt` and `PeerBook.kt` are unit-tested;
-  `MainActivity`, `MuninnService`, `PeerSession` and `BtDiscovery` need the SDK
-  and a device.
+- **Android glue.** The protocol core (`Protocol.kt`, `Mesh.kt`, `PeerBook.kt`,
+  `DialScheduler.kt`) and the conversation model (`ChatRepository.kt`) are
+  unit-tested and run against Python; the screens are rendered. What only a
+  phone can check: `MuninnService` (radio on/off, accept/dial), `BtDiscovery`,
+  `SqliteMeshStore`, notifications, and permissions.
+- **Timing on real radios.** The cabin tests run in seconds because TCP connects
+  in microseconds. An RFCOMM page takes ~1–5 s and can fail at range; the
+  retry and backoff rules are tested, the real-world timings are not.
 - **QML.** Rendered and smoke-driven, not asserted on.
