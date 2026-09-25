@@ -276,10 +276,18 @@ class Mesh(
         onTopologyChange()
     }
 
-    /** Close every session. */
-    fun close() {
+    /**
+     * Drop every live session — Bluetooth went off. Everything owed stays
+     * queued and goes out when sessions come back.
+     */
+    fun disconnectAll() {
         val all = synchronized(lock) { sessions.values.toList() }
         all.forEach(::removeSession)
+    }
+
+    /** Shut down for good: no further [attach] will work. */
+    fun close() {
+        disconnectAll()
         watchdog.cancel()
     }
 

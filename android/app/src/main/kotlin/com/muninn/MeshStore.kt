@@ -41,6 +41,27 @@ interface MeshStore {
     fun loadUnacked(): List<PendingMessage>
 }
 
+/**
+ * What the chat UI needs on top of [MeshStore]: the conversation itself.
+ * Implemented by the app's SQLite store and by [MemoryMeshStore].
+ */
+interface HistoryStore : MeshStore {
+    /** Every stored message, oldest first, with its delivery state. */
+    fun loadHistory(): List<HistoryRow>
+
+    /** The user has seen these incoming messages; they stop counting as unread. */
+    fun markDisplayed(msgIds: List<ByteArray>)
+}
+
+class HistoryRow(
+    val message: StoredMessage,
+    val outgoing: Boolean,
+    val recipients: List<String>,
+    val acked: Set<String>,
+    val read: Set<String>,
+    val displayed: Boolean,
+)
+
 class StoredPeer(val wireId: String, val pubkey: ByteArray?, val name: String?, val override: String?)
 
 class StoredMessage(
@@ -58,8 +79,8 @@ class MeshGroup(val id: ByteArray, val name: String, val members: Map<String, By
     val key: String get() = id.toHex()
 }
 
-/** In-memory [MeshStore]: tests, and the headless JVM node. */
-class MemoryMeshStore : MeshStore {
+/** In-memory store: tests, and the headless JVM node. */
+class MemoryMeshStore : HistoryStore {
     private val lock = Any()
     private val keys = HashMap<String, ByteArray>()
     private val names = HashMap<String, String>()
@@ -71,6 +92,8 @@ class MemoryMeshStore : MeshStore {
     // msg hex -> recipient -> acked
     private val recipients = HashMap<String, LinkedHashMap<String, Boolean>>()
     val reads = HashMap<String, MutableSet<String>>()
+    private val outgoingIds = HashSet<String>()
+    private val displayed = HashSet<String>()
 
     override fun savePeerKey(wireId: String, pubkey: ByteArray, direct: Boolean) {
         synchronized(lock) {
@@ -113,6 +136,7 @@ class MemoryMeshStore : MeshStore {
     override fun saveOutgoing(msg: StoredMessage, recipients: List<String>) {
         synchronized(lock) {
             messages[msg.msgId.toHex()] = msg
+            outgoingIds += msg.msgId.toHex()
             this.recipients[msg.msgId.toHex()] =
                 LinkedHashMap(recipients.associateWith { false })
         }
@@ -138,6 +162,24 @@ class MemoryMeshStore : MeshStore {
             val msg = messages[hex]
             if (waiting.isEmpty() || msg == null) null else PendingMessage(msg, waiting)
         }
+    }
+
+    override fun loadHistory(): List<HistoryRow> = synchronized(lock) {
+        messages.map { (hex, m) ->
+            val rs = recipients[hex].orEmpty()
+            HistoryRow(
+                message = m,
+                outgoing = hex in outgoingIds,
+                recipients = rs.keys.toList(),
+                acked = rs.filterValues { it }.keys,
+                read = reads[hex].orEmpty().toSet(),
+                displayed = hex in displayed,
+            )
+        }
+    }
+
+    override fun markDisplayed(msgIds: List<ByteArray>) {
+        synchronized(lock) { msgIds.forEach { displayed += it.toHex() } }
     }
 
     fun messages(): List<StoredMessage> = synchronized(lock) { messages.values.toList() }

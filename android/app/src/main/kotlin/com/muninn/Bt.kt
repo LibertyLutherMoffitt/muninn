@@ -40,3 +40,13 @@ class Bt(ctx: Context) {
         adapter?.cancelDiscovery()
     }
 }
+
+/** A Bluetooth RFCOMM socket as the [Mesh] sees a link. */
+class BtLink(private val socket: BluetoothSocket) : MeshLink {
+    override val input = socket.inputStream!!
+    override val output = socket.outputStream!!
+
+    override fun close() {
+        runCatching { socket.close() }
+    }
+}

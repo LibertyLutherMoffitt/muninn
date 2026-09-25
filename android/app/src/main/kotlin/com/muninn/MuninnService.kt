@@ -1,16 +1,16 @@
 package com.muninn
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothServerSocket
-import android.bluetooth.BluetoothSocket
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.IBinder
 import android.util.Log
-import java.util.Collections
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,16 +22,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Foreground service that owns the Bluetooth radio:
- *   - opens an RFCOMM listening socket on the Muninn UUID
+ * Foreground service that owns the Bluetooth radio and feeds the [Mesh]:
+ *   - listens for inbound RFCOMM connections on the Muninn UUID
  *   - runs its own inquiry, so peers are found with the app in the background
  *   - dials whatever [DialScheduler] says is worth dialling
- *   - hands each accepted/connected socket to a PeerSession
+ *   - hands every connected socket to the mesh, which does the rest —
+ *     handshake, routing, relaying for others, retries
  *
- * Discovery lives here rather than in the activity on purpose: a peer who sits
- * down near you has to be picked up with the screen off, which is the whole
- * point of the app. The pairing sheet in the UI is now a manual fallback for
- * when SDP is uncooperative, not the only way in.
+ * The radio follows Bluetooth itself: turn Bluetooth (or airplane mode) off
+ * and back on mid-flight and listening, scanning and dialling all resume.
+ * Nothing is lost while it is off; the mesh keeps every unsent message.
  */
 class MuninnService : Service() {
 
@@ -39,15 +39,23 @@ class MuninnService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private lateinit var bt: Bt
-    private lateinit var identity: Identity.Loaded
+    private lateinit var mesh: Mesh
     private lateinit var discovery: BtDiscovery
     private val scheduler = DialScheduler()
     private lateinit var notifier: Notifier
-    private var serverSocket: BluetoothServerSocket? = null
-    private var acceptJob: Job? = null
-    private var connectJob: Job? = null
 
-    private val sessions = Collections.synchronizedSet(mutableSetOf<PeerSession>())
+    private val radioLock = Any()
+    private var radioJobs: List<Job> = emptyList()
+    @Volatile private var serverSocket: BluetoothServerSocket? = null
+
+    private val bluetoothState = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_ON -> startRadio()
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> stopRadio()
+            }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -55,181 +63,236 @@ class MuninnService : Service() {
         super.onCreate()
         notifier = Notifier(this)
         notifier.ensureChannels()
-        startForeground(Notifier.RADIO_ID, notifier.radioNotification("starting…"))
-        ChatRepository.onConversationRead = { notifier.clearAll() }
-        watchArrivals()
+        startForeground(Notifier.RADIO_ID, notifier.radioNotification("Starting…"))
 
         bt = Bt(this)
-        identity = Identity.load(this)
+        mesh = AppGraph.mesh(this)
         discovery = BtDiscovery(this)
         scheduler.policy = Settings.scanPolicy(this)
-        ChatRepository.book.knownPeers().forEach(scheduler::markPeer)
-        KnownPeers.load(this).forEach(scheduler::markPeer)
-        Log.i(tag, "wireMac=${identity.wireMacStr} pubkey=${identity.pubkey.toHex8()}…")
+        ChatRepository.onConversationRead = { conv -> notifier.clear(conv) }
+        Log.i(tag, "wire id ${mesh.localId}")
 
-        if (!bt.isReady) {
-            Log.w(tag, "Bluetooth not enabled; service will idle")
-            notifier.updateRadio("Bluetooth is off")
-            return
-        }
-        discovery.start()
-        watchDiscoveries()
-        startAcceptLoop()
-        startConnectLoop()
-        notifier.updateRadio(radioStatus())
+        watchArrivals()
+        startMaintenance()
+        ContextCompat.registerReceiver(
+            this,
+            bluetoothState,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        if (bt.isReady) startRadio() else notifier.updateRadio(radioStatus())
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The activity restarts the service after a settings change; apply it
+        // now rather than whenever the process next restarts.
+        scheduler.policy = Settings.scanPolicy(this)
+        mesh.setDisplayName(AppGraph.displayName(this))
+        if (bt.isReady) startRadio()
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         Log.i(tag, "stopping")
-        runCatching { discovery.stop() }
-        runCatching { serverSocket?.close() }
-        synchronized(sessions) {
-            sessions.forEach { it.stop() }
-            sessions.clear()
-        }
+        runCatching { unregisterReceiver(bluetoothState) }
+        stopRadio()
         scope.cancel()
         super.onDestroy()
     }
 
-    private fun startAcceptLoop() {
-        acceptJob = scope.launch(Dispatchers.IO) {
+    // --- Radio on / off ---
+
+    private fun startRadio() {
+        synchronized(radioLock) {
+            if (radioJobs.any { it.isActive }) return
+            Log.i(tag, "radio on")
+            runCatching { discovery.start() }
+            radioJobs = listOf(watchDiscoveries(), acceptLoop(), connectLoop())
+        }
+        notifier.updateRadio(radioStatus())
+    }
+
+    private fun stopRadio() {
+        synchronized(radioLock) {
+            if (radioJobs.isEmpty()) return
+            Log.i(tag, "radio off")
+            radioJobs.forEach { it.cancel() }
+            radioJobs = emptyList()
+            runCatching { serverSocket?.close() }
+            serverSocket = null
+            runCatching { discovery.stop() }
+        }
+        mesh.disconnectAll()
+        ChatRepository.refresh()
+        notifier.updateRadio(radioStatus())
+    }
+
+    // --- Loops ---
+
+    /** Accept inbound connections. Re-listens if the server socket dies. */
+    private fun acceptLoop(): Job = scope.launch(Dispatchers.IO) {
+        while (isActive) {
             val server = try {
                 bt.listen().also { serverSocket = it }
             } catch (e: Throwable) {
-                Log.e(tag, "listen() failed: ${e.message}")
-                return@launch
+                Log.w(tag, "listen() failed: ${e.message}; retrying")
+                delay(2_000)
+                continue
             }
-            Log.i(tag, "listening for inbound RFCOMM connections")
             while (isActive) {
                 val sock = try {
-                    server.accept() // blocking
+                    server.accept()
                 } catch (e: Throwable) {
                     Log.w(tag, "accept() ended: ${e.message}")
                     break
                 }
-                Log.i(tag, "accepted connection from ${sock.remoteDevice.address}")
-                spawnSession(sock)
+                val address = sock.remoteDevice.address
+                // The handshake blocks, so run it off the accept loop.
+                launch { mesh.attach(BtLink(sock), address, outbound = false) }
             }
+            runCatching { server.close() }
+            delay(1_000)
         }
     }
 
     /**
-     * Feed every inquiry result to the scheduler.
+     * Feed every inquiry result to the scheduler and the presence book.
      *
      * `muninn` means SDP confirmed the service — a hint that promotes the
      * device to a peer. Everything else is a candidate to probe, because
      * Android's SDP cache frequently never resolves for a device we have not
      * connected to, and a blind dial is the only sure test.
      */
+    private fun watchDiscoveries(): Job = scope.launch {
+        discovery.devices.collect { devices ->
+            val now = System.currentTimeMillis()
+            for (device in devices) {
+                scheduler.saw(device.address, now, isPeer = device.muninn)
+                ChatRepository.book.recordSighting(device.address, device.rssi, now, muninn = device.muninn)
+            }
+            ChatRepository.refresh()
+        }
+    }
+
+    private fun connectLoop(): Job = scope.launch(Dispatchers.IO) {
+        var lastInquiry = 0L
+        while (isActive) {
+            val policy = scheduler.policy
+            val now = System.currentTimeMillis()
+
+            // Peers we can reach by radio address stay dial-worthy whether or
+            // not this inquiry saw them; inquiry misses are routine.
+            dialableAddresses().forEach(scheduler::markPeer)
+
+            if (now - lastInquiry >= policy.inquiryIntervalMs) {
+                lastInquiry = now
+                runCatching { discovery.scan() }
+            }
+
+            val plan = scheduler.plan(now, mesh::isConnectedTransport)
+            for (addr in plan.peers) {
+                if (!isActive) break
+                dial(addr, probe = false)
+            }
+            for (addr in plan.probes) {
+                if (!isActive) break
+                dial(addr, probe = true)
+            }
+            delay(policy.dialIntervalMs)
+        }
+    }
+
+    /** Housekeeping: relay retries, and keeping the ongoing notice truthful. */
+    private fun startMaintenance() = scope.launch {
+        while (isActive) {
+            runCatching { mesh.maintain() }
+            ChatRepository.refresh()
+            notifier.updateRadio(radioStatus())
+            delay(MAINTAIN_MS)
+        }
+    }
+
     /**
-     * Raise a notification for each arriving message, unless the user is
-     * already looking at the conversation.
+     * Radio addresses worth dialling: ones we have connected to before, the
+     * radio addresses behind known phones, and known desktop peers (whose wire
+     * id *is* their radio address). A phone's wire id is random and cannot be
+     * dialled, so it is left out rather than burning a slow connect on it.
      */
-    private fun watchArrivals() {
-        scope.launch {
-            ChatRepository.arrivals.collect { message ->
-                if (!ChatRepository.uiVisible) notifier.notifyMessage(message)
-            }
-        }
-    }
-
-    private fun watchDiscoveries() {
-        scope.launch {
-            discovery.devices.collect { devices ->
-                val now = System.currentTimeMillis()
-                for (device in devices) {
-                    scheduler.saw(device.address, now, isPeer = device.muninn)
-                    ChatRepository.book.recordSighting(device.address, device.rssi, now)
-                }
-                ChatRepository.refreshPresence()
-            }
-        }
-    }
-
-    private fun startConnectLoop() {
-        connectJob = scope.launch(Dispatchers.IO) {
-            var lastInquiry = 0L
-            while (isActive) {
-                val policy = scheduler.policy
-                val now = System.currentTimeMillis()
-
-                // Peers we already hold keys for stay dial-worthy whether or
-                // not this inquiry saw them; inquiry misses are routine.
-                KnownPeers.load(this@MuninnService).forEach(scheduler::markPeer)
-                ChatRepository.book.knownPeers().forEach(scheduler::markPeer)
-                bt.bondedDevices()
-                    .filter { deviceAdvertisesMuninn(it) }
-                    .forEach { scheduler.markPeer(it.address) }
-
-                if (now - lastInquiry >= policy.inquiryIntervalMs) {
-                    lastInquiry = now
-                    runCatching { discovery.scan() }
-                }
-
-                val plan = scheduler.plan(now, ::alreadyConnected)
-                for (addr in plan.peers) {
-                    if (!isActive) break
-                    dial(addr, probe = false)
-                }
-                for (addr in plan.probes) {
-                    if (!isActive) break
-                    dial(addr, probe = true)
-                }
-                ChatRepository.refreshPresence()
-                notifier.updateRadio(radioStatus())
-                delay(policy.dialIntervalMs)
-            }
-        }
+    private fun dialableAddresses(): Set<String> {
+        val out = HashSet<String>()
+        out += KnownPeers.load(this)
+        out += ChatRepository.book.aliases().keys
+        out += ChatRepository.book.knownPeers().filter(::isRadioAddress)
+        bt.bondedDevices().filter(::advertisesMuninn).forEach { out += it.address.uppercase() }
+        return out
     }
 
     private suspend fun dial(address: String, probe: Boolean) {
         val device = bt.remoteDevice(address) ?: return
         val now = System.currentTimeMillis()
-        val sock: BluetoothSocket = try {
+        val sock = try {
             withContext(Dispatchers.IO) { bt.connect(device) }
         } catch (e: Throwable) {
             scheduler.failed(address, now, e.message ?: "connect failed")
-            // A headset refusing us is not news; only report a device we
-            // believe is a peer as unreachable.
-            if (!probe) {
-                ChatRepository.book.recordDialFailure(address, e.message ?: "connect failed", now)
-            }
+            // A headset refusing us is not news; only a device we believe is
+            // a peer counts as "nearby, can't connect".
+            if (!probe) ChatRepository.book.recordDialFailure(address, e.message ?: "connect failed", now)
             return
         }
-        Log.i(tag, "connected to $address")
-        scheduler.succeeded(address)
-        // Remember it so we dial it directly next time without waiting on SDP.
-        KnownPeers.add(this, address)
-        spawnSession(sock)
+        if (withContext(Dispatchers.IO) { mesh.attach(BtLink(sock), address, outbound = true) }) {
+            scheduler.succeeded(address)
+            // Remember it so we dial it directly next time without waiting on SDP.
+            KnownPeers.add(this, address)
+        } else {
+            scheduler.failed(address, now, "handshake failed")
+            if (!probe) ChatRepository.book.recordDialFailure(address, "handshake failed", now)
+        }
+    }
+
+    // --- Notifications ---
+
+    /**
+     * Raise a notification for each arriving message, unless the user is
+     * already looking at that conversation (or at the list, where the unread
+     * badge says the same thing without the buzz).
+     */
+    private fun watchArrivals() = scope.launch {
+        ChatRepository.arrivals.collect { message ->
+            val open = ChatRepository.openConversation
+            val watching = ChatRepository.uiVisible && (open == null || open == message.conv)
+            if (!watching) notifier.notifyMessage(message)
+        }
     }
 
     /** One line describing what the radio is doing, for the ongoing notice. */
     private fun radioStatus(): String {
-        val connected = ChatRepository.book.connected().size
-        val stuck = ChatRepository.book.nearbyUnreachable().size
-        return when {
-            connected == 1 -> "Connected to 1 peer"
-            connected > 1 -> "Connected to $connected peers"
-            stuck > 0 -> "$stuck nearby, none connecting"
-            else -> "Looking for peers nearby"
+        if (!bt.isReady) {
+            val waiting = mesh.pendingDeliveries()
+            return if (waiting > 0) "Bluetooth is off · $waiting waiting to send" else "Bluetooth is off"
         }
+        val statuses = ChatRepository.presence.value
+        val connected = statuses.count { it.state == PeerBook.State.CONNECTED }
+        val relayed = statuses.count { it.state == PeerBook.State.RELAY }
+        val stuck = statuses.count { it.unreachableNearby }
+        val waiting = mesh.pendingDeliveries()
+        val parts = buildList {
+            when {
+                connected == 1 -> add("Connected to 1 person")
+                connected > 1 -> add("Connected to $connected people")
+                stuck > 0 -> add("$stuck nearby, not connecting")
+                else -> add("Looking for people nearby")
+            }
+            if (relayed > 0) add("$relayed via relay")
+            if (waiting > 0) add("$waiting waiting to send")
+        }
+        return parts.joinToString(" · ")
     }
 
-    /** Change how hard to hunt, and remember the choice. */
-    fun setScanPolicy(policy: ScanPolicy) {
-        Settings.setScanPolicy(this, policy)
-        scheduler.policy = policy
-    }
-
-    private fun deviceAdvertisesMuninn(device: BluetoothDevice): Boolean {
+    private fun advertisesMuninn(device: BluetoothDevice): Boolean {
         val uuids = device.uuids
-        // Empty/unknown cache: Android hasn't browsed SDP for this bonded device
-        // yet (or cached an empty result from before the peer was up). Kick an
-        // async fetch so the next round learns the real UUIDs, but do NOT dial
-        // this round — dialing blindly would RFCOMM-connect to every bonded
-        // non-Muninn device (each a long, blocking connect) and stall the loop.
+        // Empty cache: Android hasn't browsed SDP for this bonded device yet.
+        // Kick an async fetch so a later round learns the real UUIDs, but do
+        // not dial blindly now — each non-Muninn device is a slow connect.
         if (uuids.isNullOrEmpty()) {
             runCatching { device.fetchUuidsWithSdp() }
             return false
@@ -237,54 +300,15 @@ class MuninnService : Service() {
         return uuids.any { it.uuid == MUNINN_RFCOMM_UUID }
     }
 
-    private fun alreadyConnected(address: String): Boolean {
-        // No peer registry yet — best effort guard against re-dialing the same
-        // MAC. Replaced by ConnectionManager in milestone 4.
-        synchronized(sessions) {
-            return sessions.any { it.remoteAddress.equals(address, ignoreCase = true) }
-        }
+    companion object {
+        private const val MAINTAIN_MS = 5_000L
+
+        /**
+         * A real radio address, as opposed to a phone's random wire id. Wire
+         * ids set the locally-administered bit (Identity.kt); Bluetooth
+         * Classic addresses are IEEE-assigned and never do.
+         */
+        fun isRadioAddress(id: String): Boolean =
+            runCatching { (macToBytes(id)[0].toInt() and 0x02) == 0 }.getOrDefault(false)
     }
-
-    private fun spawnSession(sock: BluetoothSocket) {
-        val addr = sock.remoteDevice.address
-        synchronized(sessions) {
-            // Dedup the accept-loop vs connect-loop race: if a session to this
-            // peer already exists, drop the newcomer instead of stacking two
-            // sockets (which makes both ends churn through teardown).
-            if (sessions.any { it.remoteAddress == addr }) {
-                Log.i(tag, "already have a session to $addr; closing duplicate socket")
-                runCatching { sock.close() }
-                return
-            }
-        }
-        val session = PeerSession(
-            sock,
-            identity,
-            ChatRepository.book,
-            scope,
-            displayName = deviceDisplayName(),
-            onClosed = {
-                sessions.remove(it)
-                ChatRepository.refreshPresence()
-            },
-        )
-        sessions.add(session)
-        session.start()
-    }
-
-    // --- notification ---
-
-    /**
-     * The name peers see. The Bluetooth adapter name is what the user already
-     * chose for this phone, so it needs no separate setting.
-     */
-    private fun deviceDisplayName(): String =
-        runCatching { android.provider.Settings.Global.getString(contentResolver, "device_name") }
-            .getOrNull()
-            ?.takeIf { it.isNotBlank() }
-            ?: android.os.Build.MODEL
-            ?: ""
 }
-
-private fun ByteArray.toHex8(): String =
-    take(8).joinToString("") { "%02x".format(it.toInt() and 0xFF) }

@@ -12,6 +12,7 @@ import android.content.Context
 object Settings {
     private const val PREFS = "muninn.settings"
     private const val KEY_SCAN_POLICY = "scan_policy"
+    private const val KEY_DISPLAY_NAME = "display_name"
 
     fun scanPolicy(ctx: Context): ScanPolicy {
         val stored = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -23,6 +24,17 @@ object Settings {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_SCAN_POLICY, policy.key)
+            .apply()
+    }
+
+    /** The name the user chose for themselves; empty = use the device name. */
+    fun displayName(ctx: Context): String =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_DISPLAY_NAME, null) ?: ""
+
+    fun setDisplayName(ctx: Context, name: String) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DISPLAY_NAME, name)
             .apply()
     }
 }

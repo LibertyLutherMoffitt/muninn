@@ -1,5 +1,6 @@
 package com.muninn.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,6 +16,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -33,13 +36,14 @@ import com.muninn.PeerBook
  * in exactly the situation where you are checking whether the app works.
  */
 @Composable
-fun PeersSheet(statuses: List<PeerBook.PeerStatus>, modifier: Modifier = Modifier) {
+fun PeersSheet(onOpen: (String) -> Unit, modifier: Modifier = Modifier) {
+    val statuses by ChatRepository.presence.collectAsState()
     val ordered = statuses.sortedWith(
         compareBy({ it.state.ordinal }, { ChatRepository.displayName(it.wireId) }),
     )
     Column(modifier.navigationBarsPadding().padding(bottom = 12.dp)) {
         Text(
-            "Peers",
+            "Nearby",
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 4.dp),
         )
@@ -66,7 +70,9 @@ fun PeersSheet(statuses: List<PeerBook.PeerStatus>, modifier: Modifier = Modifie
             }
         } else {
             LazyColumn {
-                items(ordered, key = { it.wireId }) { status -> PeerRow(status) }
+                items(ordered, key = { it.wireId }) { status ->
+                    PeerRow(status, onClick = { onOpen(status.wireId) })
+                }
             }
         }
     }
@@ -74,9 +80,11 @@ fun PeersSheet(statuses: List<PeerBook.PeerStatus>, modifier: Modifier = Modifie
 
 private fun summarise(statuses: List<PeerBook.PeerStatus>): String {
     val connected = statuses.count { it.state == PeerBook.State.CONNECTED }
+    val relayed = statuses.count { it.state == PeerBook.State.RELAY }
     val stuck = statuses.count { it.unreachableNearby }
     return when {
         connected > 0 && stuck > 0 -> "$connected connected · $stuck nearby but unreachable"
+        connected > 0 && relayed > 0 -> "$connected connected · $relayed reachable through them"
         connected > 0 -> "$connected connected"
         stuck > 0 -> "$stuck nearby, none connecting"
         statuses.isEmpty() -> "nothing found yet"
@@ -85,10 +93,13 @@ private fun summarise(statuses: List<PeerBook.PeerStatus>): String {
 }
 
 @Composable
-private fun PeerRow(status: PeerBook.PeerStatus) {
+private fun PeerRow(status: PeerBook.PeerStatus, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         PresenceDot(status.state, status.unreachableNearby)
         Spacer(Modifier.width(4.dp))
@@ -102,7 +113,7 @@ private fun PeerRow(status: PeerBook.PeerStatus) {
             )
             Spacer(Modifier.height(1.dp))
             Text(
-                status.describe(),
+                presenceText(status),
                 style = MaterialTheme.typography.labelSmall,
                 color = if (status.unreachableNearby) {
                     MaterialTheme.colorScheme.error

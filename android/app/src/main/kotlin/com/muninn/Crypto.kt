@@ -38,7 +38,8 @@ object Crypto {
     }
 
     fun decrypt(noncePlusCt: ByteArray, theirPub: ByteArray, mySecret: ByteArray): ByteArray {
-        require(noncePlusCt.size > NONCE_BYTES + 16) { "ciphertext too short" }
+        // >=, not >: an empty message seals to exactly nonce + tag.
+        if (noncePlusCt.size < NONCE_BYTES + 16) throw SecurityException("ciphertext too short")
         val nonce = noncePlusCt.copyOfRange(0, NONCE_BYTES)
         val ct = noncePlusCt.copyOfRange(NONCE_BYTES, noncePlusCt.size)
         val pt = ByteArray(ct.size - 16)

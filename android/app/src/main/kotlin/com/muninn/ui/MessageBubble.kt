@@ -37,6 +37,8 @@ fun MessageBubble(
     msg: ChatRepository.Message,
     startsRun: Boolean = true,
     senderName: String = "",
+    /** Outgoing, and nobody it is for can be reached yet. */
+    waiting: Boolean = false,
 ) {
     val outgoing = msg.outgoing
     val bubbleColor =
@@ -78,11 +80,26 @@ fun MessageBubble(
             Text(msg.text, color = textColor, style = MaterialTheme.typography.bodyMedium)
         }
         Text(
-            if (outgoing) "${formatTime(msg.timestamp)}  ${msg.ack.tick()}"
+            if (outgoing) "${formatTime(msg.timestamp)}  ${deliveryLabel(msg, waiting)}"
             else formatTime(msg.timestamp),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
         )
+    }
+}
+
+/**
+ * "· " sent, "✓" delivered, "✓✓" read; "✓ 2/3" part-way through a group;
+ * "waiting" when nobody it is for can be reached yet — so a message that has
+ * not left the phone never looks like one that has.
+ */
+private fun deliveryLabel(msg: ChatRepository.Message, waiting: Boolean): String {
+    if (waiting) return "\u29D7 waiting"
+    val partial = msg.deliveredOf
+    return if (partial != null && msg.ack != ChatRepository.Ack.READ && partial.first < partial.second) {
+        if (partial.first == 0) msg.ack.tick() else "\u2713 ${partial.first}/${partial.second}"
+    } else {
+        msg.ack.tick()
     }
 }

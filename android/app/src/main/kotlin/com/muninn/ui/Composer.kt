@@ -48,6 +48,7 @@ fun Composer(
     enabled: Boolean,
     onSend: () -> Unit,
     modifier: Modifier = Modifier,
+    placeholder: String = "Message",
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, modifier = modifier.fillMaxWidth()) {
         Row(
@@ -62,7 +63,7 @@ fun Composer(
                 onValueChange = onDraftChange,
                 modifier = Modifier.weight(1f),
                 enabled = enabled,
-                placeholder = { Text(if (enabled) "Message" else "Connect a device to chat") },
+                placeholder = { Text(placeholder, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 maxLines = 5,
                 shape = RoundedCornerShape(24.dp),
                 colors = TextFieldDefaults.colors(
