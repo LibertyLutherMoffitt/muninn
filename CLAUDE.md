@@ -44,7 +44,12 @@ adb emu kill
 
 Xvfb has no usable GLX, so `gui-headless` sets `QT_QUICK_BACKEND=software`.
 The headless GUI still owns the host's real BT adapter when it is the writer.
-Emulator Bluetooth is virtual and can't reach the host adapter.
+Emulator Bluetooth is virtual (netsim) and can't reach the host adapter, but
+emulators on the same host share it: `MUNINN_AVD=b nix run .#android-emu --
+-port 5556` boots a second independent device (use `adb -s emulator-5556`).
+Make the target discoverable (`am start -a
+android.bluetooth.adapter.action.REQUEST_DISCOVERABLE`, tap Allow), then
+pair/chat between them over real RFCOMM.
 
 ## Intentional Decisions (don't "fix" these)
 

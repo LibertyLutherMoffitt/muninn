@@ -47,7 +47,8 @@
           }).androidsdk;
 
         # Headless KVM emulator. AVD lives in $XDG_DATA_HOME/muninn-avd so it
-        # survives restarts. Drive it with adb (screencap / input).
+        # survives restarts. Drive it with adb (screencap / input). Set
+        # MUNINN_AVD=b (etc.) for extra independent devices on netsim BT.
         android-emu = pkgs.writeShellApplication {
           name = "android-emu";
           runtimeInputs = [androidEmuSdk];
@@ -57,7 +58,7 @@
             export ANDROID_USER_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}/muninn-avd"
             export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
             mkdir -p "$ANDROID_AVD_HOME"
-            name=muninn
+            name="muninn''${MUNINN_AVD:+-$MUNINN_AVD}"
             if [ ! -d "$ANDROID_AVD_HOME/$name.avd" ]; then
               echo no | avdmanager create avd -n "$name" -d pixel_6 \
                 -k "system-images;android-34;google_apis;x86_64" --force
