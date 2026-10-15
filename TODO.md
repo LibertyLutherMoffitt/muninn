@@ -92,69 +92,102 @@ Android side, will lose or stall messages silently.
 ## 2. Plan
 
 ### 2.1 Test infrastructure (P0)
-- [ ] `muninn.bt.sim` transport + `muninn-simhub` radio simulator:
+- [x] `muninn.bt.sim` transport + `muninn-simhub` radio simulator:
   positions (seat rows), range-based links, flaky zone (drops/slow connects),
   latency + bandwidth caps, decoy devices (plane noise), scripted partitions.
-- [ ] Transport abstraction so the same core runs on bluez / winrt / sim.
-- [ ] `Node` class (storage + group store + conn manager + acceptor + dialer) shared
+- [x] Transport abstraction so the same core runs on bluez / winrt / sim.
+- [x] `Node` class (storage + group store + conn manager + acceptor + dialer) shared
   by CLI, GUI, headless bots and tests.
-- [ ] Headless bot (`muninn-bot`) with JSON control socket for scripted scenarios.
-- [ ] pytest suite: protocol, storage, routing, scenarios over the sim.
-- [ ] Kotlin core as a pure-JVM module + JVM node that joins the same sim hub →
+- [x] Headless bot (`muninn-bot`) with JSON control socket for scripted scenarios.
+- [x] pytest suite: protocol, storage, routing, scenarios over the sim.
+- [x] Kotlin core as a pure-JVM module + JVM node that joins the same sim hub →
   cross-language interop tests without emulators.
-- [ ] Android app sim transport (debug) → emulators join the sim hub (10.0.2.2).
+- [x] Android app sim transport (debug) → emulators join the sim hub (10.0.2.2).
 - [ ] Real-BT emulator↔emulator via netsim (done manually; script it).
 
 ### 2.2 Protocol v2 (P0) — additive, old clients ignore unknown frame types
-- [ ] `PING`/`PONG` keepalive + dead-link detection.
+- [x] `PING`/`PONG` keepalive + dead-link detection.
 - [ ] `CAPS` frame (version + feature bits).
-- [ ] `ROUTES` distance-vector frame; route by next hop; expiring routes.
-- [ ] Rich envelope inside encrypted body: text+reply, reaction, edit, delete,
+- [x] `ROUTES` distance-vector frame; route by next hop; expiring routes.
+- [x] Rich envelope inside encrypted body: text+reply, reaction, edit, delete,
   file manifest, file chunk, file request, group info (reliable), app/game event.
-- [ ] `DATAGRAM` frame: encrypted, unreliable, TTL, for real-time games / typing.
+- [x] `DATAGRAM` frame: encrypted, unreliable, TTL, for real-time games / typing.
 - [ ] PROTOCOL.md updated.
 
 ### 2.3 Core reliability (P0, both clients)
-- [ ] Per-peer writer thread + priority queue (control > chat > bulk).
-- [ ] Periodic retransmit with backoff for every unacked (any route).
-- [ ] Expiring dedup sets (relay / ack / read).
-- [ ] Store-and-forward relay queue, bounded, flushed when a route appears.
-- [ ] Roster gossip multi-hop.
-- [ ] Reliable group info + member updates (add / leave / rename).
-- [ ] Persist peer transport addresses; redial known peers without discovery.
-- [ ] Deterministic duplicate-link tiebreak.
-- [ ] Robust frame decoding.
+- [x] Per-peer writer thread + priority queue (control > chat > bulk).
+- [x] Periodic retransmit with backoff for every unacked (any route).
+- [x] Expiring dedup sets (relay / ack / read).
+- [x] Store-and-forward relay queue, bounded, flushed when a route appears.
+- [x] Roster gossip multi-hop.
+- [x] Reliable group info + member updates (add / leave / rename).
+- [x] Persist peer transport addresses; redial known peers without discovery.
+- [x] Deterministic duplicate-link tiebreak.
+- [x] Robust frame decoding.
 
 ### 2.4 Features (P1–P2)
-- [ ] Replies, reactions, edit/delete, emoji shortcodes + picker (GUI).
-- [ ] Files / images / GIFs: chunked, resumable, relay-friendly, sha256 verified.
-- [ ] Typing indicators.
-- [ ] Android: conversation list, groups, nick, ticks, notifications w/ reply,
+- [x] Replies, reactions, edit/delete, emoji shortcodes + picker (GUI).
+- [x] Files / images / GIFs: chunked, resumable, relay-friendly, sha256 verified.
+- [x] Typing indicators.
+- [x] Android: conversation list, groups, nick, ticks, notifications w/ reply,
   battery-optimisation prompt, boot start, BT on/off handling.
-- [ ] GUI: read receipts, pending/failed states, route info, images inline.
+- [x] GUI: read receipts, pending/failed states, route info, images inline.
 
 ### 2.5 Games (P2–P3)
-- [ ] Game session API over reliable app events + datagrams.
+- [x] Game session API over reliable app events + datagrams.
 - [ ] Chess, checkers (both clients).
 - [ ] Real-time demo + latency measurement.
 
 ### 2.6 User requests (2026-10-15)
 - [ ] **Tap-to-pair (Android↔Android)**: NFC tap exchanges node id + BT address
   (HCE on one side, reader mode on the other), then auto-dial. Fallback: QR code.
-- [ ] **Send game code over Muninn**: games are self-contained JS plugins, so a
+- [x] **Send game code over Muninn**: games are self-contained JS plugins, so a
   game can be shared as a file and installed by the receiver (sandboxed).
-- [ ] **Offline GIFs**: bundled GIF/sticker pack that works with no internet,
+- [x] **Offline GIFs**: bundled GIF/sticker pack that works with no internet,
   plus "save received GIF" to a local favourites library.
 - [ ] **Good BT citizen audit**: never pair with / dial / prompt devices that
   don't advertise the Muninn UUID; pairing agent must not accept arbitrary
   devices or authorize non-Muninn profiles; no repeated inquiry storms;
   document guarantees.
 - [ ] Windows parity (WinRT transport on the shared core; notifications).
-- [ ] Game API generic (any turn-based game; real-time when latency allows).
-- [ ] Explicit flapping-link tests (weak links several rows apart, on/off).
+- [x] Game API generic (any turn-based game; real-time when latency allows).
+- [x] Explicit flapping-link tests (weak links several rows apart, on/off).
+
+### 2.7 Backlog (only after everything else is done & polished)
+- [ ] **Linked devices ("same person")** — phone + laptop act as one contact.
+  Sketch:
+  - Each device keeps its own node id + keypair. A *device set* record
+    `{account: <primary node id>, devices: [ids], v, sig}` signed by every
+    member's key (cross-signature = consent) is created by a LINK flow:
+    device A shows a short code / QR, device B sends `LINK_REQ` with the code,
+    A's user approves, both sign the record.
+  - The record gossips in ROSTER (new field). Everyone then treats a DM with
+    any member as a DM with the *account*: `dm:<account>` fans out to every
+    device (like a tiny group); delivered = any device ACKed; read = any read.
+  - Sibling devices mirror each other: own sent messages (`K_MIRROR`), read
+    marks, reactions, group membership, game moves — so switching devices
+    mid-conversation is seamless and others never notice.
+  - On link, the new device pulls history from the sibling via the existing
+    chunked file transfer (DB export), then stays in sync incrementally.
+  - Unlink: re-signed record without the device (old device can't read new
+    messages since senders stop encrypting to it).
+- [ ] Terminal client as a real TUI (comparable usability to the GUI).
 
 ---
 
 ## 3. Progress log
 
 (newest last)
+
+- **11e8e76** Python: protocol v2 (HELLO/PING/ROUTES/ROSTER, routed PACKET+ACK),
+  Mesh core, Node, sim hub + SimLab, 18 sim tests incl. chaos/flapping/soak,
+  GUI rich chat (replies, reactions, edit/delete, emoji, images/GIFs, files,
+  games), bot.
+- **4b13df3** Kotlin core (pure-JVM, TweetNaCl port == PyNaCl), JVM sim node,
+  Python↔Kotlin interop tests (DM, relays both ways, mixed group, files, flaps).
+- **36ea102** Android app rewritten on the core; verified in emulator against the
+  sim hub (chat w/ bots + Qt GUI, cross-platform tic-tac-toe).
+- Next: more games (chess, checkers, connect4, reversi, real-time demo),
+  BT good-citizen audit (bluez agent), Python scan policy, Windows check,
+  Android notification/background testing, netsim real-BT test of new app,
+  NFC tap-to-pair, docs (PROTOCOL/DESIGN/README), CLI polish.
