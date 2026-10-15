@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "muninn"
-include(":app")
+include(":app", ":core")

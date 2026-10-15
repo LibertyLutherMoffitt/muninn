@@ -1,0 +1,199 @@
+"""Python ↔ Kotlin (JVM build of the Android core) interop over the sim hub.
+
+Requires `./gradlew :core:installDist` (android/core/build/install/core/bin/core).
+"""
+
+import hashlib
+import json
+import os
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+from muninn.mesh import dm_conv, group_conv
+from muninn.sim.lab import free_port, wait_until
+
+JVM = Path(__file__).resolve().parents[2] / "android/core/build/install/core/bin/core"
+pytestmark = pytest.mark.skipif(not JVM.exists(), reason="JVM core node not built")
+
+
+class JvmNode:
+    def __init__(self, lab, name, pos, echo=False):
+        self.port = free_port()
+        args = [
+            str(JVM),
+            "--hub",
+            lab.addr,
+            "--name",
+            name,
+            "--pos",
+            f"{pos[0]},{pos[1]}",
+            "--control",
+            str(self.port),
+            "--data",
+            str(lab.tmp / f"jvm-{name}"),
+        ]
+        if echo:
+            args.append("--echo")
+        self.proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        self.sock = None
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                self.sock = socket.create_connection(("127.0.0.1", self.port))
+                break
+            except OSError:
+                time.sleep(0.2)
+        assert self.sock, "jvm node control port"
+        self.rf = self.sock.makefile("r")
+        self.node_id = self("status")["node"]
+
+    def __call__(self, cmd, **kw):
+        self.sock.sendall((json.dumps({"cmd": cmd, **kw}) + "\n").encode())
+        res = json.loads(self.rf.readline())
+        if not res["ok"]:
+            raise RuntimeError(res["error"])
+        return res["result"]
+
+    def texts(self, conv):
+        return [
+            m["text"] for m in self("history", conv=conv, n=1000) if m["kind"] == "text"
+        ]
+
+    def reachable(self, node_id):
+        return node_id in self("status")["reachable"]
+
+    def stop(self):
+        self.proc.kill()
+        self.proc.wait()
+
+
+@pytest.fixture
+def jvm(lab):
+    nodes = []
+
+    def make(name, pos, **kw):
+        n = JvmNode(lab, name, pos, **kw)
+        nodes.append(n)
+        return n
+
+    yield make
+    for n in nodes:
+        n.stop()
+
+
+def py_texts(node, conv):
+    return [m.text for m in node.storage.load_history(conv, 1000) if m.kind == "text"]
+
+
+def test_dm_both_ways(lab, jvm):
+    a = lab.node("py", (0, 0))
+    k = jvm("kt", (1, 0))
+    wait_until(lambda: k.node_id in a.mesh.connected(), 30)
+    mid = a.mesh.send_text(dm_conv(k.node_id), "hi kotlin 🐍→☕")
+    wait_until(lambda: "hi kotlin 🐍→☕" in k.texts(dm_conv(a.node_id)), 15)
+    wait_until(
+        lambda: a.storage.get_message(mid).state == "read", 15
+    )  # kt bot marks read
+    k("send", to=a.node_id, text="hi python")
+    wait_until(lambda: "hi python" in py_texts(a, dm_conv(k.node_id)), 15)
+    assert a.mesh.display_name(k.node_id) == "kt"
+
+
+def test_relay_through_kotlin(lab, jvm):
+    a = lab.node("a", (0, 0))
+    jvm("relay", (5, 0))
+    c = lab.node("c", (10, 0))
+    wait_until(lambda: a.mesh.reachable(c.node_id), 40)
+    for i in range(10):
+        a.mesh.send_text(dm_conv(c.node_id), f"r{i}")
+    wait_until(lambda: len(py_texts(c, dm_conv(a.node_id))) == 10, 40)
+
+
+def test_relay_through_python_between_kotlin(lab, jvm):
+    k1 = jvm("k1", (0, 0))
+    lab.node("mid", (5, 0))
+    k2 = jvm("k2", (10, 0))
+    wait_until(lambda: k1.reachable(k2.node_id), 60)
+    for i in range(10):
+        k1("send", to=k2.node_id, text=f"k{i}")
+    wait_until(lambda: len(k2.texts(dm_conv(k1.node_id))) == 10, 40)
+    states = [m["state"] for m in k1("history", conv=dm_conv(k2.node_id))]
+    wait_until(
+        lambda: all(
+            m["state"] != "sent" for m in k1("history", conv=dm_conv(k2.node_id))
+        ),
+        30,
+    )
+    assert states
+
+
+def test_mixed_group(lab, jvm):
+    a = lab.node("a", (0, 0))
+    k = jvm("k", (1, 0))
+    c = lab.node("c", (2, 0))
+    wait_until(
+        lambda: (
+            a.mesh.reachable(k.node_id)
+            and a.mesh.reachable(c.node_id)
+            and k.reachable(c.node_id)
+        ),
+        40,
+    )
+    gid = a.mesh.create_group("mix", [k.node_id, c.node_id])
+    wait_until(lambda: "mix" in k("status")["groups"].values(), 20)
+    k("gsend", group="mix", text="kotlin in the group")
+    wait_until(lambda: "kotlin in the group" in py_texts(c, group_conv(gid)), 20)
+    a.mesh.send_text(group_conv(gid), "python too")
+    wait_until(lambda: "python too" in k.texts(group_conv(gid)), 20)
+
+
+def test_files_both_ways_with_flaps(lab, jvm):
+    a = lab.node("a", (0, 0))
+    k = jvm("k", (5, 0))
+    c = lab.node("c", (10, 0))
+    wait_until(lambda: a.mesh.reachable(c.node_id), 40)
+    data = os.urandom(300_000)
+    p = lab.tmp / "f.bin"
+    p.write_bytes(data)
+    # python -> kotlin (direct-ish) and python -> python via kotlin relay
+    a.mesh.send_file(dm_conv(k.node_id), str(p))
+    a.mesh.send_file(dm_conv(c.node_id), str(p))
+    want = hashlib.sha256(data).hexdigest()
+    wait_until(
+        lambda: any(
+            f["state"] == "complete" and f["sha256"] == want for f in k("files")
+        ),
+        120,
+    )
+    wait_until(lambda: any(f.state == "complete" for f in c.mesh.files.values()), 120)
+    # kotlin -> python
+    kp = lab.tmp / "k.bin"
+    kp.write_bytes(data[:100_000])
+    k("file", to=a.node_id, path=str(kp))
+    wait_until(
+        lambda: any(
+            f.state == "complete" and f.size == 100_000 for f in a.mesh.files.values()
+        ),
+        120,
+    )
+
+
+def test_flapping_kotlin_relay(lab, jvm):
+    a = lab.node("a", (0, 0))
+    k = jvm("k", (5, 0))
+    c = lab.node("c", (10, 0))
+    wait_until(lambda: a.mesh.reachable(c.node_id), 40)
+    kaddr = next(d["addr"] for d in lab.admin("state")["devices"] if d["name"] == "k")
+    lab.admin("flap", a=lab.addr_of("c"), b=kaddr, up=2.0, down=2.5)
+    ids = [a.mesh.send_text(dm_conv(c.node_id), f"f{i}") for i in range(20)]
+    time.sleep(10)
+    lab.admin("flap", a=lab.addr_of("c"), b=kaddr)
+    wait_until(lambda: len(py_texts(c, dm_conv(a.node_id))) == 20, 120)
+    wait_until(lambda: all(a.storage.get_message(i).state != "sent" for i in ids), 60)
+    assert k.node_id

@@ -38,3 +38,6 @@ captures/
 *.swp
 *.swo
 *~
+
+# Android core JVM build
+android/core/build/
