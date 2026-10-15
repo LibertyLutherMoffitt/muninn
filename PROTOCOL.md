@@ -1,317 +1,202 @@
-# Muninn — Wire Protocol Specification
+# Muninn — Wire Protocol v2
+
+The cross-platform contract. Python (`python/src/muninn/protocol.py`,
+`content.py`, `mesh.py`) and Kotlin (`android/core/.../Protocol.kt`,
+`Mesh.kt`) implement it independently; `python/tests/test_interop.py` runs
+both in one simulated cabin.
+
+No compatibility with v1 is kept (v1 databases are wiped on first start).
 
 ## Conventions
 
-- **Byte order:** big-endian (network order) for all multi-byte integers
-- **Text encoding:** UTF-8 for all plaintext message content
-- **MAC addresses:** 6 bytes, MSB first (e.g. `AA:BB:CC:DD:EE:FF` → `0xAA 0xBB 0xCC 0xDD 0xEE 0xFF`)
-- **UUIDs:** 16 bytes, big-endian (RFC 4122 binary representation)
+- Big-endian integers; UTF-8 text; JSON is UTF-8, compact.
+- **Node id** — 6 random bytes chosen once per install (shown as
+  `AA:BB:CC:DD:EE:FF`), first byte `xxxxxx10` (locally administered). It is
+  *not* a Bluetooth address: transports are independent of identity.
+- **Keys** — X25519 static keypair per install. Encryption is NaCl `crypto_box`
+  (X25519 + XSalsa20-Poly1305): `nonce(24) ‖ mac(16) ‖ ciphertext`.
+- Names are at most 255 bytes, cut on a UTF-8 codepoint boundary.
+- Unknown frame types and unknown body kinds are ignored; a malformed frame
+  costs that frame, never the link.
 
----
-
-## Frame Header
-
-Every frame uses the same 3-byte header:
-
-```
-[ 1 byte: type ][ 2 bytes: payload_length ][ N bytes: payload ]
-```
-
-| Field          | Size    | Type   | Notes                  |
-|----------------|---------|--------|------------------------|
-| type           | 1 byte  | uint8  | Frame type identifier  |
-| payload_length | 2 bytes | uint16 | Length of payload in bytes |
-| payload        | N bytes | raw    | Type-specific content  |
-
-Maximum payload: 65,535 bytes.
-
----
-
-## Frame Types
-
-| Type         | Value  | Direction             | Encrypted                |
-|--------------|--------|-----------------------|--------------------------|
-| Handshake    | `0x01` | Both → Both           | No                       |
-| Message      | `0x02` | Sender → Receiver     | Partially (see below)    |
-| ACK          | `0x03` | Receiver → Sender     | No                       |
-| Group Setup  | `0x04` | Creator → Members     | No (metadata only)       |
-| Read         | `0x05` | Reader → Sender       | No                       |
-| Profile      | `0x06` | Peer → Peer           | No (metadata only)       |
-| Peer Annc    | `0x07` | Peer → Peer           | No (metadata only)       |
-
----
-
-## Handshake Frame (`0x01`)
-
-Sent by both sides immediately after RFCOMM connection. No encryption (shared secret does not yet exist).
-
-**Payload:**
+## Framing
 
 ```
-[ 32 bytes: X25519 public key ]
-[  6 bytes: wire id           ]  — sender's addressing identity (see note)
+[ type u8 ][ length u16 ][ payload … ]      max payload 65 535 bytes
 ```
 
-**Wire id.** The 6-byte addressing identity used in every `sender_id` / `dest_id`
-field, ACK `from_id`, and relay route. For Linux/Windows it is the device's
-Bluetooth MAC. Android (API 31+ masks the hardware MAC from apps —
-`getAddress()` returns `02:00:00:00:00:00`) sends a stable random 6-byte id
-instead. The receiver **keys the peer by this wire id**, not by the transport
-Bluetooth address it dialed/accepted — so addressing is consistent regardless
-of platform. The transport address is retained only as a route for redialing.
+| Type | Name    | Scope      | Purpose |
+|------|---------|------------|---------|
+| 0x01 | HELLO   | link       | identity, key, name — first frame both ways |
+| 0x02 | PING    | link       | keepalive (8-byte token) |
+| 0x03 | PONG    | link       | echo of PING token (RTT) |
+| 0x04 | ROUTES  | link       | distance-vector reachability |
+| 0x05 | ROSTER  | link       | who-is-who gossip (ids, keys, names) |
+| 0x10 | PACKET  | end-to-end | encrypted body, routed by destination |
+| 0x11 | ACK     | end-to-end | delivery confirmation, routed to the sender |
 
-A 32-byte payload (no wire id) is the legacy form; the receiver falls back to
-the peer's transport Bluetooth address as its identity.
+Link frames are never forwarded. Mesh frames are forwarded hop by hop.
 
-**Sequence:**
+## Link frames
 
-1. Both sides generate (or reuse) an X25519 keypair
-2. Both sides send a handshake frame containing their public key and wire id
-3. Both sides receive the peer's public key and adopt its wire id as the peer's identity
-4. Both sides compute the shared secret via ECDH (X25519)
-5. All subsequent frames use NaCl Box encryption (XSalsa20-Poly1305)
-
-Order of send/receive does not matter — both sides send and read concurrently. No sequencing dependency.
-
----
-
-## Message Frame (`0x02`)
-
-**Payload:**
+### HELLO (0x01)
 
 ```
-[ 16 bytes: group_id   ]  — UUID v4, zeroed for 1:1 DMs
-[ 16 bytes: msg_id     ]  — UUID v4, unique per message
-[  6 bytes: sender_id  ]  — BT MAC of originating device
-[  6 bytes: final_dest ]  — BT MAC of intended recipient
-[  4 bytes: timestamp  ]  — uint32, unix seconds (UTC)
-[ 24 bytes: nonce      ]  — random, generated per message
-[  N bytes: ciphertext ]  — NaCl Box encrypted UTF-8 text
+pubkey(32) node_id(6) version u8 (=2) features u32 name_ts u32 name_len u8 name
 ```
 
-Total header before ciphertext: 72 bytes.
+Both sides send HELLO immediately on connect and read the peer's within
+10 s, else close. Version ≠ 2 or own node id → close.
+After HELLO each side sends its full ROSTER and ROUTES.
 
-**Encryption details:**
+**Duplicate links** (both dialled at once): every node applies the same rule —
+keep the link initiated by the numerically lower node id; if the existing link
+has been silent > 10 s, the new link wins regardless.
 
-- Metadata fields (group_id through timestamp) are **plaintext** within the payload
-- Only the message text is encrypted: `Box(plaintext, nonce, shared_secret)`
-- The nonce is generated as 24 cryptographically random bytes per message
-- The nonce is transmitted alongside the ciphertext (not derived)
-- Ciphertext includes Poly1305 authentication tag (16 bytes, appended by NaCl)
+**Reinstalls**: if a HELLO arrives on a radio address previously used by a
+different, currently offline identity with the same (or no) name, the old
+identity is *superseded*: history, receipts, reactions and group membership
+move to the new id, queued packets are resealed for the new key, and a
+REPLACED body is sent to everyone else.
 
-**group_id in 1:1 mode:** set to `00000000-0000-0000-0000-000000000000` (16 zero bytes).
+### PING / PONG (0x02 / 0x03)
 
----
+8-byte token. A node sends PING when it has transmitted nothing for 4 s. A link
+that has received nothing for 15 s is dead and is closed (both ends redial).
 
-## ACK Frame (`0x03`)
-
-Sent by the final recipient upon receiving and successfully decrypting a message. ACKs
-flood-back through all connected peers (deduplicated by `(msg_id, from)`) so the original
-sender receives delivery confirmation even across relay hops.
-
-**Payload:**
-
-```
-[ 16 bytes: msg_id ]  — echoed from the message being acknowledged
-[  6 bytes: from   ]  — BT MAC of the acknowledging device
-```
-
-Total payload: 22 bytes.
-
----
-
-## Group Setup Frame (`0x04`)
-
-Sent by a group creator to each member, and forwarded by any receiving member to other
-connected group members who may not yet have received it. Plaintext metadata (like ACKs).
-
-**Payload:**
+### ROUTES (0x04)
 
 ```
-[ 16 bytes: group_id       ]  — UUID v4
-[  1 byte:  member_count   ]  — uint8
-For each member:
-    [  6 bytes: member_mac    ]
-    [ 32 bytes: member_pubkey ]
-[  2 bytes: name_length    ]  — uint16
-[  N bytes: name           ]  — UTF-8
+count u8, then count × ( node_id(6) hops u8 )      hops 255 = unreachable
 ```
 
-Max size for 6 members: ~247 bytes. Receivers dedupe by `group_id` — a repeated setup for
-a known group is dropped without re-forwarding, bounding flood.
+Sent on every topology change (debounced 0.3 s) and every 4 s. **Full-table
+semantics**: any destination previously learned via this neighbour and absent
+from the new frame is withdrawn. Split horizon with poisoned reverse (a route
+whose next hop is the receiving neighbour is advertised as 255). Received hop
+counts are +1; routes longer than 8 hops are ignored; entries not refreshed for
+13 s expire. Direct links are always 1 hop and preferred.
 
----
-
-## Read Frame (`0x05`)
-
-Sent by the user's device when they view a conversation containing previously-undisplayed
-messages. Flood-back semantics identical to ACK. Frame shape is identical to ACK.
-
-**Payload:**
+### ROSTER (0x05)
 
 ```
-[ 16 bytes: msg_id ]  — echoed from the message being read
-[  6 bytes: from   ]  — BT MAC of the reading device
+count u8, then count × ( node_id(6) pubkey(32) name_ts u32 name_len u8 name )
 ```
 
-Total payload: 22 bytes.
+Max 200 entries per frame. On receipt, a new id is added; for a known id the
+name is replaced only if `name_ts` is newer. **Keys are pinned** — an entry
+whose key differs from the stored key for that id is ignored (reinstalls are
+handled by HELLO/REPLACED instead). Changed entries are re-gossiped to the
+other links, so names and keys travel any number of hops.
 
-**Read vs ACK:**
-- `ACK` = recipient's device received and decrypted the message.
-- `Read` = recipient's user switched to the conversation (or was already on it when the
-  message arrived), indicating the message was presented.
+## Mesh frames
 
----
-
-## Profile Frame (`0x06`)
-
-Sent by each peer immediately after the handshake **if the device has a self-chosen display
-name** (an empty Profile frame is legal but the Python client skips it rather than sending
-an empty payload). Re-broadcast to all connected peers whenever the user changes their
-display name. Plaintext metadata.
-
-**Payload:**
+### PACKET (0x10)
 
 ```
-[ N bytes: display_name ]  — UTF-8, no length prefix (payload_length in header bounds it)
+packet_id(16) src(6) dst(6) ttl u8 flags u8 ts u32 src_pubkey(32) | box
 ```
 
-An empty payload is valid and means "no self-chosen name; fall back to MAC." Receivers
-store the announcement as the peer's self-chosen name; the local user may still override
-it, and overrides win over the self-chosen name on display and command resolution.
+- `box = crypto_box(body, sender key → recipient key)`; carrying `src_pubkey`
+  lets a recipient decrypt a packet from someone it has never heard of
+  (first contact through a relay). TOFU: a packet whose `src_pubkey` differs
+  from the pinned key for `src` is dropped.
+- `flags`: `0x01` RELIABLE (ACK required), `0x02` BULK (file chunks — relays
+  queue them behind chat), `0x04` REALTIME (games/typing — relays send first).
+- `ts`: sender's wall clock (seconds). Receivers clamp it to now + 60 s.
 
-Profile frames are **not** forwarded directly. However, when a relay node (B) receives a
-non-empty Profile from peer A, B immediately sends a Peer Annc to all other connected peers
-advertising A's updated name. This causes name changes to propagate one hop at a time to
-indirect peers without requiring a direct connection. Name clearances (empty Profile) are
-**not** propagated — indirect peers will only learn of a cleared name when they reconnect
-and receive a fresh Peer Annc from a relay that has already processed the clearance.
+**Forwarding** (dst ≠ me): drop if `ttl ≤ 1` or `src == me`; drop if this
+`packet_id` was forwarded in the last 5 s; otherwise decrement TTL and send to
+the best next hop (never back to the neighbour it came from). With no route, a
+RELIABLE packet is **stored** (persistently) and handed over as soon as a route
+to `dst` appears; unreliable ones are dropped.
 
----
+**Delivery** (dst = me): decrypt; for RELIABLE send an ACK (also for
+duplicates — the first ACK may have been lost) and process only the first copy
+of each `packet_id` (persistent dedup); unreliable packets are deduplicated for
+60 s.
 
-## Peer Announcement Frame (`0x07`)
+**Retransmission**: every RELIABLE packet stays in the sender's persistent
+outbox until ACKed. It is resent after 6 s, then with doubling back-off capped
+at 60 s (±15 % jitter), but only while `dst` is reachable — and immediately
+when `dst` becomes reachable again. Nothing ever expires from the outbox.
 
-Sent by each peer immediately after the handshake (after Profile), **if the device has
-any known peers to announce** (an empty Peer Annc is legal but the Python client omits the
-frame if there is nothing to include). Lists the sender's currently-known peers
-(MAC + pubkey + name) so the receiver can learn about devices not yet in range.
-Also sent in two other cases:
-- When a new peer joins: existing connected peers receive a Peer Annc advertising the
-  newcomer's MAC + pubkey + name.
-- When a connected peer changes their name (Profile received): the intermediary re-announces
-  that peer's updated name to all other connected peers.
-
-**Payload:**
-
-```
-[ 1 byte: peer_count ]  — uint8
-For each peer:
-    [  6 bytes: mac         ]
-    [ 32 bytes: pubkey      ]
-    [  1 byte:  name_length ]  — uint8, 0 = no self-chosen name
-    [  N bytes: name        ]  — UTF-8 display name (may be empty)
-```
-
-Per-peer entry size varies: 39 + name_length bytes. An empty list (`peer_count = 0`) is valid and a no-op.
-
-Recipients apply the following rules:
-- **Pubkeys** — `setdefault` semantics. A pubkey from a direct handshake is never
-  overwritten by a Peer Annc; this prevents any relay from redirecting encryption for
-  another device.
-- **Names** — updated if the announced name differs from the stored name. This allows
-  name changes to propagate to indirect peers via the re-announcement mechanism above.
-  A local override always wins on display regardless of what Peer Annc carries.
-
-Peer Annc frames are **not** forwarded — they are point-to-point between directly
-connected devices. The information propagates one hop at a time as devices connect.
-
----
-
-## Relay & Routing
-
-`final_dest` in the message frame identifies the intended recipient. Any connected peer
-may forward:
-
-1. On receipt, peer compares `final_dest` to its own MAC.
-2. If equal → decrypt + deliver + send ACK.
-3. If not equal → re-emit the frame toward another peer connected to `final_dest`, or
-   queue the frame for delivery when `final_dest` reconnects.
-
-`GROUP_SETUP` forwards similarly, bounded by the per-peer "already have this group_id"
-check. `ACK` and `READ` flood back through all connected peers (deduplicated by
-`(msg_id, from)`).
-
----
-
-## Connection Lifecycle
+### ACK (0x11)
 
 ```
-Device A                              Device B
-────────────────────────────────────────────────
-         ◄── RFCOMM connect ──►
-
-send Handshake(pubkey_A, wire_A)  ──►  recv Handshake(pubkey_A, wire_A)
-recv Handshake(pubkey_B, wire_B)  ◄──  send Handshake(pubkey_B, wire_B)
-
-         ECDH → shared secret
-
-send Message(encrypted)   ──────────►  recv Message → decrypt
-                          ◄──────────  send ACK(msg_id)
-
-recv Message(encrypted)   ◄──────────  send Message(encrypted)
-send ACK(msg_id)          ──────────►
+packet_id(16) src(6) dst(6) ttl u8         src = acknowledging node, dst = original sender
 ```
 
----
+Routed toward `dst` like a packet (5 s dedup on `(packet_id, src)`), stored and
+forwarded later when no route exists. On arrival the packet leaves the outbox
+and the message is marked *delivered* for that recipient.
 
-## Reconnection
+## Bodies (inside the box)
 
-On socket error or EOF:
+```
+kind u8 meta_len u16 meta(JSON object) blob(rest)
+```
 
-1. Both sides return to listen/connect state
-2. New RFCOMM connection established
-3. Fresh handshake (static keys → same shared secret)
-4. Sender resends all messages that never received an ACK
-5. Receiver checks `msg_id` against previously seen messages:
-   - **Already seen:** silently drop, send ACK again
-   - **New:** process normally, send ACK
+| Kind | Name       | Reliable | Meta (blob) |
+|-----:|------------|:--------:|-------------|
+| 1  | TEXT       | ✓ | `i` msg id hex, `t` text, `g`? group id hex, `r`? reply-to msg id |
+| 2  | REACT      | ✓ | `m` target msg, `e` emoji, `x`? 1 = remove, `g`? |
+| 3  | EDIT       | ✓ | `m`, `t`, `g`? — only the original sender's edits apply |
+| 4  | DELETE     | ✓ | `m`, `g`? — only the original sender's deletes apply |
+| 5  | FILE       | ✓ | `i`, `f` file id, `n` name, `mt` mime, `s` size, `h` sha256 hex, `cs` chunk size, `c` chunks, `t`? caption, `r`?, `g`? (blob: JPEG thumbnail ≤ 12 KB) |
+| 6  | CHUNK      |   | `f`, `i` index (blob: chunk bytes) |
+| 7  | FILE_REQ   |   | `f`, `w` list of wanted indices |
+| 8  | GROUP      | ✓ | `g`, `n` name, `v` version, `m` `[[id, pubkey hex], …]` |
+| 9  | RECEIPT    | ✓ | `r` list of msg ids the reader has seen |
+| 10 | APP        | ✓ | `i` event id, `a` app id, `s` session, `y` type, `b` any JSON, `q` seq, `g`? |
+| 11 | RT         |   | `a`, `s`, `b` any JSON (blob optional) — real-time datagram |
+| 12 | TYPING     |   | `g`? |
+| 13 | GROUP_REQ  |   | `g` — "I got a message for a group I don't know" |
+| 14 | REPLACED   | ✓ | `o` old node id, `n` new node id (reinstall notice) |
 
----
+A group message is sent as one PACKET per member, each encrypted for that
+member; all copies share the message id `i`. A DM has no `g`.
 
-## Simultaneous Connection Tiebreak
+### Conversations and receipts
 
-To reduce the chance of both devices initiating at the same time, the device with the higher
-MAC address defers: it waits up to 10 seconds for the lower-MAC device to initiate before
-calling `ConnectProfile` itself. This deferral is the primary mechanism — simultaneous
-connects are rare in practice.
+- DM conversation = the peer's node id; group conversation = `g`.
+- *delivered* = ACK from that recipient; *read* = RECEIPT from that recipient
+  (sent when the conversation is on screen). A group message shows the worst
+  state across recipients.
 
-If two sockets do form anyway, the recommended tiebreak is:
+### Groups
 
-- Compare local BT MAC addresses (as 6-byte unsigned integers)
-- The socket initiated by the device with the **higher** MAC address is closed
-- Both sides apply this rule independently — result is deterministic
+Any member may change a group by sending GROUP with `v` + 1 to the union of
+old and new members. Receivers accept a GROUP only if `v` is higher than what
+they have and (for an existing group) the sender is a current member. A member
+that receives a message for an unknown group creates a placeholder and sends
+GROUP_REQ; any member answers with GROUP. Leaving = removing yourself.
 
-**Current Python client behavior:** the 10-second deferral prevents most simultaneous
-connects. If two sockets still form, the Python client uses last-wins replacement (the
-newer `add_peer` call replaces the stale entry) rather than a strict MAC-based tiebreak.
+### Files
 
----
+Receiver-driven, resumable, relay-friendly. The FILE offer is reliable. The
+receiver (automatically up to 15 MB) asks the sender — or, if unreachable, any
+other conversation member who has the complete file — for up to 12 chunks at a
+time with FILE_REQ; CHUNKs are unreliable BULK packets. Outstanding requests are
+re-issued after a 5 s stall or when the source becomes reachable again. Chunk
+size 16 000 bytes; files ≤ 64 MB; the result is verified against `h` and
+re-downloaded on mismatch.
 
-## Service Discovery
+### Apps and games
 
-**Service UUID:** `320bcf9c-94fe-46f4-b9bf-83535cafcd55`
+APP events form a per-session log; RT datagrams are fire-and-forget. The game
+host built on them (invite / join / decline / start / move / resign, state =
+`setup` folded over moves) is specified in
+`python/src/muninn/games/README.md`.
 
-Registered via SDP (Service Discovery Protocol). Connecting device performs SDP lookup to find the RFCOMM channel number for this UUID.
+## Transports
 
----
+Muninn runs over anything that yields a reliable byte stream:
 
-## Crypto Summary
-
-| Primitive         | Algorithm                    |
-|-------------------|------------------------------|
-| Key exchange      | X25519 (Curve25519 ECDH)     |
-| Symmetric cipher  | XSalsa20                     |
-| Authentication    | Poly1305                     |
-| Combined          | NaCl Box (all three above)   |
-| Nonce             | 24 bytes, random per message |
-| Public key        | 32 bytes (X25519)            |
+- **Bluetooth Classic RFCOMM**, service UUID `320bcf9c-94fe-46f4-b9bf-83535cafcd55`.
+  Android listens and dials with *insecure* RFCOMM (no bonding). BlueZ
+  registers an RFCOMM profile without authentication; known peers may be
+  paired (link keys persist), unconfirmed devices are only ever probed
+  without pairing.
+- **Simulator** (`muninn-simhub`): TCP + JSON-lines control protocol, see
+  `python/src/muninn/sim/hub.py`.

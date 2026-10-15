@@ -53,12 +53,12 @@ pair/chat between them over real RFCOMM.
 
 ## Intentional Decisions (don't "fix" these)
 
-- **Static keypairs** — generated once, persisted to the SQLite `identity` table, reused across restarts and reconnects. Same shared secret every handshake. Intentional for simplicity.
+- **Static keypairs** — generated once per install, persisted, pinned by peers (TOFU). Reinstalls are detected and migrated, not trusted blindly.
 - **SQLite write-through persistence** — messages, pubkeys, groups, display names, unacked state, and seen-dedup are all persisted via `storage.py`. WAL mode, `threading.Lock` serialization. The DB file growing is not a bug; pruning is out of scope.
 - **D-Bus pairing via Device1.Pair()** — not bluetoothctl subprocess. Required: subprocess pairing uses store_hint=0 so link keys aren't persisted, causing br-connection-key-missing on ConnectProfile.
 - **No forward secrecy** — acceptable for this use case.
-- **ACK and message metadata are plaintext** — only message text is encrypted. Intentional for future relay routing.
-- **Zeroed group_id for 1:1** — 16 zero bytes. Not a bug.
+- **Routing metadata is plaintext** — src/dst/ids/ACKs; bodies are encrypted. Needed for relaying.
+- **Good Bluetooth citizen** — never pair with, prompt, or dial devices that aren't (possibly) Muninn; headsets/watches are never contacted.
 
 ## Scope
 
@@ -67,29 +67,39 @@ Weekend project for personal use on flights. Don't over-engineer. MITM attacks, 
 ## Docs
 
 - `DESIGN.md` — motivation, decisions, architecture, implementation steps
-- `PROTOCOL.md` — wire spec only (the cross-platform contract)
+- `PROTOCOL.md` — wire spec v2 (the cross-platform contract)
+- `TESTING.md` — test suites, simulated cabin, emulator labs
+- `TODO.md` — gap analysis, plan, progress log, backlog
+- `python/src/muninn/games/README.md` — game plugin API
 - `python/src/muninn/gui/GUI_PLAN.md` — GUI design, Vim keybindings, layout, milestones
 
-## Key files (Python client)
+## Key files
 
-- `peers.py` — `ConnectionManager`: all BT connections, relay, ACKs, read receipts
-- `groups.py` — `GroupStore`: in-memory cache of peers/groups/names, write-through to `Storage`
-- `storage.py` — `Storage`: SQLite persistence layer, schema migrations
-- `protocol.py` — wire encoding/decoding
-- `cli.py` — readline CLI + `ChatUI` (uses `/`-prefixed commands)
-- `bt/bluez.py` — BlueZ D-Bus backend
-- `bt/winrt.py` — WinRT backend (written, not yet hardware-tested)
-- `gui/main.py` — GUI entrypoint, QML engine, theme dict, default font (JetBrains Mono)
-- `gui/bridge.py` — `ChatBridge`: Qt signals ↔ `ConnectionManager` callbacks; also the
-  single command dispatcher (`runCommand`) and tab-completion engine (`completeCommand`)
-  shared by the vim cmdline (`:`) and the `<space>f` palette
-- `gui/vim.py` — `VimEditor`: modal text editor state machine — motions, operators,
-  text objects, registers (linewise vs charwise), counts, dot repeat, cmdline
-- `gui/models.py` — `PeerListModel`, `MessageListModel`
-- `gui/qml/Main.qml` — window, status bar, global shortcuts, overlay wiring
-- `gui/qml/CommandPalette.qml` — `<space>f` fuzzy palette with raw `:` mode
-- `gui/qml/InfoMenu.qml` — popup used by `:list` / `:peers` / `:known` / `:help`
-- `gui/qml/ChatView.qml` — top-to-bottom message list, auto-scroll, bubble delegate
+Python (`python/src/muninn/`) — shared by CLI, GUI, bot, tests:
+- `protocol.py` / `content.py` — wire v2 frames / encrypted body kinds (see PROTOCOL.md)
+- `mesh.py` — `Mesh`: links, routing, outbox/retries, relaying, gossip, groups, files, apps, reinstalls
+- `node.py` — `Node`: identity + storage + mesh + transport, dialer, discovery, presence
+- `storage.py` — SQLite (schema migrations in `_migrate`)
+- `transport.py` (`BtTransport`, `ScanResult`), `bt/bluez.py`, `bt/winrt.py`
+- `scanpolicy.py` — eager/balanced/quiet (mirror: `android/core/.../ScanPolicy.kt`, tested)
+- `gamehost.py` + `games/*.js` — generic game sessions + plugins (API in games/README.md)
+- `emoji.py` + `assets/emoji.json`, `assets/stickers/*.gif` — shared with Android
+- `sim/hub.py`, `sim/transport.py`, `sim/lab.py` — radio simulator; `bot.py` — headless node
+- `cli.py`; `gui/` (`bridge.py` command dispatcher, `models.py`, `vim.py`, `qml/`)
+
+Kotlin:
+- `android/core/` — pure-JVM port of the core (`Nacl.kt` TweetNaCl, `Protocol.kt`,
+  `Mesh.kt`, `Node.kt`, `Storage.kt`, `GameHost.kt`, `SimTransport.kt`, `SimNode.kt`)
+- `android/app/` — `Runtime.kt` (process-wide node), `MuninnService.kt`,
+  `BtTransport.kt`, `AndroidStorage.kt`, Compose screens, `assets/gamehost.html`
+
+Any protocol or behaviour change must land in **both** cores; `tests/test_interop.py`
+and the parity tests catch drift. See TESTING.md.
+
+### Sim + Android emulator
+
+`tools/droid.py sim <name>` restarts the app in simulator mode joined to the hub on
+127.0.0.1:7420 through `adb reverse` (the emulator's own network route is unreliable).
 
 ## GUI command surface (don't drift from this)
 
