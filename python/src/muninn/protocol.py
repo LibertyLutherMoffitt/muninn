@@ -1,20 +1,52 @@
+"""Muninn wire protocol v2 — framing and frame codecs. See PROTOCOL.md.
+
+Every frame: [type u8][length u16 BE][payload]. Two families:
+
+Link frames (hop-by-hop, never forwarded):
+    HELLO, PING, PONG, ROUTES, ROSTER
+
+Mesh frames (routed end-to-end by node id):
+    PACKET  — encrypted body (see content.py), optionally reliable
+    ACK     — plaintext delivery confirmation routed back to the sender
+"""
+
+from __future__ import annotations
+
+import os
 import struct
 import time
-import uuid
+from dataclasses import dataclass
 
-TYPE_HANDSHAKE = 0x01
-TYPE_MESSAGE = 0x02
-TYPE_ACK = 0x03
-TYPE_GROUP_SETUP = 0x04
-TYPE_READ = 0x05
-TYPE_PROFILE = 0x06
-TYPE_PEER_ANNC = 0x07
+PROTOCOL_VERSION = 2
 
-MAX_PAYLOAD = 0xFFFF  # uint16 — see PROTOCOL.md
+T_HELLO = 0x01
+T_PING = 0x02
+T_PONG = 0x03
+T_ROUTES = 0x04
+T_ROSTER = 0x05
+T_PACKET = 0x10
+T_ACK = 0x11
+
+MAX_PAYLOAD = 0xFFFF
+ID_LEN = 6
+PUBKEY_LEN = 32
+PACKET_ID_LEN = 16
+
+DEFAULT_TTL = 8
+ROUTE_UNREACHABLE = 0xFF
+
+# PACKET flags
+F_RELIABLE = 0x01  # receiver must ACK; sender retransmits until ACKed
+F_BULK = 0x02  # low priority (file chunks) — relays queue it behind chat
+F_REALTIME = 0x04  # latency-sensitive (games, typing) — relays send it first
 
 
 class FrameTooLarge(ValueError):
     """Payload exceeds the 65535-byte wire limit for a single frame."""
+
+
+class MalformedFrame(ValueError):
+    """Frame payload could not be decoded."""
 
 
 def encode_frame(frame_type: int, payload: bytes) -> bytes:
@@ -26,13 +58,10 @@ def encode_frame(frame_type: int, payload: bytes) -> bytes:
 def read_frame(sock) -> tuple[int, bytes]:
     header = recv_exact(sock, 3)
     frame_type, length = struct.unpack("!BH", header)
-    payload = recv_exact(sock, length)
-    return frame_type, payload
+    return frame_type, recv_exact(sock, length)
 
 
 def recv_exact(sock, n: int) -> bytes:
-    # bytearray avoids the O(n^2) copy that `data += chunk` produces when a
-    # large payload arrives in many small recv chunks.
     data = bytearray()
     while len(data) < n:
         chunk = sock.recv(n - len(data))
@@ -42,171 +71,231 @@ def recv_exact(sock, n: int) -> bytes:
     return bytes(data)
 
 
-# --- Handshake ---
+# --- ids -------------------------------------------------------------------
 
 
-def encode_handshake(pubkey: bytes, wire_id: bytes = b"") -> bytes:
-    """Handshake payload: 32-byte X25519 pubkey, optionally followed by the
-    sender's 6-byte wire id (its addressing identity). Omitting wire_id yields
-    the legacy 32-byte form; peers receiving it fall back to the transport MAC.
-    """
-    return encode_frame(TYPE_HANDSHAKE, pubkey + wire_id)
+def id_to_bytes(node_id: str) -> bytes:
+    b = bytes(int(x, 16) for x in node_id.split(":"))
+    if len(b) != ID_LEN:
+        raise ValueError(f"bad node id {node_id!r}")
+    return b
 
 
-def decode_handshake(payload: bytes) -> tuple[bytes, bytes | None]:
-    """Returns (pubkey, wire_id). wire_id is None for legacy 32-byte payloads."""
-    if len(payload) not in (32, 38):
-        raise ValueError(
-            f"handshake payload must be 32 or 38 bytes, got {len(payload)}"
-        )
-    return payload[:32], (payload[32:] if len(payload) == 38 else None)
+def bytes_to_id(b: bytes) -> str:
+    return ":".join(f"{x:02X}" for x in b)
 
 
-# --- Message ---
+def new_packet_id() -> bytes:
+    return os.urandom(PACKET_ID_LEN)
 
 
-def encode_message(
-    group_id: bytes,
-    msg_id: bytes,
-    sender_mac: bytes,
-    dest_mac: bytes,
-    encrypted: bytes,
+def random_node_id() -> str:
+    b = bytearray(os.urandom(ID_LEN))
+    b[0] = (b[0] & 0xFC) | 0x02  # locally administered, unicast
+    return bytes_to_id(bytes(b))
+
+
+# --- HELLO -----------------------------------------------------------------
+
+
+@dataclass
+class Hello:
+    pubkey: bytes
+    node_id: str
+    version: int
+    features: int
+    name: str
+    name_ts: int
+
+
+def encode_hello(
+    pubkey: bytes, node_id: str, name: str, name_ts: int, features: int = 0
 ) -> bytes:
-    timestamp = struct.pack("!I", int(time.time()))
-    payload = group_id + msg_id + sender_mac + dest_mac + timestamp + encrypted
-    return encode_frame(TYPE_MESSAGE, payload)
+    nb = name.encode("utf-8")[:255]
+    payload = (
+        pubkey
+        + id_to_bytes(node_id)
+        + struct.pack("!BIIB", PROTOCOL_VERSION, features, name_ts, len(nb))
+        + nb
+    )
+    return encode_frame(T_HELLO, payload)
 
 
-def decode_message(payload: bytes):
-    group_id = payload[0:16]
-    msg_id = payload[16:32]
-    sender_id = payload[32:38]
-    final_dest = payload[38:44]
-    timestamp = struct.unpack("!I", payload[44:48])[0]
-    encrypted = payload[48:]
-    return group_id, msg_id, sender_id, final_dest, timestamp, encrypted
+def decode_hello(p: bytes) -> Hello:
+    if len(p) < 48:
+        raise MalformedFrame("hello too short")
+    version, features, name_ts, nlen = struct.unpack("!BIIB", p[38:48])
+    name = p[48 : 48 + nlen].decode("utf-8", errors="replace")
+    return Hello(p[:32], bytes_to_id(p[32:38]), version, features, name, name_ts)
 
 
-# --- ACK ---
+# --- PING / PONG -------------------------------------------------------------
 
 
-def encode_ack(msg_id: bytes, from_mac: bytes) -> bytes:
-    return encode_frame(TYPE_ACK, msg_id + from_mac)
+def encode_ping(token: bytes) -> bytes:
+    return encode_frame(T_PING, token)
 
 
-def decode_ack(payload: bytes):
-    msg_id = payload[0:16]
-    from_mac = payload[16:22]
-    return msg_id, from_mac
+def encode_pong(token: bytes) -> bytes:
+    return encode_frame(T_PONG, token)
 
 
-# --- Read receipt ---
+# --- ROUTES (distance vector) -----------------------------------------------
 
 
-def encode_read(msg_id: bytes, from_mac: bytes) -> bytes:
-    return encode_frame(TYPE_READ, msg_id + from_mac)
+def encode_routes(entries: list[tuple[str, int]]) -> bytes:
+    entries = entries[:255]
+    parts = [struct.pack("!B", len(entries))]
+    for node_id, hops in entries:
+        parts.append(id_to_bytes(node_id))
+        parts.append(struct.pack("!B", min(hops, ROUTE_UNREACHABLE)))
+    return encode_frame(T_ROUTES, b"".join(parts))
 
 
-def decode_read(payload: bytes):
-    msg_id = payload[0:16]
-    from_mac = payload[16:22]
-    return msg_id, from_mac
+def decode_routes(p: bytes) -> list[tuple[str, int]]:
+    if not p:
+        return []
+    n = p[0]
+    if len(p) < 1 + n * 7:
+        raise MalformedFrame("routes truncated")
+    return [(bytes_to_id(p[1 + i * 7 : 7 + i * 7]), p[7 + i * 7]) for i in range(n)]
 
 
-# --- Group Setup ---
+# --- ROSTER (peer gossip) ----------------------------------------------------
 
 
-def encode_group_setup(
-    group_id: bytes,
-    members: list[tuple[bytes, bytes]],
-    name: str,
-) -> bytes:
-    """members: list of (mac_bytes, pubkey_bytes)."""
-    parts = [group_id, struct.pack("!B", len(members))]
-    for mac, pubkey in members:
-        parts.append(mac)
-        parts.append(pubkey)
-    name_bytes = name.encode("utf-8")
-    parts.append(struct.pack("!H", len(name_bytes)))
-    parts.append(name_bytes)
-    return encode_frame(TYPE_GROUP_SETUP, b"".join(parts))
+@dataclass
+class RosterEntry:
+    node_id: str
+    pubkey: bytes
+    name: str
+    name_ts: int
 
 
-def decode_group_setup(
-    payload: bytes,
-) -> tuple[bytes, list[tuple[bytes, bytes]], str]:
-    group_id = payload[0:16]
-    member_count = payload[16]
-    offset = 17
-    members = []
-    for _ in range(member_count):
-        mac = payload[offset : offset + 6]
-        pubkey = payload[offset + 6 : offset + 38]
-        members.append((mac, pubkey))
-        offset += 38
-    name_length = struct.unpack("!H", payload[offset : offset + 2])[0]
-    offset += 2
-    name = payload[offset : offset + name_length].decode("utf-8")
-    return group_id, members, name
+def encode_roster(entries: list[RosterEntry]) -> list[bytes]:
+    """Encode as one or more frames (each <= 255 entries and < 64 KiB)."""
+    frames = []
+    for i in range(0, len(entries), 200):
+        batch = entries[i : i + 200]
+        parts = [struct.pack("!B", len(batch))]
+        for e in batch:
+            nb = e.name.encode("utf-8")[:255]
+            parts += [
+                id_to_bytes(e.node_id),
+                e.pubkey,
+                struct.pack("!IB", e.name_ts, len(nb)),
+                nb,
+            ]
+        frames.append(encode_frame(T_ROSTER, b"".join(parts)))
+    return frames
 
 
-# --- Profile ---
+def decode_roster(p: bytes) -> list[RosterEntry]:
+    if not p:
+        return []
+    n = p[0]
+    off = 1
+    out = []
+    for _ in range(n):
+        if len(p) < off + 43:
+            raise MalformedFrame("roster truncated")
+        nid = bytes_to_id(p[off : off + 6])
+        pk = p[off + 6 : off + 38]
+        name_ts, nlen = struct.unpack("!IB", p[off + 38 : off + 43])
+        name = p[off + 43 : off + 43 + nlen].decode("utf-8", errors="replace")
+        out.append(RosterEntry(nid, pk, name, name_ts))
+        off += 43 + nlen
+    return out
 
 
-def encode_profile(name: str) -> bytes:
-    """Self-chosen display name. Sent immediately after handshake."""
-    return encode_frame(TYPE_PROFILE, name.encode("utf-8"))
+# --- PACKET ------------------------------------------------------------------
+
+# packet_id(16) src(6) dst(6) ttl(1) flags(1) ts(4) src_pubkey(32) | box
+PACKET_HEADER = struct.Struct("!16s6s6sBBI32s")
 
 
-def decode_profile(payload: bytes) -> str:
-    return payload.decode("utf-8")
+@dataclass
+class Packet:
+    packet_id: bytes
+    src: str
+    dst: str
+    ttl: int
+    flags: int
+    ts: int
+    src_pubkey: bytes
+    box: bytes  # nonce(24) + ciphertext
+
+    @property
+    def reliable(self) -> bool:
+        return bool(self.flags & F_RELIABLE)
 
 
-# --- Peer announcement ---
+def encode_packet(pkt: Packet) -> bytes:
+    hdr = PACKET_HEADER.pack(
+        pkt.packet_id,
+        id_to_bytes(pkt.src),
+        id_to_bytes(pkt.dst),
+        pkt.ttl,
+        pkt.flags,
+        pkt.ts,
+        pkt.src_pubkey,
+    )
+    return encode_frame(T_PACKET, hdr + pkt.box)
 
 
-def encode_peer_annc(peers: list[tuple[bytes, bytes, str]]) -> bytes:
-    """peers: list of (mac_6_bytes, pubkey_32_bytes, display_name)."""
-    parts = [struct.pack("!B", len(peers))]
-    for mac, pubkey, name in peers:
-        name_bytes = name.encode("utf-8")[:255]
-        parts.append(mac)
-        parts.append(pubkey)
-        parts.append(struct.pack("!B", len(name_bytes)))
-        parts.append(name_bytes)
-    return encode_frame(TYPE_PEER_ANNC, b"".join(parts))
+def decode_packet(p: bytes) -> Packet:
+    if len(p) < PACKET_HEADER.size + 40:
+        raise MalformedFrame("packet too short")
+    pid, src, dst, ttl, flags, ts, pub = PACKET_HEADER.unpack_from(p)
+    return Packet(
+        pid,
+        bytes_to_id(src),
+        bytes_to_id(dst),
+        ttl,
+        flags,
+        ts,
+        pub,
+        p[PACKET_HEADER.size :],
+    )
 
 
-def decode_peer_annc(payload: bytes) -> list[tuple[bytes, bytes, str]]:
-    count = payload[0]
-    offset = 1
-    peers = []
-    for _ in range(count):
-        mac = payload[offset : offset + 6]
-        pubkey = payload[offset + 6 : offset + 38]
-        name_len = payload[offset + 38]
-        name = payload[offset + 39 : offset + 39 + name_len].decode(
-            "utf-8", errors="replace"
-        )
-        peers.append((mac, pubkey, name))
-        offset += 39 + name_len
-    return peers
+def packet_with_ttl(raw_payload: bytes, ttl: int) -> bytes:
+    """Re-frame a received PACKET payload with a decremented TTL."""
+    return encode_frame(T_PACKET, raw_payload[:28] + bytes([ttl]) + raw_payload[29:])
 
 
-# --- Helpers ---
+MAX_BOX = MAX_PAYLOAD - PACKET_HEADER.size
 
 
-def mac_to_bytes(mac_str: str) -> bytes:
-    return bytes(int(b, 16) for b in mac_str.split(":"))
+# --- ACK -------------------------------------------------------------------
+
+# packet_id(16) from(6) to(6) ttl(1)
+ACK_STRUCT = struct.Struct("!16s6s6sB")
 
 
-def bytes_to_mac(mac_bytes: bytes) -> str:
-    return ":".join(f"{b:02X}" for b in mac_bytes)
+@dataclass
+class Ack:
+    packet_id: bytes
+    src: str  # the acknowledging node (final recipient of the packet)
+    dst: str  # the packet's original sender
+    ttl: int
 
 
-def new_msg_id() -> bytes:
-    return uuid.uuid4().bytes
+def encode_ack(ack: Ack) -> bytes:
+    return encode_frame(
+        T_ACK,
+        ACK_STRUCT.pack(
+            ack.packet_id, id_to_bytes(ack.src), id_to_bytes(ack.dst), ack.ttl
+        ),
+    )
 
 
-def new_group_id() -> bytes:
-    return uuid.uuid4().bytes
+def decode_ack(p: bytes) -> Ack:
+    if len(p) < ACK_STRUCT.size:
+        raise MalformedFrame("ack too short")
+    pid, src, dst, ttl = ACK_STRUCT.unpack_from(p)
+    return Ack(pid, bytes_to_id(src), bytes_to_id(dst), ttl)
+
+
+def now() -> int:
+    return int(time.time())

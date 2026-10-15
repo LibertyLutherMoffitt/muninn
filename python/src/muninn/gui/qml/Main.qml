@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 
 ApplicationWindow {
     id: root
@@ -14,6 +15,7 @@ ApplicationWindow {
 
     // Helper to check if we are in navigation mode
     property bool isNormalMode: vimEditor && vimEditor.mode === "NORMAL"
+    onActiveChanged: if (active) bridge.windowActivated()
 
     // Initial focus on the chat pane so Vim commands work immediately
     Component.onCompleted: {
@@ -56,6 +58,7 @@ ApplicationWindow {
                 id: chatPane
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                onReactRequested: (mid) => emojiPicker.open("react", mid)
                 
                 // Clicking the chat area always restores Vim command focus
                 MouseArea {
@@ -87,16 +90,16 @@ ApplicationWindow {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "peers: " + bridge.connectedPeerCount + " connected"
-                    color: Theme.textMuted
+                    text: "● " + bridge.connectedPeerCount + " nearby · "
+                          + bridge.reachablePeerCount + " reachable"
+                    color: bridge.connectedPeerCount > 0 ? Theme.success : Theme.textMuted
                     font.pixelSize: 11
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "mode: " + (bridge.isWriter ? "WRITER" : "READER")
-                    color: bridge.isWriter ? Theme.success : Theme.textMuted
+                    text: bridge.transportName
+                    color: Theme.textMuted
                     font.pixelSize: 11
-                    font.bold: bridge.isWriter
                 }
             }
 
@@ -196,6 +199,7 @@ ApplicationWindow {
     // can close themselves first.
     property bool overlayOpen:
         cmdPalette.visible || scanDialog.visible || infoMenu.visible
+        || emojiPicker.visible || imageViewer.visible || gameView.visible
 
     Shortcut {
         sequence: "Esc"
@@ -239,9 +243,40 @@ ApplicationWindow {
         }
     }
 
+    Shortcut { sequence: "Alt+Up"; enabled: !root.overlayOpen; onActivated: bridge.moveSelection(-1) }
+    Shortcut { sequence: "Alt+Down"; enabled: !root.overlayOpen; onActivated: bridge.moveSelection(1) }
+    Shortcut { sequence: "Alt+R"; enabled: !root.overlayOpen; onActivated: bridge.replyTo("") }
+    Shortcut { sequence: "Alt+E"; enabled: !root.overlayOpen; onActivated: bridge.runCommand("react") }
+    Shortcut { sequence: "Ctrl+E"; enabled: !root.overlayOpen; onActivated: bridge.runCommand("emoji") }
+    Shortcut { sequence: "Ctrl+O"; enabled: !root.overlayOpen; onActivated: bridge.runCommand("file") }
+    Shortcut { sequence: "Ctrl+G"; enabled: !root.overlayOpen; onActivated: bridge.runCommand("games") }
+
     // ------------------------------------------------------------------
     // Overlays
     // ------------------------------------------------------------------
+
+    DropArea {
+        anchors.fill: parent
+        onDropped: (drop) => { if (drop.hasUrls) bridge.sendFiles(drop.urls) }
+        Rectangle {
+            anchors.fill: parent; color: "#407c3aed"; visible: parent.containsDrag
+            Text { anchors.centerIn: parent; text: "Drop to send"; color: "white"; font.pixelSize: 22 }
+        }
+    }
+
+    FileDialog {
+        id: fileDialog
+        title: "Send a file"
+        fileMode: FileDialog.OpenFiles
+        onAccepted: bridge.sendFiles(selectedFiles)
+    }
+
+    EmojiPicker { id: emojiPicker; anchors.fill: parent; z: 12
+        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
+    ImageViewer { id: imageViewer; anchors.fill: parent; z: 13
+        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
+    GameView { id: gameView; anchors.fill: parent; z: 11
+        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
 
     ScanDialog { id: scanDialog; anchors.fill: parent; z: 10 }
 
@@ -263,6 +298,7 @@ ApplicationWindow {
             bridge.setActiveConv(convId)
             chatPane.forceActiveFocus()
         }
+        onGameSelected: (sid) => gameView.open(sid)
     }
 
     // Top-most overlay: animated dots that fly along a polyline whenever
@@ -362,6 +398,10 @@ ApplicationWindow {
         function onPaletteRequested() {
             if (!cmdPalette.visible) cmdPalette.open("")
         }
+        function onFilePickRequested() { fileDialog.open() }
+        function onEmojiPickerRequested(mode) { emojiPicker.open(mode, "") }
+        function onImageViewRequested(url) { imageViewer.open(url) }
+        function onGameOpenRequested(sid) { gameView.open(sid) }
         function onInfoMenuRequested(title, items) {
             // If the palette is still open (raw `:` command path), close it
             // first so the info menu owns focus cleanly.

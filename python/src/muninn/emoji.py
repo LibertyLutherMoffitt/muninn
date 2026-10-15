@@ -1,0 +1,260 @@
+"""Emoji shortcodes (`:thumbsup:` → 👍), shared by the CLI and GUI.
+
+Offline, no dependencies. Covers the common chat set; the GUI picker groups
+them by category.
+"""
+
+from __future__ import annotations
+
+import re
+
+CATEGORIES: dict[str, list[tuple[str, str]]] = {
+    "smileys": [
+        ("smile", "😄"),
+        ("grin", "😁"),
+        ("joy", "😂"),
+        ("rofl", "🤣"),
+        ("slight_smile", "🙂"),
+        ("wink", "😉"),
+        ("blush", "😊"),
+        ("heart_eyes", "😍"),
+        ("kiss", "😘"),
+        ("yum", "😋"),
+        ("stuck_out_tongue", "😛"),
+        ("thinking", "🤔"),
+        ("neutral", "😐"),
+        ("expressionless", "😑"),
+        ("unamused", "😒"),
+        ("roll_eyes", "🙄"),
+        ("grimace", "😬"),
+        ("relieved", "😌"),
+        ("pensive", "😔"),
+        ("sleepy", "😪"),
+        ("sleeping", "😴"),
+        ("mask", "😷"),
+        ("nauseated", "🤢"),
+        ("hot", "🥵"),
+        ("cold", "🥶"),
+        ("dizzy_face", "😵"),
+        ("exploding_head", "🤯"),
+        ("cowboy", "🤠"),
+        ("party", "🥳"),
+        ("sunglasses", "😎"),
+        ("nerd", "🤓"),
+        ("confused", "😕"),
+        ("worried", "😟"),
+        ("frown", "🙁"),
+        ("open_mouth", "😮"),
+        ("astonished", "😲"),
+        ("flushed", "😳"),
+        ("pleading", "🥺"),
+        ("cry", "😢"),
+        ("sob", "😭"),
+        ("scream", "😱"),
+        ("angry", "😠"),
+        ("rage", "😡"),
+        ("skull", "💀"),
+        ("poop", "💩"),
+        ("clown", "🤡"),
+        ("ghost", "👻"),
+        ("alien", "👽"),
+        ("robot", "🤖"),
+        ("smirk", "😏"),
+        ("upside_down", "🙃"),
+        ("zany", "🤪"),
+        ("shush", "🤫"),
+        ("yawn", "🥱"),
+        ("salute", "🫡"),
+        ("melting", "🫠"),
+        ("sweat_smile", "😅"),
+        ("innocent", "😇"),
+    ],
+    "gestures": [
+        ("thumbsup", "👍"),
+        ("+1", "👍"),
+        ("thumbsdown", "👎"),
+        ("-1", "👎"),
+        ("ok_hand", "👌"),
+        ("v", "✌️"),
+        ("crossed_fingers", "🤞"),
+        ("wave", "👋"),
+        ("clap", "👏"),
+        ("raised_hands", "🙌"),
+        ("pray", "🙏"),
+        ("handshake", "🤝"),
+        ("muscle", "💪"),
+        ("point_up", "☝️"),
+        ("point_right", "👉"),
+        ("point_left", "👈"),
+        ("eyes", "👀"),
+        ("facepalm", "🤦"),
+        ("shrug", "🤷"),
+        ("fist", "✊"),
+        ("punch", "👊"),
+        ("call_me", "🤙"),
+        ("metal", "🤘"),
+        ("writing_hand", "✍️"),
+        ("brain", "🧠"),
+    ],
+    "hearts": [
+        ("heart", "❤️"),
+        ("orange_heart", "🧡"),
+        ("yellow_heart", "💛"),
+        ("green_heart", "💚"),
+        ("blue_heart", "💙"),
+        ("purple_heart", "💜"),
+        ("black_heart", "🖤"),
+        ("broken_heart", "💔"),
+        ("sparkling_heart", "💖"),
+        ("fire", "🔥"),
+        ("100", "💯"),
+        ("sparkles", "✨"),
+        ("star", "⭐"),
+        ("boom", "💥"),
+        ("zzz", "💤"),
+        ("tada", "🎉"),
+        ("confetti", "🎊"),
+    ],
+    "travel": [
+        ("airplane", "✈️"),
+        ("plane", "✈️"),
+        ("seat", "💺"),
+        ("luggage", "🧳"),
+        ("passport", "🛂"),
+        ("earth", "🌍"),
+        ("globe", "🌐"),
+        ("map", "🗺️"),
+        ("cloud", "☁️"),
+        ("sunrise", "🌅"),
+        ("night", "🌃"),
+        ("moon", "🌙"),
+        ("sun", "☀️"),
+        ("rainbow", "🌈"),
+        ("umbrella", "☔"),
+        ("mountain", "⛰️"),
+        ("beach", "🏖️"),
+        ("taxi", "🚕"),
+        ("train", "🚆"),
+        ("ship", "🚢"),
+        ("rocket", "🚀"),
+        ("clock", "🕐"),
+        ("hourglass", "⌛"),
+        ("headphones", "🎧"),
+        ("phone", "📱"),
+        ("laptop", "💻"),
+        ("battery", "🔋"),
+        ("bulb", "💡"),
+        ("lock", "🔒"),
+        ("key", "🔑"),
+        ("toilet", "🚻"),
+        ("wc", "🚾"),
+    ],
+    "food": [
+        ("coffee", "☕"),
+        ("tea", "🍵"),
+        ("beer", "🍺"),
+        ("wine", "🍷"),
+        ("cocktail", "🍸"),
+        ("water", "💧"),
+        ("pizza", "🍕"),
+        ("burger", "🍔"),
+        ("fries", "🍟"),
+        ("sandwich", "🥪"),
+        ("ramen", "🍜"),
+        ("sushi", "🍣"),
+        ("cookie", "🍪"),
+        ("cake", "🍰"),
+        ("chocolate", "🍫"),
+        ("popcorn", "🍿"),
+        ("apple", "🍎"),
+        ("banana", "🍌"),
+        ("peanuts", "🥜"),
+        ("pretzel", "🥨"),
+    ],
+    "games": [
+        ("chess", "♟️"),
+        ("dice", "🎲"),
+        ("joystick", "🕹️"),
+        ("video_game", "🎮"),
+        ("cards", "🃏"),
+        ("dart", "🎯"),
+        ("puzzle", "🧩"),
+        ("trophy", "🏆"),
+        ("medal", "🏅"),
+        ("crown", "👑"),
+        ("checkered_flag", "🏁"),
+        ("soccer", "⚽"),
+        ("basketball", "🏀"),
+        ("bowling", "🎳"),
+    ],
+    "symbols": [
+        ("check", "✅"),
+        ("x", "❌"),
+        ("warning", "⚠️"),
+        ("question", "❓"),
+        ("exclamation", "❗"),
+        ("no_entry", "⛔"),
+        ("recycle", "♻️"),
+        ("zap", "⚡"),
+        ("speech", "💬"),
+        ("thought", "💭"),
+        ("bell", "🔔"),
+        ("mute", "🔇"),
+        ("arrow_up", "⬆️"),
+        ("arrow_down", "⬇️"),
+        ("ok", "🆗"),
+        ("new", "🆕"),
+        ("sos", "🆘"),
+        ("hundred", "💯"),
+        ("money", "💰"),
+        ("gift", "🎁"),
+    ],
+}
+
+SHORTCODES: dict[str, str] = {}
+for _items in CATEGORIES.values():
+    for _code, _emo in _items:
+        SHORTCODES.setdefault(_code, _emo)
+
+# Classic emoticons converted only when they stand alone as a word.
+EMOTICONS = {
+    ":)": "🙂",
+    ":-)": "🙂",
+    ":D": "😄",
+    ":-D": "😄",
+    ";)": "😉",
+    ";-)": "😉",
+    ":(": "🙁",
+    ":-(": "🙁",
+    ":P": "😛",
+    ":p": "😛",
+    ":'(": "😢",
+    "<3": "❤️",
+    ":O": "😮",
+    ":o": "😮",
+    "xD": "😆",
+    "XD": "😆",
+}
+
+_CODE_RE = re.compile(r":([a-z0-9_+\-]+):")
+
+
+def expand(text: str) -> str:
+    """Replace :shortcodes: (and stand-alone emoticons) with emoji."""
+    text = _CODE_RE.sub(lambda m: SHORTCODES.get(m.group(1), m.group(0)), text)
+    words = text.split(" ")
+    return " ".join(EMOTICONS.get(w, w) for w in words)
+
+
+def search(prefix: str, limit: int = 20) -> list[tuple[str, str]]:
+    prefix = prefix.lower().strip(":")
+    out = [(c, e) for c, e in SHORTCODES.items() if c.startswith(prefix)]
+    out += [
+        (c, e)
+        for c, e in SHORTCODES.items()
+        if prefix in c and not c.startswith(prefix)
+    ]
+    return out[:limit]
+
+
+QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "✈️"]

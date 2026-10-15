@@ -1,7 +1,12 @@
+"""Readline CLI frontend. Commands are `/`-prefixed; plain text sends to the
+active conversation. Messages are shown with a short `#n` handle that other
+commands (/reply, /react, /edit, /delete, /get) refer to."""
+
+from __future__ import annotations
+
+import mimetypes
 import os
-import queue
 import shlex
-import shutil
 import sys
 import threading
 import time
@@ -10,629 +15,439 @@ try:
     import readline
 
     _HAS_READLINE = True
-except ImportError:
+except ImportError:  # Windows without pyreadline
     _HAS_READLINE = False
 
-from muninn import bt
-from muninn.crypto import generate_keypair, privkey_from_bytes
-from muninn.groups import Group, GroupStore
-from muninn.peers import GROUP_ZERO, ConnectionManager
+from muninn import emoji
+from muninn.mesh import conv_group_id, dm_conv, group_conv
+from muninn.node import Node, default_transport
 from muninn.protocol import FrameTooLarge
-from muninn.storage import Storage
+from muninn.storage import StoredMessage
 
 COMMANDS = [
     "/dm ",
     "/group ",
     "/new ",
+    "/add ",
+    "/kick ",
+    "/leave",
+    "/rename ",
     "/nick ",
     "/list",
     "/peers",
     "/known",
     "/history",
+    "/reply ",
+    "/react ",
+    "/edit ",
+    "/delete ",
+    "/file ",
+    "/get ",
+    "/scan",
+    "/connect ",
+    "/status",
+    "/emoji ",
     "/help",
+    "/quit",
 ]
 
-HISTORY_DEFAULT = 20
-HISTORY_MAX = 500
-
-
-def setup_completer(conn_mgr: ConnectionManager, group_store: GroupStore):
-    if not _HAS_READLINE:
-        return
-
-    def completer(text, state):
-        buf = readline.get_line_buffer().lstrip()
-        if (
-            buf.startswith("/dm ")
-            or buf.startswith("/new ")
-            or buf.startswith("/nick ")
-        ):
-            # Offer MACs + display names for every peer we know about, not
-            # just the currently-connected ones — matches what resolve()
-            # accepts so tab-complete never refuses something the command
-            # parser would have accepted.
-            low = text.lower()
-            upper = text.upper()
-            with conn_mgr.peers_lock:
-                known = set(conn_mgr.peers.keys())
-            known.update(a for a in group_store.pubkeys if a != conn_mgr.local_mac)
-            known.update(group_store.names.keys())
-            known.update(group_store.overrides.keys())
-            options = [a for a in known if a.startswith(upper)]
-            seen_addrs = set(options)
-            for addr in known:
-                name = group_store.display_name(addr)
-                if (
-                    name != addr
-                    and name.lower().startswith(low)
-                    and addr not in seen_addrs
-                ):
-                    options.append(name)
-                    seen_addrs.add(addr)
-        elif buf.startswith("/group "):
-            options = [
-                g.name for g in group_store.groups.values() if g.name.startswith(text)
-            ]
-        elif buf.startswith("/"):
-            options = [c for c in COMMANDS if c.startswith(buf)]
-        else:
-            options = []
-        try:
-            return options[state]
-        except IndexError:
-            return None
-
-    readline.set_completer(completer)
-    readline.parse_and_bind("tab: complete")
-    readline.set_completer_delims(" ")
+HELP = """\
+/dm <peer>                 switch to a direct conversation
+/group <name>              switch to a group
+/new <name> <peer> [...]   create a group
+/add <peer> [...]          add people to the current group
+/kick <peer>               remove someone from the current group
+/rename <name>             rename the current group
+/leave                     leave the current group
+/nick <name>               set your display name
+/nick <peer> <name|"">     local nickname for a peer ("" clears)
+/list                      conversations (with unread counts)
+/peers  /known             reachable peers  /  everyone you know
+/history [N]               show the last N messages
+/reply <#n> <text>         reply to a message
+/react <#n> <emoji>        react (again to remove), e.g. /react #3 :fire:
+/edit <#n> <text>          edit your message
+/delete <#n>               delete your message for everyone
+/file <path> [caption]     send a file / picture
+/get <#n>                  download an offered file (big files are manual)
+/scan                      look for nearby devices
+/connect <addr>            dial a device by Bluetooth address
+/status                    links, routes, queues
+/emoji <prefix>            search emoji shortcodes
+/quit
+Text supports :shortcodes: like :thumbsup: :airplane: :joy:"""
 
 
 class ChatUI:
-    def __init__(
-        self,
-        conn_mgr: ConnectionManager,
-        group_store: GroupStore,
-        local_mac: str,
-    ):
-        self.conn_mgr = conn_mgr
-        self.group_store = group_store
-        self.local_mac = local_mac
-        self.active_conv: tuple[str, str | bytes] | None = None
-        self.input_queue: queue.Queue = queue.Queue()
-        self._display_lock = threading.Lock()
-        # Set while input() is blocking so _display() knows to redraw the prompt.
-        self._input_active = threading.Event()
+    def __init__(self, node: Node):
+        self.node = node
+        self.mesh = node.mesh
+        self.conv: str = ""
+        self._lock = threading.Lock()
+        self._refs: dict[int, bytes] = {}
+        self._ref_by_id: dict[bytes, int] = {}
+        self._next_ref = 1
+        m = self.mesh
+        m.on("message", self._on_message)
+        m.on("update", self._on_update)
+        m.on("group", lambda gid: None)
+        m.on("file", self._on_file)
+        m.on("typing", self._on_typing)
+        self._last_peers: set[str] = set()
+        m.on("peers", self._on_peers)
 
-        # msg_id -> set of dest addrs (for our outbound msgs)
-        self.outbound: dict[bytes, set[str]] = {}
-        # conv_key -> [(msg_id, sender_addr)] — unread incoming msgs per conv
-        self.unread: dict[tuple[str, str | bytes], list[bytes]] = {}
-        # Blocks _input_reader from drawing the next prompt until the current
-        # command has finished printing all output.
-        self._ready_for_prompt = threading.Event()
-        self._ready_for_prompt.set()
-
-        conn_mgr.on_message = self._on_message
-        conn_mgr.on_peer_change = self._on_peer_change
-        conn_mgr.on_group_setup = self._on_group_setup
-        conn_mgr.on_ack = self._on_ack
-        conn_mgr.on_read = self._on_read
-        conn_mgr.on_profile = self._on_profile
-
-    def _name(self, addr: str) -> str:
-        return self.group_store.display_name(addr)
+    # --- display -------------------------------------------------------------
 
     def _prompt(self) -> str:
-        if self.active_conv is None:
+        if not self.conv:
             return "> "
-        conv_type, key = self.active_conv
-        if conv_type == "dm":
-            assert isinstance(key, str)
-            return f"[DM:{self._name(key)}] > "
-        assert isinstance(key, bytes)
-        group = self.group_store.groups.get(key)
-        name = group.name if group else "?"
-        return f"[{name}] > "
+        return f"[{self._conv_name(self.conv)}] > "
 
-    def _display(self, msg: str) -> None:
-        """Print a line without corrupting the readline input in progress.
+    def _conv_name(self, conv: str) -> str:
+        if conv.startswith("dm:"):
+            return self.mesh.display_name(conv[3:])
+        g = self.mesh.groups.get(conv_group_id(conv) or b"")
+        return f"#{g.name}" if g else "#?"
 
-        Clears the current terminal line (which readline drew as prompt +
-        partial input), prints msg, then redraws prompt + buffer so the user
-        can keep typing from where they left off. The redraw is skipped when
-        input() is not currently blocking (e.g. between commands) to avoid
-        spurious blank prompt lines.
-        """
-        if not _HAS_READLINE:
-            with self._display_lock:
-                print(msg)
-            return
-        buf = readline.get_line_buffer()
-        prompt = self._prompt()
-        with self._display_lock:
-            sys.stdout.write("\r\033[K" + msg + "\n")
-            if self._input_active.is_set():
-                sys.stdout.write(prompt + buf)
+    def out(self, line: str) -> None:
+        with self._lock:
+            if _HAS_READLINE:
+                buf = readline.get_line_buffer()
+                sys.stdout.write("\r\033[K" + line + "\n" + self._prompt() + buf)
+            else:
+                sys.stdout.write("\r" + line + "\n")
             sys.stdout.flush()
 
-    def _status(self, text: str) -> None:
-        """Print a right-aligned delivery status indicator."""
-        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-        self._display(text.rjust(cols))
+    def _ref(self, msg_id: bytes) -> int:
+        r = self._ref_by_id.get(msg_id)
+        if r is None:
+            r = self._next_ref
+            self._next_ref += 1
+            self._refs[r] = msg_id
+            self._ref_by_id[msg_id] = r
+        return r
 
-    def _on_message(
-        self, group_id: bytes, sender_mac: str, text: str, msg_id: bytes
-    ) -> None:
-        sender_name = self._name(sender_mac)
-        if group_id == GROUP_ZERO:
-            conv_key: tuple[str, str | bytes] = ("dm", sender_mac)
-            self._display(f"[DM:{sender_name}] < {text}")
-        else:
-            conv_key = ("group", group_id)
-            group = self.group_store.groups.get(group_id)
-            name = group.name if group else "?"
-            self._display(f"[{name}] < {sender_name}: {text}")
-
-        if self.active_conv == conv_key:
-            self.conn_mgr.send_read(msg_id)
-        else:
-            self.unread.setdefault(conv_key, []).append(msg_id)
-
-    def _on_ack(self, msg_id: bytes, from_mac: str) -> None:
-        if msg_id in self.outbound:
-            self._status(f"\u2713 {self._name(from_mac)}")
-
-    def _on_read(self, msg_id: bytes, from_mac: str) -> None:
-        if msg_id in self.outbound:
-            self._status(f"\u2713\u2713 {self._name(from_mac)}")
-
-    def _on_profile(self, addr: str, name: str) -> None:
-        if name:
-            self._display(f"  {addr} is now known as {name}")
-        else:
-            self._display(f"  {addr} cleared their display name")
-
-    def _flush_reads(self, conv_key: tuple[str, str | bytes]) -> None:
-        for msg_id in self.unread.pop(conv_key, []):
-            self.conn_mgr.send_read(msg_id)
-
-    def _render_history(
-        self, conv_key: tuple[str, str | bytes], limit: int = HISTORY_DEFAULT
-    ) -> None:
-        """Print recent stored messages for a conv. No-op if storage unset."""
-        storage = self.conn_mgr.storage
-        if storage is None:
-            return
-        conv_type, key = conv_key
-        msgs: list[tuple[bytes, str, str, int, str]]
-        if conv_type == "dm":
-            assert isinstance(key, str)
-            peer_name = self._name(key)
-            msgs = storage.load_dm_history(self.local_mac, key, limit)
-            if not msgs:
-                return
-            plural = "s" if len(msgs) != 1 else ""
-            self._display(f"--- {len(msgs)} previous message{plural} ---")
-            for _msg_id, sender, body, ts, _ack in msgs:
-                t = time.strftime("%H:%M", time.localtime(ts))
-                arrow = ">" if sender == self.local_mac else "<"
-                self._display(f"  {t} [DM:{peer_name}] {arrow} {body}")
-        else:
-            assert isinstance(key, bytes)
-            group = self.group_store.groups.get(key)
-            gname = group.name if group else "?"
-            msgs = storage.load_group_history(key, self.local_mac, limit)
-            if not msgs:
-                return
-            plural = "s" if len(msgs) != 1 else ""
-            self._display(f"--- {len(msgs)} previous message{plural} ---")
-            for _msg_id, sender, body, ts, _ack in msgs:
-                t = time.strftime("%H:%M", time.localtime(ts))
-                if sender == self.local_mac:
-                    self._display(f"  {t} [{gname}] > {body}")
-                else:
-                    self._display(f"  {t} [{gname}] < {self._name(sender)}: {body}")
-        self._display("---")
-
-    def _on_peer_change(self, addr: str, connected: bool) -> None:
-        label = self._name(addr)
-        if connected:
-            self._display(f"+ {label} connected")
-            if self.active_conv is None:
-                self.active_conv = ("dm", addr)
-                self._display(f"  Active conversation: DM with {label}")
-                self._render_history(self.active_conv)
-        else:
-            self._display(f"- {label} disconnected")
-
-    def _on_group_setup(self, group: Group) -> None:
-        members = len(group.members)
-        self._display(f"+ Group '{group.name}' created ({members} members)")
-
-    def _input_reader(self) -> None:
-        try:
-            while True:
-                self._ready_for_prompt.wait()
-                self._ready_for_prompt.clear()
-                self._input_active.set()
-                line = input(self._prompt())
-                self._input_active.clear()
-                self.input_queue.put(line)
-        except (EOFError, KeyboardInterrupt):
-            self._input_active.clear()
-            self.input_queue.put(None)
-
-    def _handle_command(self, text: str) -> None:
-        # shlex lets names/values contain spaces when quoted
-        # (e.g. `/nick "Long Name"`, `/new "Sky Team" alice bob`).
-        try:
-            parts = shlex.split(text)
-        except ValueError as e:
-            print(f"Parse error: {e}")
-            return
-        if not parts:
-            return
-        cmd = parts[0].lower()
-
-        if cmd == "/peers":
-            with self.conn_mgr.peers_lock:
-                direct_addrs = list(self.conn_mgr.peers.keys())
-            direct_set = set(direct_addrs)
-            # Relay section: all known peers that aren't direct. Uses
-            # group_store.pubkeys (not indirect_via) as the source of truth so
-            # peers whose pubkey arrived via DB or a previous Peer Annc still
-            # show even if indirect_via wasn't populated yet. indirect_via is
-            # used for the "via X" annotation only (best-effort).
-            relay_addrs = [
-                addr
-                for addr in self.group_store.pubkeys
-                if addr != self.local_mac and addr not in direct_set
-            ]
-            if not direct_addrs and not relay_addrs:
-                print("No connected or reachable peers.")
-            else:
-                if direct_addrs:
-                    print("Connected:")
-                    for addr in direct_addrs:
-                        name = self._name(addr)
-                        suffix = f" ({addr})" if name != addr else ""
-                        print(f"  {name}{suffix}")
-                if relay_addrs:
-                    print("Reachable via relay:")
-                    for addr in relay_addrs:
-                        name = self._name(addr)
-                        suffix = f" ({addr})" if name != addr else ""
-                        via = self.conn_mgr.indirect_via.get(addr)
-                        via_str = self._name(via) if via else "?"
-                        print(f"  {name}{suffix}  via {via_str}")
-
-        elif cmd == "/known":
-            all_peers = sorted(
-                addr for addr in self.group_store.pubkeys if addr != self.local_mac
+    def _fmt(self, m: StoredMessage) -> str:
+        t = time.strftime("%H:%M", time.localtime(m.ts))
+        who = (
+            "you" if m.sender == self.mesh.node_id else self.mesh.display_name(m.sender)
+        )
+        ref = self._ref(m.msg_id)
+        if m.kind == "system":
+            return f"  {t} · {m.text}"
+        if m.deleted:
+            body = "(deleted)"
+        elif m.kind == "file":
+            fid = bytes.fromhex(m.meta.get("f", "00"))
+            have, total, state = self.mesh.file_progress(fid)
+            size = m.meta.get("s", 0)
+            status = {"complete": "✓", "downloading": f"{have}/{total}"}.get(
+                state, "/get to download"
             )
-            if not all_peers:
-                print("No known peers.")
-            else:
-                with self.conn_mgr.peers_lock:
-                    direct_set = set(self.conn_mgr.peers.keys())
-                print("All known peers:")
-                for addr in all_peers:
-                    name = self._name(addr)
-                    suffix = f" ({addr})" if name != addr else ""
-                    if addr in direct_set:
-                        status = "  [connected]"
-                    elif addr in self.conn_mgr.indirect_via:
-                        via = self.conn_mgr.indirect_via[addr]
-                        status = f"  [relay via {self._name(via)}]"
-                    else:
-                        status = "  [offline]"
-                    print(f"  {name}{suffix}{status}")
+            body = f"📎 {m.meta.get('n')} ({_human(size)}) [{status}]"
+            if m.text:
+                body += f" — {m.text}"
+        else:
+            body = m.text
+        if m.edited and not m.deleted:
+            body += " (edited)"
+        reply = ""
+        if m.reply_to:
+            orig = self.mesh.storage.get_message(m.reply_to)
+            if orig:
+                reply = f"↪ {self.mesh.display_name(orig.sender)}: {orig.text[:30]!r} "
+        ticks = ""
+        if m.sender == self.mesh.node_id:
+            ticks = {"sent": " ◌", "delivered": " ✓", "read": " ✓✓"}[m.state]
+        reacts = ""
+        if m.reactions:
+            reacts = "  " + " ".join(
+                f"{e}{len(w) if len(w) > 1 else ''}" for e, w in m.reactions.items()
+            )
+        return f"  {t} #{ref} {who}: {reply}{body}{ticks}{reacts}"
 
-        elif cmd == "/dm":
-            if len(parts) < 2:
-                print("Usage: /dm <name|addr>")
-                return
-            resolved = self.group_store.resolve(parts[1])
-            if resolved is None:
-                print(f"Unknown peer: {parts[1]}")
-                return
-            self.active_conv = ("dm", resolved)
-            self._flush_reads(self.active_conv)
-            print(f"Switched to DM with {self._name(resolved)}")
-            self._render_history(self.active_conv)
+    # --- events (event thread) ---------------------------------------------
 
-        elif cmd == "/group":
-            if len(parts) < 2:
-                print("Usage: /group <name>")
-                return
-            name = parts[1]
-            for gid, group in self.group_store.groups.items():
-                if group.name == name:
-                    self.active_conv = ("group", gid)
-                    self._flush_reads(self.active_conv)
-                    print(f"Switched to group '{name}'")
-                    self._render_history(self.active_conv)
-                    return
-            print(f"Group '{name}' not found.")
+    def _on_message(self, m: StoredMessage) -> None:
+        if m.conv == self.conv:
+            self.out(self._fmt(m))
+            if m.sender != self.mesh.node_id:
+                self.mesh.mark_read(m.conv)
+        elif m.sender != self.mesh.node_id:
+            prev = m.text if m.kind != "file" else "📎 " + m.meta.get("n", "file")
+            self.out(
+                f"  ✉ {self._conv_name(m.conv)} · {self.mesh.display_name(m.sender)}: {prev[:60]}"
+            )
 
-        elif cmd == "/new":
-            if len(parts) < 3:
-                print("Usage: /new <name> <peer1> [peer2] ...")
-                return
-            name = parts[1]
-            addrs: list[str] = []
-            for p in parts[2:]:
-                resolved = self.group_store.resolve(p)
-                if resolved is None:
-                    print(f"Unknown peer: {p}")
-                    return
-                addrs.append(resolved)
-            try:
-                group = self.conn_mgr.create_group(name, addrs)
-                self.active_conv = ("group", group.group_id)
-                self._flush_reads(self.active_conv)
-                print(f"Created group '{name}'")
-            except ValueError as e:
-                print(f"Error: {e}")
+    def _on_update(self, msg_id: bytes) -> None:
+        m = self.mesh.storage.get_message(msg_id)
+        if m and m.conv == self.conv and msg_id in self._ref_by_id:
+            self.out(self._fmt(m).replace("  ", "  ↻ ", 1))
 
-        elif cmd == "/nick":
-            if len(parts) == 2:
-                # /nick <name> — set our own name and broadcast.
-                new_name = parts[1]
-                self.conn_mgr.set_display_name(new_name)
-                if new_name:
-                    print(f"You are now known as '{new_name}'")
-                else:
-                    print("Cleared your display name")
-            elif len(parts) == 3:
-                # /nick <peer> <name> — set local override, or clear it
-                # when <name> is empty (pass as "" via shell quoting).
-                resolved = self.group_store.resolve(parts[1])
-                if resolved is None:
-                    print(f"Unknown peer: {parts[1]}")
-                    return
-                if parts[2] == "":
-                    self.group_store.clear_override(resolved)
-                    print(f"Cleared override for {resolved}")
-                else:
-                    self.group_store.set_override(resolved, parts[2])
-                    print(f"Local override: {resolved} → '{parts[2]}'")
-            else:
-                print(
-                    "Usage: /nick <name>  |  /nick <peer> <name>  "
-                    '|  /nick <peer> ""  (clear override)'
-                )
+    def _on_file(self, file_id: bytes) -> None:
+        have, total, state = self.mesh.file_progress(file_id)
+        if state == "complete":
+            rec = self.mesh.files.get(file_id)
+            if rec and rec.sender != self.mesh.node_id:
+                self.out(f"  📎 saved {rec.name} → {rec.path}")
 
-        elif cmd == "/list":
-            print("Conversations:")
-            with self.conn_mgr.peers_lock:
-                for addr in self.conn_mgr.peers:
-                    marker = " *" if self.active_conv == ("dm", addr) else ""
-                    print(f"  DM: {self._name(addr)}{marker}")
-            for gid, group in self.group_store.groups.items():
-                marker = " *" if self.active_conv == ("group", gid) else ""
-                n = len(group.members)
-                print(f"  Group: {group.name} ({n} members){marker}")
+    def _on_typing(self, conv: str, node: str) -> None:
+        pass  # too chatty for a terminal
 
-        elif cmd == "/history":
-            if self.active_conv is None:
-                print("No active conversation.")
-                return
-            limit = HISTORY_DEFAULT
-            if len(parts) >= 2:
+    def _on_peers(self) -> None:
+        now = set(self.mesh.connected())
+        for n in now - self._last_peers:
+            self.out(f"  + {self.mesh.display_name(n)} connected")
+        for n in self._last_peers - now:
+            self.out(f"  - {self.mesh.display_name(n)} disconnected")
+        self._last_peers = now
+
+    # --- commands ------------------------------------------------------------
+
+    def _peer(self, s: str) -> str | None:
+        r = self.mesh.resolve(s)
+        if r is None:
+            self.out(f"! unknown peer: {s}")
+        return r
+
+    def _peers_of(self, names: list[str]) -> list[str] | None:
+        out = []
+        for n in names:
+            p = self._peer(n)
+            if p is None:
+                return None
+            out.append(p)
+        return out
+
+    def _msg(self, ref: str) -> bytes | None:
+        try:
+            mid = self._refs[int(ref.lstrip("#"))]
+        except (ValueError, KeyError):
+            self.out(f"! no message {ref}")
+            return None
+        return mid
+
+    def _need_conv(self) -> bool:
+        if not self.conv:
+            self.out("! no active conversation (/dm or /group first)")
+            return False
+        return True
+
+    def handle(self, line: str) -> bool:
+        line = line.strip()
+        if not line:
+            return True
+        if not line.startswith("/"):
+            if self._need_conv():
                 try:
-                    limit = int(parts[1])
-                except ValueError:
-                    print(f"Usage: /history [N]  (default {HISTORY_DEFAULT})")
-                    return
-                if limit <= 0:
-                    print("N must be positive.")
-                    return
-                limit = min(limit, HISTORY_MAX)
-            self._render_history(self.active_conv, limit=limit)
-
-        elif cmd == "/help":
-            print("Commands:")
-            print("  /dm <name|addr>         — switch to DM")
-            print("  /group <name>           — switch to group")
-            print("  /new <name> <p1> [p2..] — create group")
-            print("  /nick <name>            — set your own display name")
-            print("  /nick <peer> <name>     — local override for a peer")
-            print('  /nick <peer> ""         — clear a local override')
-            print("  /list                   — show conversations")
-            print("  /peers                  — show connected + relay peers")
-            print("  /known                  — show all peers ever seen")
-            print(
-                f"  /history [N]            — show last N msgs (default {HISTORY_DEFAULT})"
-            )
-
+                    self.mesh.send_text(self.conv, emoji.expand(line))
+                except (ValueError, FrameTooLarge) as e:
+                    self.out(f"! {e}")
+            return True
+        try:
+            parts = shlex.split(line)
+        except ValueError as e:
+            self.out(f"! {e}")
+            return True
+        cmd, args = parts[0][1:].lower(), parts[1:]
+        mesh = self.mesh
+        if cmd in ("quit", "q", "exit"):
+            return False
+        if cmd == "help":
+            self.out(HELP)
+        elif cmd == "dm" and args:
+            if p := self._peer(args[0]):
+                self.switch(dm_conv(p))
+        elif cmd == "group" and args:
+            for g in mesh.groups.values():
+                if g.name.lower() == args[0].lower():
+                    self.switch(g.conv)
+                    break
+            else:
+                self.out(f"! no group {args[0]}")
+        elif cmd == "new" and len(args) >= 2:
+            peers = self._peers_of(args[1:])
+            if peers is not None:
+                gid = mesh.create_group(args[0], peers)
+                self.switch(group_conv(gid))
+        elif cmd in ("add", "kick", "rename", "leave"):
+            gid = conv_group_id(self.conv)
+            if gid is None:
+                self.out("! not in a group conversation")
+            elif cmd == "add" and args:
+                peers = self._peers_of(args)
+                if peers is not None:
+                    mesh.update_group(gid, add=peers)
+            elif cmd == "kick" and args:
+                if p := self._peer(args[0]):
+                    mesh.update_group(gid, remove=[p])
+            elif cmd == "rename" and args:
+                mesh.update_group(gid, name=" ".join(args))
+            elif cmd == "leave":
+                mesh.leave_group(gid)
+        elif cmd == "nick" and len(args) == 1:
+            mesh.set_name(args[0])
+            self.out(f"  you are now {args[0]}")
+        elif cmd == "nick" and len(args) == 2:
+            if p := self._peer(args[0]):
+                mesh.set_override(p, args[1] or None)
+        elif cmd == "list":
+            unread = mesh.storage.unread_counts()
+            last = mesh.storage.last_messages()
+            convs = {dm_conv(p) for p in mesh.peers} | {
+                g.conv for g in mesh.groups.values()
+            }
+            for c in sorted(convs, key=lambda c: -(last[c].ts if c in last else 0)):
+                u = unread.get(c, 0)
+                self.out(
+                    f"  {'*' if c == self.conv else ' '} {self._conv_name(c)}"
+                    f"{f'  ({u} unread)' if u else ''}"
+                )
+        elif cmd in ("peers", "known"):
+            for nid, p in sorted(mesh.peers.items(), key=lambda kv: kv[1].display):
+                h = mesh.hops(nid)
+                if cmd == "peers" and h is None:
+                    continue
+                where = "direct" if h == 1 else (f"{h} hops" if h else "offline")
+                self.out(f"  {p.display:20} {where:10} {nid}")
+        elif cmd == "history":
+            if self._need_conv():
+                n = int(args[0]) if args and args[0].isdigit() else 30
+                for m in mesh.storage.load_history(self.conv, n):
+                    self.out(self._fmt(m))
+        elif cmd == "reply" and len(args) >= 2 and self._need_conv():
+            if mid := self._msg(args[0]):
+                mesh.send_text(
+                    self.conv, emoji.expand(" ".join(args[1:])), reply_to=mid
+                )
+        elif cmd == "react" and len(args) == 2 and self._need_conv():
+            if mid := self._msg(args[0]):
+                e = emoji.expand(args[1])
+                m = mesh.storage.get_message(mid)
+                mine = m and mesh.node_id in m.reactions.get(e, [])
+                mesh.react(self.conv, mid, e, remove=bool(mine))
+        elif cmd == "edit" and len(args) >= 2 and self._need_conv():
+            if mid := self._msg(args[0]):
+                mesh.edit(self.conv, mid, emoji.expand(" ".join(args[1:])))
+        elif cmd == "delete" and args and self._need_conv():
+            if mid := self._msg(args[0]):
+                mesh.delete(self.conv, mid)
+        elif cmd == "file" and args and self._need_conv():
+            path = os.path.expanduser(args[0])
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            try:
+                mesh.send_file(self.conv, path, mime, caption=" ".join(args[1:]))
+            except (OSError, ValueError) as e:
+                self.out(f"! {e}")
+        elif cmd == "get" and args:
+            if mid := self._msg(args[0]):
+                m = mesh.storage.get_message(mid)
+                if m and m.kind == "file":
+                    mesh.download(bytes.fromhex(m.meta["f"]))
+        elif cmd == "scan":
+            self.out("  scanning…")
+            for addr, name, ok in self.node.scan_now(6):
+                self.out(f"  {'★' if ok else ' '} {addr}  {name}")
+        elif cmd == "connect" and args:
+            threading.Thread(target=self._connect, args=(args[0],), daemon=True).start()
+        elif cmd == "status":
+            st = mesh.status()
+            self.out(f"  me {st['name']} {st['node']}  outbox={st['outbox']}")
+            for lk in st["links"]:
+                self.out(
+                    f"  link {mesh.display_name(lk['node'])} via {lk['addr']} "
+                    f"rtt={lk['rtt_ms']}ms idle={lk['idle']}s"
+                )
+            for d, vias in st["routes"].items():
+                self.out(
+                    f"  route {mesh.display_name(d)}: "
+                    + ", ".join(
+                        f"via {mesh.display_name(v)} ({h})" for v, h in vias.items()
+                    )
+                )
+        elif cmd == "emoji":
+            res = emoji.search(args[0] if args else "")
+            self.out("  " + "  ".join(f"{e} :{c}:" for c, e in res))
         else:
-            print(f"Unknown command: {cmd}. Type /help")
+            self.out("! unknown command or missing arguments — /help")
+        return True
+
+    def _connect(self, addr: str) -> None:
+        try:
+            nid = self.node.connect_to(addr)
+            self.out(f"  connected to {self.mesh.display_name(nid) if nid else addr}")
+        except Exception as e:
+            self.out(f"! connect failed: {e}")
+
+    def switch(self, conv: str) -> None:
+        self.conv = conv
+        self.out(f"── {self._conv_name(conv)} ──")
+        for m in self.mesh.storage.load_history(conv, 20):
+            self.out(self._fmt(m))
+        self.mesh.mark_read(conv)
 
     def run(self) -> None:
-        threading.Thread(target=self._input_reader, daemon=True).start()
-
-        try:
-            while True:
-                try:
-                    line = self.input_queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-
-                if line is None:
-                    break
-
-                text = line.strip()
-                try:
-                    if not text:
-                        continue
-
-                    if text.startswith("/"):
-                        self._handle_command(text)
-                        continue
-
-                    if self.active_conv is None:
-                        print("No active conversation. Use /dm <addr> or /peers")
-                        continue
-
-                    conv_type, key = self.active_conv
-                    dests: list[str] = []
-                    gid: bytes = GROUP_ZERO
-                    if conv_type == "dm":
-                        assert isinstance(key, str)
-                        dests = [key]
-                    elif conv_type == "group":
-                        assert isinstance(key, bytes)
-                        group = self.group_store.groups.get(key)
-                        if group:
-                            dests = [a for a in group.members if a != self.local_mac]
-                            gid = key
-                        else:
-                            print("Group not found.")
-
-                    if dests:
-                        # Display before send so peer-disconnect messages from
-                        # send_to's error path appear after, not before.
-                        self._status("\u29d7")
-                        try:
-                            result = self.conn_mgr.send_message(gid, text, dests)
-                        except FrameTooLarge as e:
-                            self._status(f"! message too large: {e}")
-                            continue
-                        if result is None:
-                            self._status("! no reachable recipient (no pubkey)")
-                        else:
-                            msg_id, sent, skipped = result
-                            self.outbound[msg_id] = set(sent)
-                            for addr in skipped:
-                                self._status(
-                                    f"! skipped {self._name(addr)} (no pubkey)"
-                                )
-                finally:
-                    self._ready_for_prompt.set()
-
-        except KeyboardInterrupt:
-            pass
-
-
-def acceptor(conn_mgr: ConnectionManager) -> None:
-    """Accept incoming connections and hand to ConnectionManager."""
-    while True:
-        try:
-            sock, addr = bt.accept()
-            conn_mgr.add_peer(sock, addr)
-        except ConnectionError:
-            break
-
-
-def scanner(conn_mgr: ConnectionManager, local_mac: str, stop: threading.Event) -> None:
-    """Periodically discover and connect to new Muninn peers."""
-    # Initial scan to populate BlueZ cache
-    try:
-        bt.scan_devices(duration=5)
-    except Exception:
-        pass
-
-    deferred: dict[str, float] = {}  # MAC tiebreaker deferral
-    cycles = 0
-
-    while not stop.is_set():
-        cycles += 1
-        # Refresh BT cache every ~2 min so UUIDs stay current and newly-online
-        # peers are discoverable even if they missed the initial scan window.
-        if cycles % 8 == 0:
+        self._setup_completer()
+        while True:
             try:
-                bt.scan_devices(duration=5, quiet=True)
-            except Exception:
-                pass
-        try:
-            services = bt.discover()
-        except Exception:
-            services = []
+                line = input(self._prompt())
+            except EOFError:
+                break
+            if not self.handle(line):
+                break
 
-        for addr, _name in services:
-            addr = addr.upper()
-            if addr == local_mac:
-                continue
-            if conn_mgr.is_connected(addr):
-                deferred.pop(addr, None)
-                continue
+    def _setup_completer(self) -> None:
+        if not _HAS_READLINE:
+            return
 
-            # Higher MAC defers 10s to let lower MAC initiate
-            if not bt.should_keep_outgoing(local_mac, addr):
-                if addr not in deferred:
-                    deferred[addr] = time.time()
-                    continue
-                if time.time() - deferred[addr] < 10:
-                    continue
+        def complete(text, state):
+            buf = readline.get_line_buffer().lstrip()
+            if buf.startswith(("/dm ", "/new ", "/nick ", "/add ", "/kick ")):
+                opts = [
+                    p.display
+                    for p in self.mesh.peers.values()
+                    if p.display.lower().startswith(text.lower())
+                ]
+            elif buf.startswith("/group "):
+                opts = [
+                    g.name for g in self.mesh.groups.values() if g.name.startswith(text)
+                ]
+            elif buf.startswith("/"):
+                opts = [c for c in COMMANDS if c.startswith(buf)]
+            elif text.startswith(":"):
+                opts = [f":{c}:" for c, _ in emoji.search(text)]
+            else:
+                opts = []
+            return opts[state] if state < len(opts) else None
 
-            deferred.pop(addr, None)
-            try:
-                bt.ensure_paired(addr)
-                sock, peer_addr = bt.connect(addr)
-                conn_mgr.add_peer(sock, peer_addr)
-            except (ConnectionError, OSError):
-                pass
-
-        stop.wait(15)
+        readline.set_completer(complete)
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer_delims(" ")
 
 
-def main():
-    local_mac = bt.get_local_mac()
-    print(f"Local MAC: {local_mac}")
+def _human(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
 
-    storage = Storage()
 
-    # Load or create persistent identity. Privkey is reused across runs so
-    # our X25519 pubkey (and therefore shared secrets with peers) is stable.
-    identity = storage.get_identity()
-    if identity is None:
-        private_key = generate_keypair()
-        identity = storage.create_identity(bytes(private_key))
-    else:
-        private_key = privkey_from_bytes(identity.privkey)
-
-    # Register ourselves in the peers table so load_groups can JOIN on
-    # local_mac and include us in every group's member list.
-    storage.save_peer_pubkey(local_mac, bytes(private_key.public_key))
-
-    # MUNINN_NAME env var takes precedence over persisted name so users can
-    # override per-session without clobbering persisted state.
-    env_name = os.environ.get("MUNINN_NAME", "")
-    display_name = env_name or identity.display_name
-
-    group_store = GroupStore(storage=storage)
-    conn_mgr = ConnectionManager(
-        local_mac,
-        private_key,
-        group_store,
-        display_name=display_name,
-        storage=storage,
+def main() -> None:
+    name = os.environ.get("MUNINN_NAME") or None
+    node = Node(default_transport(), name=name)
+    print(
+        f"Muninn — you are {node.mesh.name or '(no name: /nick <name>)'} [{node.node_id}]"
     )
-    if display_name:
-        print(f"Display name: {display_name}")
-
-    setup_completer(conn_mgr, group_store)
-    bt.create_server()
-
-    stop = threading.Event()
-    threading.Thread(target=acceptor, args=(conn_mgr,), daemon=True).start()
-    threading.Thread(
-        target=scanner, args=(conn_mgr, local_mac, stop), daemon=True
-    ).start()
-
-    print("Scanning for peers... (type /help for commands)")
-
-    ui = ChatUI(conn_mgr, group_store, local_mac)
+    print("Looking for peers… /help for commands")
+    node.start()
+    ui = ChatUI(node)
     try:
         ui.run()
     except KeyboardInterrupt:
         pass
     finally:
-        stop.set()
-        bt.close_server()
-        storage.close()
-
+        node.stop()
     print("\nBye.")
 
 

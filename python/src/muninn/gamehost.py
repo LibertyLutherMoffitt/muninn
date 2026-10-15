@@ -1,0 +1,239 @@
+"""Game sessions on top of Mesh app events — the host side of the generic
+game API (see games/README.md).
+
+A game is one self-contained JavaScript file (a "plugin") whose first line is
+
+    // @muninn-game {"id": "chess", "name": "Chess", "icon": "♟️", "min": 2, "max": 2}
+
+The plugin's code travels inside the invite, so every participant runs the
+exact same rules even if their installed copy differs (or they never had it).
+
+Session event types (all reliable app events, app id = game id):
+    invite  {game, name, icon, min, max, seed, code}
+    join    {}               decline {}
+    start   {players: [...]} (creator, for games with min < max)
+    move    {m: <any JSON>}  seq = move number (1, 2, ...)
+    resign  {}               end {}  (abandon)
+State = setup(players, seed) folded over moves sorted by (seq, ts, sender);
+illegal / out-of-turn moves are ignored identically everywhere.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import random
+import re
+import shutil
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from muninn.node import Node
+    from muninn.storage import AppEvent
+
+BUNDLED = Path(__file__).resolve().parent / "games"
+HEADER = re.compile(r"^\s*//\s*@muninn-game\s+(\{.*\})\s*$")
+MAX_CODE = 40_000
+
+
+def parse_header(src: str) -> dict:
+    first = src.lstrip("﻿").splitlines()[0] if src.strip() else ""
+    m = HEADER.match(first)
+    if not m:
+        raise ValueError("not a Muninn game (missing // @muninn-game header)")
+    meta = json.loads(m.group(1))
+    if not re.fullmatch(r"[a-z0-9_\-]{1,32}", str(meta.get("id", ""))):
+        raise ValueError("game id must be [a-z0-9_-]{1,32}")
+    meta.setdefault("name", meta["id"])
+    meta.setdefault("icon", "🎮")
+    meta.setdefault("min", 2)
+    meta.setdefault("max", meta["min"])
+    return meta
+
+
+class GameRegistry:
+    def __init__(self, node: Node):
+        self.node = node
+        self.mesh = node.mesh
+        self.user_dir = Path(node.storage.path).parent / "games"
+        self.user_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- catalog ---------------------------------------------------------------
+
+    def _files(self) -> dict[str, Path]:
+        out: dict[str, Path] = {}
+        for d in (BUNDLED, self.user_dir):
+            if d.is_dir():
+                for p in sorted(d.glob("*.js")):
+                    try:
+                        meta = parse_header(p.read_text(encoding="utf-8"))
+                    except (ValueError, OSError, json.JSONDecodeError):
+                        continue
+                    out[meta["id"]] = p
+        return out
+
+    def catalog(self) -> list[dict]:
+        res = []
+        for gid, p in self._files().items():
+            meta = parse_header(p.read_text(encoding="utf-8"))
+            players = (
+                f"{meta['min']}"
+                if meta["min"] == meta["max"]
+                else f"{meta['min']}–{meta['max']}"
+            )
+            res.append(
+                {
+                    "id": gid,
+                    "name": meta["name"],
+                    "icon": meta["icon"],
+                    "players": players + " players",
+                    "user": p.parent == self.user_dir,
+                }
+            )
+        return sorted(res, key=lambda g: g["name"].lower())
+
+    def path_of(self, game_id: str) -> str:
+        return str(self._files()[game_id])
+
+    def install(self, path: str) -> str:
+        src = Path(path).read_text(encoding="utf-8")
+        if len(src) > MAX_CODE * 4:
+            raise ValueError("game file too large")
+        meta = parse_header(src)
+        shutil.copyfile(path, self.user_dir / f"{meta['id']}.js")
+        return meta["id"]
+
+    # --- sessions ---------------------------------------------------------------
+
+    def invite(self, conv: str, game_id: str) -> str:
+        files = self._files()
+        if game_id not in files:
+            raise ValueError(f"no such game: {game_id}")
+        src = files[game_id].read_text(encoding="utf-8")
+        if len(src.encode()) > MAX_CODE:
+            raise ValueError("game code too large to send in an invite")
+        meta = parse_header(src)
+        if not self.mesh.conv_members(conv):
+            raise ValueError("nobody to play with in this conversation")
+        session = os.urandom(6).hex()
+        self.mesh.app_event(
+            conv,
+            game_id,
+            session,
+            "invite",
+            {
+                "game": game_id,
+                "name": meta["name"],
+                "icon": meta["icon"],
+                "min": meta["min"],
+                "max": meta["max"],
+                "seed": random.randrange(2**31),
+                "code": src,
+            },
+            0,
+        )
+        return session
+
+    def _events(self, session: str) -> list[AppEvent]:
+        return self.mesh.storage.load_app_events(session)
+
+    def on_event(self, ev: AppEvent) -> None:
+        pass  # state is derived on demand from the stored event log
+
+    def session_info(self, session: str) -> dict:
+        evs = self._events(session)
+        inv = next((e for e in evs if e.type == "invite"), None)
+        if inv is None:
+            return {}
+        b = inv.body or {}
+        creator = inv.sender
+        joins = sorted(
+            (e for e in evs if e.type == "join" and e.sender != creator),
+            key=lambda e: (e.ts, e.sender),
+        )
+        declined = sorted({e.sender for e in evs if e.type == "decline"})
+        start = next(
+            (e for e in evs if e.type == "start" and e.sender == creator), None
+        )
+        mx, mn = int(b.get("max", 2)), int(b.get("min", 2))
+        joined = [creator]
+        for e in joins:
+            if e.sender not in joined:
+                joined.append(e.sender)
+        if start is not None:
+            players = [p for p in start.body.get("players", []) if p in joined]
+        else:
+            players = joined[:mx]
+        started = start is not None or len(players) >= mx
+        moves = sorted(
+            (e for e in evs if e.type == "move"), key=lambda e: (e.seq, e.ts, e.sender)
+        )
+        ended = [e for e in evs if e.type in ("resign", "end")]
+        me = self.mesh.node_id
+        if ended:
+            status = f"{self.mesh.display_name(ended[0].sender)} " + (
+                "resigned" if ended[0].type == "resign" else "ended the game"
+            )
+        elif started:
+            status = f"in progress · {len(moves)} moves"
+        else:
+            waiting = mn - len(players)
+            status = f"waiting for {max(waiting, 1)} more player(s)"
+        return {
+            "session": session,
+            "app": inv.app,
+            "conv": inv.conv,
+            "name": b.get("name", inv.app),
+            "icon": b.get("icon", "🎮"),
+            "creator": creator,
+            "seed": b.get("seed", 0),
+            "min": mn,
+            "max": mx,
+            "joined": joined,
+            "players": players if started else joined,
+            "declined": declined,
+            "started": started,
+            "ended": bool(ended),
+            "endedBy": ended[0].sender if ended else "",
+            "endType": ended[0].type if ended else "",
+            "me": me,
+            "amPlayer": me in (players if started else joined),
+            "invitedMe": me != creator and me not in joined and me not in declined,
+            "names": {p: self.mesh.display_name(p) for p in set(joined) | {me}},
+            "moves": [
+                {"seq": e.seq, "sender": e.sender, "m": (e.body or {}).get("m")}
+                for e in moves
+            ],
+            "status": status,
+            "ts": evs[-1].ts if evs else 0,
+        }
+
+    def code_for(self, session: str) -> str:
+        inv = next((e for e in self._events(session) if e.type == "invite"), None)
+        return (inv.body or {}).get("code", "") if inv else ""
+
+    def sessions(self, conv: str | None) -> list[dict]:
+        out = []
+        for session, app, c, _ts in self.mesh.storage.list_app_sessions(conv):
+            info = self.session_info(session)
+            if info:
+                out.append(info)
+        return out
+
+    def act(self, session: str, type_: str, body) -> None:
+        info = self.session_info(session)
+        if not info:
+            raise ValueError("unknown game session")
+        seq = 0
+        if type_ == "move":
+            seq = (max((m["seq"] for m in info["moves"]), default=0)) + 1
+            body = {"m": body}
+        self.mesh.app_event(info["conv"], info["app"], session, type_, body or {}, seq)
+
+    def rt(self, session: str, body) -> None:
+        info = self.session_info(session)
+        if info:
+            to = [p for p in info["players"] if p != self.mesh.node_id]
+            self.mesh.rt_send(info["conv"], info["app"], session, body, to=to)

@@ -255,6 +255,28 @@ class VimEditor(QObject):
         """
         self._exec_cmd(cmd)
 
+    @Slot(str)
+    def setBuffer(self, text: str) -> None:
+        """Load text into the composer in INSERT mode (used by :edit)."""
+        self._push_undo()
+        self._buf = text
+        self._pos = len(text)
+        if self._mode != VimMode.INSERT:
+            self._mode = VimMode.INSERT
+            self.modeChanged.emit(self._mode.name)
+        self._emit()
+
+    @Slot(str)
+    def insertText(self, text: str) -> None:
+        """Insert at the cursor (emoji picker)."""
+        self._push_undo()
+        self._buf = self._buf[: self._pos] + text + self._buf[self._pos :]
+        self._pos += len(text)
+        if self._mode != VimMode.INSERT:
+            self._mode = VimMode.INSERT
+            self.modeChanged.emit(self._mode.name)
+        self._emit()
+
     @Slot()
     def clear(self) -> None:
         self._push_undo()

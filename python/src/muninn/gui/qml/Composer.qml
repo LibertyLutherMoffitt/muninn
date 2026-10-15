@@ -139,7 +139,7 @@ Rectangle {
 
             Text {
                 visible: edit.text === "" && vimEditor && vimEditor.mode === "NORMAL"
-                text: "Press 'i' to type..."
+                text: root.convId ? "Press 'i' to type…  (:help for commands)" : ""
                 color: Theme.textMuted; font: edit.font; opacity: 0.5
             }
 
@@ -168,6 +168,8 @@ Rectangle {
     Connections {
         target: vimEditor
         function onBufferUpdated(text, pos) {
+            if (text !== edit.text && text !== "" && vimEditor.mode === "INSERT")
+                bridge.composerActivity()
             edit.text = text
             edit.cursorPosition = pos
             var rect = edit.cursorRectangle
@@ -176,18 +178,22 @@ Rectangle {
             blockCursor.visible = true
         }
         function onSendRequested(text) {
-            if (root.convId) {
-                bridge.setActiveConv(root.convId)
+            if (root.convId)
                 bridge.sendMessage(root.convId, text)
-            }
         }
     }
 
-    ToolTip {
-        visible: !root.writerMode
-        text: "Another Muninn instance holds the writer lock."
-        delay: 800; parent: root; anchors.centerIn: parent
+    Connections {
+        target: bridge
+        function onEditTargetChanged(text) {
+            vimEditor.setBuffer(text)
+            root.forceActiveFocus()
+        }
+        function onReplyTargetChanged() {
+            if (bridge.replyPreview !== "") root.forceActiveFocus()
+        }
     }
+
 
     MouseArea {
         anchors.fill: parent

@@ -1,12 +1,13 @@
-"""Advisory writer lock — first instance to acquire it owns the BT stack."""
+"""Single-instance lock (per data dir) — one Muninn owns the radio + DB."""
 
-import pathlib
 import sys
 
 
 class WriterLock:
     def __init__(self):
-        state_dir = pathlib.Path.home() / ".local" / "state" / "muninn"
+        from muninn.storage import data_dir
+
+        state_dir = data_dir()
         state_dir.mkdir(parents=True, exist_ok=True)
         self._path = state_dir / ".writer.lock"
         self._fd = None

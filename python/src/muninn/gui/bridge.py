@@ -1,340 +1,623 @@
-"""ChatBridge — Qt/QML ↔ core glue layer.
+"""ChatBridge — Qt/QML ↔ Mesh glue, command dispatcher and tab completion.
 
-All ConnectionManager callbacks fire from BT threads. We re-emit them as Qt
-signals; because the GUI thread is the consumer, Qt's cross-thread signal
-delivery (QueuedConnection) handles the hop safely.
+Mesh events arrive on the mesh event thread; they are re-emitted as Qt
+signals so all model mutation happens on the GUI thread.
 """
 
 from __future__ import annotations
 
+import mimetypes
+import os
 import shlex
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 
-from muninn.peers import GROUP_ZERO
+from muninn import emoji
+from muninn.mesh import conv_group_id, dm_conv, group_conv
 from muninn.protocol import FrameTooLarge
 
+from muninn import gamehost
+
 from . import notifications
-from .models import ACK_ACKED, ACK_READ, MessageListModel, PeerListModel
+from .models import MessageListModel, PeerListModel
 
 if TYPE_CHECKING:
-    from muninn.groups import Group, GroupStore
-    from muninn.peers import ConnectionManager
-    from muninn.storage import Storage
+    from muninn.node import Node
+    from muninn.storage import AppEvent, StoredMessage
+
+
+QVariant = cast(type, "QVariant")  # PySide accepts the type name
 
 
 def _shquote(s: str) -> str:
-    """Quote a token only if it contains whitespace."""
     if not s:
         return '""'
-    if any(ch.isspace() for ch in s):
-        return shlex.quote(s)
-    return s
+    return shlex.quote(s) if any(c.isspace() for c in s) else s
 
 
 class ChatBridge(QObject):
-    # --- signals (emitted from BT threads, delivered on GUI thread) ---
+    # internal hops from mesh thread -> GUI thread
+    _sigMessage = Signal(object)
+    _sigUpdate = Signal(object)
+    _sigPeers = Signal()
+    _sigGroup = Signal(object)
+    _sigFile = Signal(object)
+    _sigTyping = Signal(str, str)
+    _sigApp = Signal(object)
+    _sigRt = Signal(str, str, str, QVariant)
 
-    messageReceived = Signal(str, str, str, str, int)
-    # conv_id, sender_mac, text, msg_id_hex, timestamp
-
-    peerChanged = Signal(str, bool)  # addr, connected
-    ackReceived = Signal(str, str)  # msg_id_hex, from_mac
-    readReceived = Signal(str, str)  # msg_id_hex, from_mac
-    profileUpdated = Signal(str, str)  # addr, name
-    groupAdded = Signal(str, str)  # group_id_hex, name
-
-    activeConvChanged = Signal(str)  # new conv_id
-    scanResultsReady = Signal(list)  # [{mac, name}, ...]
-    errorOccurred = Signal(str)  # human-readable error
-    notify = Signal(str)  # neutral info toast
+    peerChanged = Signal(str, bool)
+    activeConvChanged = Signal(str)
+    scanResultsReady = Signal(list)
+    errorOccurred = Signal(str)
+    notify = Signal(str)
     quitRequested = Signal()
     scanRequested = Signal()
     paletteRequested = Signal()
-    # title, items: each item = {label, sub, convId?, action?}
     infoMenuRequested = Signal(str, list)
-
-    _isWriterChanged = Signal(bool)
-    _connCountChanged = Signal(int)
+    replyTargetChanged = Signal()
+    editTargetChanged = Signal(str)  # text to load into composer
+    selectionChanged = Signal(int)  # row index to scroll to
+    typingChanged = Signal()
+    filePickRequested = Signal()
+    emojiPickerRequested = Signal(str)  # mode: "insert" | "react"
+    imageViewRequested = Signal(str)
+    gameOpenRequested = Signal(str)  # session id
+    gameEvent = Signal(str)  # session id (state changed)
+    gameRt = Signal(str, str, QVariant)  # session, sender, body
+    statusChanged = Signal()
 
     def __init__(
         self,
-        conn_mgr: ConnectionManager,
-        group_store: GroupStore,
-        storage: Storage,
-        local_mac: str,
-        is_writer: bool,
+        node: Node,
         peer_model: PeerListModel,
         msg_model: MessageListModel,
         parent=None,
     ):
         super().__init__(parent)
-        self._cm = conn_mgr
-        self._gs = group_store
-        self._storage = storage
-        self._local_mac = local_mac
-        self._is_writer = is_writer
-        self._peer_model = peer_model
-        self._msg_model = msg_model
-        self._active_conv_id: str = ""
-        self._conn_count = 0
+        self.node = node
+        self.mesh = node.mesh
+        self._peers = peer_model
+        self._msgs = msg_model
+        self._active = ""
+        self._reply_to = ""
+        self._edit_id = ""
+        self._last_typing_sent = 0.0
+        self._connected: set[str] = set()
+        self.games = gamehost.GameRegistry(node)
 
-        # Initial peer list population
-        peer_model.refresh()
-
-        # Wire ConnectionManager callbacks
-        conn_mgr.on_message = self._cb_message
-        conn_mgr.on_peer_change = self._cb_peer_change
-        conn_mgr.on_ack = self._cb_ack
-        conn_mgr.on_read = self._cb_read
-        conn_mgr.on_profile = self._cb_profile
-        conn_mgr.on_group_setup = self._cb_group_setup
-
-        # Connect own signals to model update slots
-        self.messageReceived.connect(self._on_message_received)
-        self.peerChanged.connect(self._on_peer_changed)
-        self.ackReceived.connect(self._on_ack_received)
-        self.readReceived.connect(self._on_read_received)
-        self.profileUpdated.connect(self._on_profile_updated)
-        self.groupAdded.connect(self._on_group_added)
-
-    # ------------------------------------------------------------------
-    # ConnectionManager callbacks (called from BT threads)
-    # ------------------------------------------------------------------
-
-    def _cb_message(
-        self, group_id: bytes, sender_mac: str, text: str, msg_id: bytes
-    ) -> None:
-        conv_id = (
-            "dm:" + sender_mac if group_id == GROUP_ZERO else "group:" + group_id.hex()
+        m = self.mesh
+        m.on("message", self._sigMessage.emit)
+        m.on("update", self._sigUpdate.emit)
+        m.on("peers", self._sigPeers.emit)
+        m.on("group", self._sigGroup.emit)
+        m.on("file", self._sigFile.emit)
+        m.on("typing", self._sigTyping.emit)
+        m.on("app", self._sigApp.emit)
+        m.on(
+            "rt",
+            lambda src, app, session, body, blob: self._sigRt.emit(
+                src, app, session, body
+            ),
         )
-        self.messageReceived.emit(
-            conv_id, sender_mac, text, msg_id.hex(), int(time.time())
-        )
+        self._sigMessage.connect(self._on_message)
+        self._sigUpdate.connect(self._on_update)
+        self._sigPeers.connect(self._on_peers)
+        self._sigGroup.connect(lambda gid: self._peers.refresh())
+        self._sigFile.connect(self._on_file)
+        self._sigTyping.connect(self._on_typing)
+        self._sigApp.connect(self._on_app)
+        self._sigRt.connect(self._on_rt)
+        self._peers.refresh()
 
-    def _cb_peer_change(self, addr: str, connected: bool) -> None:
-        self.peerChanged.emit(addr, connected)
+    # ------------------------------------------------------------------ events
 
-    def _cb_ack(self, msg_id: bytes, from_mac: str) -> None:
-        self.ackReceived.emit(msg_id.hex(), from_mac)
+    def _on_message(self, m: StoredMessage) -> None:
+        self._peers.update_conv(m.conv)
+        if m.conv == self._active:
+            self._msgs.append(m)
+            if m.sender != self.mesh.node_id and self._window_focused():
+                self.mesh.mark_read(m.conv)
+                self._peers.update_conv(m.conv)
+        if m.sender != self.mesh.node_id and m.kind in ("text", "file"):
+            if not (m.conv == self._active and self._window_focused()):
+                who = self.mesh.display_name(m.sender)
+                gid = conv_group_id(m.conv)
+                title = (
+                    f"{who} · {self.mesh.groups[gid].name}"
+                    if gid and gid in self.mesh.groups
+                    else who
+                )
+                body = m.text if m.kind == "text" else "📎 " + m.meta.get("n", "file")
+                notifications.notify(title, body)
 
-    def _cb_read(self, msg_id: bytes, from_mac: str) -> None:
-        self.readReceived.emit(msg_id.hex(), from_mac)
+    def _on_update(self, msg_id: bytes) -> None:
+        self._msgs.refresh_msg(msg_id)
+        m = self.mesh.storage.get_message(msg_id)
+        if m:
+            self._peers.update_conv(m.conv)
 
-    def _cb_profile(self, addr: str, name: str) -> None:
-        self.profileUpdated.emit(addr, name)
+    def _on_peers(self) -> None:
+        now = set(self.mesh.connected())
+        for n in now - self._connected:
+            self.peerChanged.emit(n, True)
+        for n in self._connected - now:
+            self.peerChanged.emit(n, False)
+        self._connected = now
+        self._peers.update_conv("")
+        self.statusChanged.emit()
 
-    def _cb_group_setup(self, group: Group) -> None:
-        self.groupAdded.emit(group.group_id.hex(), group.name)
+    def _on_file(self, file_id: bytes) -> None:
+        rec = self.mesh.files.get(file_id)
+        if rec is not None:
+            self._msgs.refresh_file(rec.msg_id)
 
-    # ------------------------------------------------------------------
-    # GUI-thread model update slots
-    # ------------------------------------------------------------------
+    def _on_typing(self, conv: str, node: str) -> None:
+        self._peers.update_conv(conv)
+        self.typingChanged.emit()
 
-    def _on_message_received(
-        self, conv_id: str, sender_mac: str, text: str, msg_id: str, ts: int
-    ) -> None:
-        self._peer_model.set_last_message(conv_id, text, ts)
-        is_active = conv_id == self._active_conv_id
-        if is_active:
-            self._msg_model.add_message(
-                msg_id,
-                sender_mac,
-                self._gs.display_name(sender_mac),
-                text,
-                ts,
-                is_outbound=False,
+    def _on_app(self, ev: AppEvent) -> None:
+        self.games.on_event(ev)
+        self.gameEvent.emit(ev.session)
+        if ev.type == "invite" and ev.sender != self.mesh.node_id:
+            info = self.games.session_info(ev.session)
+            who = self.mesh.display_name(ev.sender)
+            notifications.notify(who, f"🎮 invites you to {info.get('name', ev.app)}")
+            self.notify.emit(
+                f"{who} invited you to {info.get('name', ev.app)} — :games"
             )
-        else:
-            self._peer_model.increment_unread(conv_id)
+        self._peers.update_conv(ev.conv)
 
-        # Desktop notification when the user can't see this message — either
-        # they're on another conv or the Muninn window isn't focused. Read
-        # receipts still fire only when the conv is opened, so this mirrors
-        # the same "did the user actually see it" criterion.
-        if not (is_active and self._window_focused()):
-            sender = self._gs.display_name(sender_mac)
-            if conv_id.startswith("group:"):
-                gid = bytes.fromhex(conv_id[6:])
-                grp = self._gs.groups.get(gid)
-                title = f"{sender} · {grp.name}" if grp else sender
-            else:
-                title = sender
-            notifications.notify(title, text)
+    def _on_rt(self, src: str, app: str, session: str, body) -> None:
+        self.gameRt.emit(session, src, body)
 
     @staticmethod
     def _window_focused() -> bool:
         app = QGuiApplication.instance()
-        if app is None:
-            return False
-        return app.focusWindow() is not None
+        return app is not None and app.focusWindow() is not None
 
-    def _on_peer_changed(self, addr: str, connected: bool) -> None:
-        self._peer_model.refresh()
-        with self._cm.peers_lock:
-            self._conn_count = len(self._cm.peers)
-        self._connCountChanged.emit(self._conn_count)
-
-    def _on_ack_received(self, msg_id: str, from_mac: str) -> None:
-        self._msg_model.update_ack(msg_id, ACK_ACKED)
-
-    def _on_read_received(self, msg_id: str, from_mac: str) -> None:
-        self._msg_model.update_ack(msg_id, ACK_READ)
-
-    def _on_profile_updated(self, addr: str, name: str) -> None:
-        self._peer_model.refresh()
-
-    def _on_group_added(self, group_id: str, name: str) -> None:
-        self._peer_model.refresh()
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ properties
 
     @Property(str, constant=True)
     def localMac(self) -> str:
-        return self._local_mac
+        return self.mesh.node_id
 
-    @Property(str, constant=True)
+    @Property(str, notify=statusChanged)
     def localName(self) -> str:
-        return self._gs.display_name(self._local_mac)
+        return self.mesh.name
 
     @Property(bool, constant=True)
     def isWriter(self) -> bool:
-        return self._is_writer
+        return True
 
-    @Property(int, notify=_connCountChanged)
+    @Property(int, notify=statusChanged)
     def connectedPeerCount(self) -> int:
-        return self._conn_count
+        return len(self.mesh.connected())
+
+    @Property(int, notify=statusChanged)
+    def reachablePeerCount(self) -> int:
+        return len([p for p in self.mesh.peers if self.mesh.reachable(p)])
+
+    @Property(str, constant=True)
+    def transportName(self) -> str:
+        return "SIM" if os.environ.get("MUNINN_SIM") else "BT"
 
     @Property(str, notify=activeConvChanged)
     def activeConvId(self) -> str:
-        return self._active_conv_id
+        return self._active
 
-    # ------------------------------------------------------------------
-    # Slots (callable from QML)
-    # ------------------------------------------------------------------
+    @Property(str, notify=activeConvChanged)
+    def activeTitle(self) -> str:
+        return self._conv_title(self._active)
+
+    @Property(str, notify=statusChanged)
+    def activeSubtitle(self) -> str:
+        c = self._active
+        if c.startswith("dm:"):
+            nid = c[3:]
+            h = self.mesh.hops(nid)
+            if h == 1:
+                return "nearby · direct"
+            if h:
+                via = self.mesh.display_name(self.mesh.next_hop(nid) or "")
+                return f"in range via {via} · {h} hops"
+            n = self.mesh.pending_count(nid)
+            return "out of range" + (f" · {n} waiting to send" if n else "")
+        gid = conv_group_id(c)
+        if gid and gid in self.mesh.groups:
+            g = self.mesh.groups[gid]
+            names = [
+                self.mesh.display_name(x)
+                for x in sorted(g.members)
+                if x != self.mesh.node_id
+            ]
+            here = sum(
+                1
+                for x in g.members
+                if x != self.mesh.node_id and self.mesh.reachable(x)
+            )
+            return f"{here}/{len(names)} in range · " + ", ".join(names)
+        return ""
+
+    @Property(str, notify=typingChanged)
+    def typingText(self) -> str:
+        who = [self.mesh.display_name(n) for n in self.mesh.typing_in(self._active)]
+        if not who:
+            return ""
+        return ", ".join(who) + (" is" if len(who) == 1 else " are") + " typing…"
+
+    @Property(str, notify=replyTargetChanged)
+    def replyPreview(self) -> str:
+        if not self._reply_to:
+            return ""
+        r = self._msgs.get(self._reply_to)
+        if r is None:
+            return ""
+        who = "yourself" if r["isOutbound"] else r["senderName"]
+        return f"Replying to {who}: {(r['text'] or r['fileName'])[:80]}"
+
+    @Property(str, notify=replyTargetChanged)
+    def editPreview(self) -> str:
+        return "Editing message" if self._edit_id else ""
+
+    def _conv_title(self, conv: str) -> str:
+        if conv.startswith("dm:"):
+            return self.mesh.display_name(conv[3:])
+        gid = conv_group_id(conv)
+        if gid and gid in self.mesh.groups:
+            return self.mesh.groups[gid].name
+        return ""
+
+    # ------------------------------------------------------------------ conv / messages
 
     @Slot(str)
     def setActiveConv(self, conv_id: str) -> None:
-        if conv_id == self._active_conv_id:
+        if conv_id == self._active:
             return
-        self._active_conv_id = conv_id
-        self._peer_model.clear_unread(conv_id)
-        self._load_history(conv_id)
+        self._active = conv_id
+        self._reply_to = self._edit_id = ""
+        self._msgs.selected = ""
+        self._msgs.load(conv_id)
+        if conv_id:
+            self.mesh.mark_read(conv_id)
+        self._peers.update_conv(conv_id)
         self.activeConvChanged.emit(conv_id)
+        self.replyTargetChanged.emit()
+        self.statusChanged.emit()
+        self.typingChanged.emit()
+
+    @Slot()
+    def windowActivated(self) -> None:
+        if self._active:
+            self.mesh.mark_read(self._active)
+            self._peers.update_conv(self._active)
 
     @Slot(str, str)
     def sendMessage(self, conv_id: str, text: str) -> None:
-        if not self._is_writer or not text.strip():
+        text = emoji.expand(text.strip())
+        if not text or not conv_id:
             return
-        text = text.strip()
-        if conv_id.startswith("dm:"):
-            addr = conv_id[3:]
-            dests = [addr]
-            gid = GROUP_ZERO
-        elif conv_id.startswith("group:"):
-            gid = bytes.fromhex(conv_id[6:])
-            group = self._gs.groups.get(gid)
-            if not group:
-                return
-            dests = [a for a in group.members if a != self._local_mac]
-            if not dests:
-                return
-        else:
-            return
-
         try:
-            result = self._cm.send_message(gid, text, dests)
-        except FrameTooLarge as e:
-            self.errorOccurred.emit(f"Message too large: {e}")
+            if self._edit_id:
+                self.mesh.edit(conv_id, bytes.fromhex(self._edit_id), text)
+                self._edit_id = ""
+            else:
+                reply = bytes.fromhex(self._reply_to) if self._reply_to else None
+                self.mesh.send_text(conv_id, text, reply)
+                self._reply_to = ""
+        except FrameTooLarge:
+            self.errorOccurred.emit("Message too long — send it as a file instead")
             return
-        except Exception as e:
+        except ValueError as e:
             self.errorOccurred.emit(str(e))
             return
+        self.replyTargetChanged.emit()
+        if not (
+            self.mesh.conv_members(conv_id)
+            and any(self.mesh.reachable(n) for n in self.mesh.conv_members(conv_id))
+        ):
+            self.notify.emit("Out of range — will send automatically when they're back")
 
-        msg_id, sent, skipped = result
-        if not sent:
-            self.errorOccurred.emit("No reachable recipient (no pubkey)")
-        elif skipped:
-            self.errorOccurred.emit(f"Skipped {len(skipped)} recipients (no pubkey)")
+    @Slot()
+    def composerActivity(self) -> None:
+        now = time.monotonic()
+        if self._active and now - self._last_typing_sent > 3.0:
+            self._last_typing_sent = now
+            try:
+                self.mesh.send_typing(self._active)
+            except Exception:
+                pass
 
-        ts = int(time.time())
-        self._msg_model.add_message(
-            msg_id.hex(),
-            self._local_mac,
-            self._gs.display_name(self._local_mac),
-            text,
-            ts,
-            is_outbound=True,
-        )
-        self._peer_model.set_last_message(conv_id, text, ts)
+    @Slot(str)
+    def selectMessage(self, msg_id: str) -> None:
+        self._msgs.select(msg_id)
+        self.selectionChanged.emit(self._msgs.row_of(msg_id))
+
+    @Slot(int)
+    def moveSelection(self, delta: int) -> None:
+        ids = self._msgs.ids()
+        if not ids:
+            return
+        cur = self._msgs.selected
+        i = ids.index(cur) if cur in ids else (len(ids) if delta < 0 else -1)
+        i = max(0, min(len(ids) - 1, i + delta))
+        self.selectMessage(ids[i])
+
+    def _target(self) -> str:
+        """Selected message, or the newest message from someone else."""
+        if self._msgs.selected:
+            return self._msgs.selected
+        for mid in reversed(self._msgs.ids()):
+            r = self._msgs.get(mid)
+            if r and not r["isOutbound"]:
+                return mid
+        ids = self._msgs.ids()
+        return ids[-1] if ids else ""
+
+    @Slot(str)
+    def replyTo(self, msg_id: str) -> None:
+        self._reply_to = msg_id or self._target()
+        self._edit_id = ""
+        self.replyTargetChanged.emit()
+
+    @Slot()
+    def cancelReply(self) -> None:
+        self._reply_to = self._edit_id = ""
+        self._msgs.select("")
+        self.replyTargetChanged.emit()
+
+    @Slot(str, str)
+    def toggleReaction(self, msg_id: str, emo: str) -> None:
+        msg_id = msg_id or self._target()
+        if not msg_id or not self._active:
+            return
+        emo = emoji.expand(emo)
+        m = self.mesh.storage.get_message(bytes.fromhex(msg_id))
+        if m is None:
+            return
+        mine = self.mesh.node_id in m.reactions.get(emo, [])
+        self.mesh.react(self._active, m.msg_id, emo, remove=mine)
+
+    @Slot(str)
+    def startEdit(self, msg_id: str) -> None:
+        msg_id = msg_id or self._msgs.selected
+        r = self._msgs.get(msg_id) if msg_id else None
+        if r is None:
+            # newest own message
+            for mid in reversed(self._msgs.ids()):
+                rr = self._msgs.get(mid)
+                if (
+                    rr
+                    and rr["isOutbound"]
+                    and rr["kind"] == "text"
+                    and not rr["deleted"]
+                ):
+                    r = rr
+                    break
+        if r is None or not r["isOutbound"] or r["kind"] != "text":
+            self.errorOccurred.emit("You can only edit your own text messages")
+            return
+        self._edit_id = r["msgId"]
+        self._reply_to = ""
+        self.replyTargetChanged.emit()
+        self.editTargetChanged.emit(r["text"])
+
+    @Slot(str)
+    def deleteMessage(self, msg_id: str) -> None:
+        msg_id = msg_id or self._msgs.selected
+        r = self._msgs.get(msg_id) if msg_id else None
+        if r is None or not r["isOutbound"]:
+            self.errorOccurred.emit("Select one of your own messages to delete (Alt+↑)")
+            return
+        self.mesh.delete(self._active, bytes.fromhex(msg_id))
+
+    @Slot(str)
+    def copyText(self, msg_id: str) -> None:
+        r = self._msgs.get(msg_id or self._target())
+        if r:
+            QGuiApplication.clipboard().setText(r["text"])
+            self.notify.emit("copied")
+
+    @Slot(str)
+    def openFile(self, msg_id: str) -> None:
+        r = self._msgs.get(msg_id or self._target())
+        if r is None or r["kind"] != "file":
+            return
+        if r["fileState"] == "complete":
+            if r["isImage"]:
+                self.imageViewRequested.emit(r["fileUrl"])
+            else:
+                QDesktopServices.openUrl(QUrl(r["fileUrl"]))
+        elif r["fileState"] in ("offered", "failed"):
+            m = self.mesh.storage.get_message(bytes.fromhex(r["msgId"]))
+            if m:
+                self.mesh.download(bytes.fromhex(m.meta["f"]))
+                self.notify.emit("downloading…")
+
+    @Slot(str)
+    def openFolder(self, msg_id: str) -> None:
+        r = self._msgs.get(msg_id or self._target())
+        if r and r["fileUrl"]:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(os.path.dirname(QUrl(r["fileUrl"]).toLocalFile()))
+            )
+
+    @Slot(list)
+    def sendFiles(self, urls: list) -> None:
+        if not self._active:
+            self.errorOccurred.emit("Open a conversation first")
+            return
+        for u in urls:
+            path = QUrl(u).toLocalFile() if "://" in str(u) else str(u)
+            self._send_path(path)
+
+    def _send_path(self, path: str, caption: str = "") -> None:
+        if not os.path.isfile(path):
+            self.errorOccurred.emit(f"not a file: {path}")
+            return
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        thumb = _thumbnail(path) if mime.startswith("image/") else b""
+        reply = bytes.fromhex(self._reply_to) if self._reply_to else None
+        try:
+            self.mesh.send_file(
+                self._active, path, mime, caption=caption, thumb=thumb, reply_to=reply
+            )
+        except (OSError, ValueError) as e:
+            self.errorOccurred.emit(str(e))
+            return
+        self._reply_to = ""
+        self.replyTargetChanged.emit()
 
     @Slot(str, result=str)
     def displayName(self, addr: str) -> str:
-        return self._gs.display_name(addr)
+        return self.mesh.display_name(addr)
 
     @Slot(str)
     def setDisplayName(self, name: str) -> None:
-        if self._is_writer:
-            self._cm.set_display_name(name)
+        self.mesh.set_name(name)
+        self.statusChanged.emit()
 
-    @Slot(str, str)
-    def setOverride(self, addr: str, name: str) -> None:
-        if name:
-            self._gs.set_override(addr, name)
-        else:
-            self._gs.clear_override(addr)
-        self._peer_model.refresh()
+    @Slot(str, result=str)
+    def resolveAddr(self, name_or_id: str) -> str:
+        return self.mesh.resolve(name_or_id) or ""
+
+    @Slot(result=list)
+    def emojiCategories(self) -> list:
+        return [
+            {"name": cat, "items": [{"code": c, "emoji": e} for c, e in items]}
+            for cat, items in emoji.CATEGORIES.items()
+        ]
+
+    @Slot(result=list)
+    def quickReactions(self) -> list:
+        return list(emoji.QUICK_REACTIONS)
+
+    @Slot(str, result=str)
+    def expandEmoji(self, text: str) -> str:
+        return emoji.expand(text)
+
+    # ------------------------------------------------------------------ scanning
 
     @Slot()
     def startScan(self) -> None:
-        threading.Thread(target=self._do_scan, daemon=True).start()
+        def run():
+            try:
+                res = self.node.scan_now(6.0)
+                known = {a for _, a, _ in self.node.storage.load_transports()}
+                out = sorted(
+                    (
+                        {"mac": a, "name": n or a, "muninn": ok, "known": a in known}
+                        for a, n, ok in res
+                    ),
+                    key=lambda d: (not d["muninn"], d["name"].lower()),
+                )
+                self.scanResultsReady.emit(out)
+            except Exception as e:
+                self.errorOccurred.emit(f"Scan error: {e}")
+                self.scanResultsReady.emit([])
+
+        threading.Thread(target=run, daemon=True).start()
 
     @Slot(str)
-    def pairDevice(self, mac: str) -> None:
-        def _pair():
+    def pairDevice(self, addr: str) -> None:
+        def run():
             try:
-                from muninn import bt
-
-                bt.ensure_paired(mac)
+                nid = self.node.connect_to(addr)
+                if nid:
+                    self.notify.emit(f"connected to {self.mesh.display_name(nid)}")
+                else:
+                    self.errorOccurred.emit("connected, but it isn't speaking Muninn")
             except Exception as e:
-                self.errorOccurred.emit(f"Pairing failed: {e}")
+                self.errorOccurred.emit(f"Could not connect: {e}")
 
-        threading.Thread(target=_pair, daemon=True).start()
+        threading.Thread(target=run, daemon=True).start()
 
-    @Slot(str, str, list)
-    def createGroup(self, name: str, _unused: str, addrs: list) -> None:
-        if not self._is_writer:
-            return
+    # ------------------------------------------------------------------ games
+
+    @Slot(result=list)
+    def availableGames(self) -> list:
+        return self.games.catalog()
+
+    @Slot(str, result=list)
+    def gameSessions(self, conv: str) -> list:
+        return self.games.sessions(conv or None)
+
+    @Slot(str, result=QVariant)
+    def gameSession(self, session: str):
+        return self.games.session_info(session)
+
+    @Slot(str, result=str)
+    def gameCode(self, session: str) -> str:
+        return self.games.code_for(session)
+
+    @Slot(str, str, result=str)
+    def startGame(self, game_id: str, conv: str) -> str:
         try:
-            self._cm.create_group(name, list(addrs))
+            sid = self.games.invite(conv or self._active, game_id)
+        except ValueError as e:
+            self.errorOccurred.emit(str(e))
+            return ""
+        self.gameOpenRequested.emit(sid)
+        return sid
+
+    @Slot(str, str, QVariant)
+    def gameAction(self, session: str, type_: str, body) -> None:
+        try:
+            self.games.act(session, type_, body)
         except ValueError as e:
             self.errorOccurred.emit(str(e))
 
-    @Slot(str, result=str)
-    def resolveAddr(self, name_or_mac: str) -> str:
-        r = self._gs.resolve(name_or_mac)
-        return r or ""
+    @Slot(str, QVariant)
+    def gameRtSend(self, session: str, body) -> None:
+        self.games.rt(session, body)
 
-    # ------------------------------------------------------------------
-    # Tab completion (used by both cmdline and palette)
-    # ------------------------------------------------------------------
+    @Slot(str)
+    def installGame(self, msg_id: str) -> None:
+        r = self._msgs.get(msg_id or self._target())
+        if not r or r["fileState"] != "complete":
+            self.errorOccurred.emit("Download the game file first")
+            return
+        try:
+            gid = self.games.install(QUrl(r["fileUrl"]).toLocalFile())
+            self.notify.emit(f"installed game “{gid}”")
+        except ValueError as e:
+            self.errorOccurred.emit(str(e))
+
+    # ------------------------------------------------------------------ commands
 
     _COMMANDS = (
         "dm",
         "group",
         "new",
+        "add",
+        "kick",
+        "rename",
+        "leave",
         "nick",
         "list",
         "peers",
         "known",
+        "status",
         "history",
         "scan",
+        "connect",
+        "reconnect",
+        "reply",
+        "react",
+        "edit",
+        "delete",
+        "copy",
+        "file",
+        "get",
+        "open",
+        "emoji",
+        "game",
+        "games",
+        "sharegame",
         "clear",
         "help",
         "about",
@@ -350,139 +633,137 @@ class ChatBridge(QObject):
         "x",
     )
 
-    # Command help shown in :help info menu and palette.
     _HELP = (
-        (":dm <peer>", "switch to a DM"),
+        (":dm <peer>", "switch to a direct conversation"),
         (":group <name>", "switch to a group"),
         (":new <name> <peer1> [peer2…]", "create a group"),
+        (":add <peer…> / :kick <peer>", "change members of this group"),
+        (":rename <name> / :leave", "rename or leave this group"),
         (":nick <name>", "set your display name"),
-        (":nick <peer> <name>", "local override for a peer"),
-        (':nick <peer> ""', "clear a local override"),
-        (":list", "list conversations"),
-        (":peers", "show direct + relay peers"),
-        (":known", "show every known peer"),
-        (":history [N]", "reload last N messages"),
-        (":scan", "open the bluetooth scan dialog"),
-        (":clear", "clear the visible message buffer"),
-        (":next  /  :prev", "cycle conversations (Ctrl-N / Ctrl-P)"),
-        (":palette", "open the command palette (also <space>f)"),
-        (":about", "show version + identity info"),
-        (":w", "no-op"),
-        (":q  /  :wq  /  :x", "quit (wq/x sends pending buffer first)"),
+        (":nick <peer> <name>", 'local nickname for a peer ("" clears)'),
+        (":reply [text]", "reply to selected message (Alt+↑/↓ selects, Alt+R)"),
+        (":react <emoji>", "react to selected message, e.g. :react :fire: (Alt+E)"),
+        (":edit / :delete", "edit or delete your selected/last message"),
+        (":file [path]", "send a file or picture (or drag & drop)"),
+        (":get / :open", "download / open the selected file"),
+        (":emoji", "emoji picker (Ctrl+E). :shortcodes: expand on send"),
+        (":game [name]", "start a game in this conversation"),
+        (":games", "games in this conversation"),
+        (":sharegame <name>", "send a game's code to this conversation"),
+        (":list", "conversations"),
+        (":peers / :known", "who's in range (direct/relay) / everyone you know"),
+        (":status", "links, routes and queues"),
+        (":scan / :connect <addr>", "find / dial a nearby device"),
+        (":reconnect", "retry every known device now"),
+        (":history [N]", "load more history"),
+        (":next / :prev", "cycle conversations (Ctrl-N / Ctrl-P)"),
+        (":palette", "command palette (<space>f)"),
+        (":about", "version + identity"),
+        (":q", "quit"),
     )
 
     def _candidates_for(self, head: str, arg_index: int) -> list[str]:
-        if head in ("dm", "nick") and arg_index == 1:
+        if head in ("dm", "nick", "kick") and arg_index == 1:
+            return self._peer_candidates()
+        if head in ("new",) and arg_index >= 2 or head == "add":
             return self._peer_candidates()
         if head == "group" and arg_index == 1:
-            return [g.name for g in self._gs.groups.values()]
-        if head == "new" and arg_index >= 2:
-            return self._peer_candidates()
+            return [g.name for g in self.mesh.groups.values()]
+        if head in ("game", "sharegame") and arg_index == 1:
+            return [g["id"] for g in self.games.catalog()]
+        if head == "react" and arg_index == 1:
+            return [f":{c}:" for c in emoji.SHORTCODES]
         return []
 
     def _peer_candidates(self) -> list[str]:
-        names: list[str] = []
-        seen: set[str] = set()
-        for addr in self._gs.pubkeys:
-            if addr == self._local_mac:
-                continue
-            n = self._gs.display_name(addr)
-            if n and n not in seen:
-                seen.add(n)
-                names.append(n)
-            if addr not in seen:
-                seen.add(addr)
-                names.append(addr)
-        return names
+        out = []
+        for p in self.mesh.peers.values():
+            out.append(p.display)
+        return out
 
     @staticmethod
     def _common_prefix(strings: list[str]) -> str:
         if not strings:
             return ""
         s = strings[0]
-        for other in strings[1:]:
+        for o in strings[1:]:
             i = 0
-            while i < len(s) and i < len(other) and s[i] == other[i]:
+            while i < len(s) and i < len(o) and s[i] == o[i]:
                 i += 1
             s = s[:i]
-            if not s:
-                break
         return s
 
     @Slot(str, result=str)
     def completeCommand(self, buf: str) -> str:
-        """Tab-complete a command line. Returns the new buffer.
-
-        - On the head: picks longest common prefix of matching commands.
-        - On an arg: picks longest common prefix of matching candidates.
-        - If buf already matches uniquely, appends a trailing space.
-        """
-        leading_colon = buf.startswith(":")
-        body = buf[1:] if leading_colon else buf
-        # Tokenize while preserving trailing-space awareness.
-        ends_with_space = body.endswith(" ")
+        colon = buf.startswith(":")
+        body = buf[1:] if colon else buf
+        trailing = body.endswith(" ")
         try:
             tokens = shlex.split(body) if body.strip() else []
         except ValueError:
             return buf
         if not tokens:
             return buf
-
-        if len(tokens) == 1 and not ends_with_space:
-            head = tokens[0].lower()
-            matches = [c for c in self._COMMANDS if c.startswith(head)]
+        pre = ":" if colon else ""
+        if len(tokens) == 1 and not trailing:
+            matches = [c for c in self._COMMANDS if c.startswith(tokens[0].lower())]
             if not matches:
                 return buf
-            common = self._common_prefix(matches)
-            if len(matches) == 1:
-                completed = matches[0] + " "
-            else:
-                completed = common
-            return (":" if leading_colon else "") + completed
-
+            return pre + (
+                matches[0] + " " if len(matches) == 1 else self._common_prefix(matches)
+            )
         head = tokens[0].lower()
-        if ends_with_space:
-            arg_index = len(tokens)
-            partial = ""
-        else:
-            arg_index = len(tokens) - 1
-            partial = tokens[-1]
-        cands = self._candidates_for(head, arg_index)
-        if not cands:
-            return buf
-        low = partial.lower()
-        matches = [c for c in cands if c.lower().startswith(low)]
+        idx = len(tokens) if trailing else len(tokens) - 1
+        partial = "" if trailing else tokens[-1]
+        matches = [
+            c
+            for c in self._candidates_for(head, idx)
+            if c.lower().startswith(partial.lower())
+        ]
         if not matches:
             return buf
         if len(matches) == 1:
-            completed_arg = matches[0] + " "
+            arg = matches[0] + " "
         else:
-            common_low = self._common_prefix([m.lower() for m in matches])
-            if len(common_low) > len(low):
-                # Take case from the first match for the matched prefix.
-                completed_arg = matches[0][: len(common_low)]
-            else:
-                completed_arg = partial
-        # Reassemble.
-        prefix_tokens = tokens[:arg_index]
-        rebuilt = " ".join(_shquote(t) for t in prefix_tokens)
-        if rebuilt:
-            rebuilt += " "
-        if completed_arg:
-            rebuilt += _shquote(completed_arg.rstrip(" "))
-            if completed_arg.endswith(" "):
-                rebuilt += " "
-        return (":" if leading_colon else "") + rebuilt
+            cp = self._common_prefix([m.lower() for m in matches])
+            arg = matches[0][: len(cp)] if len(cp) > len(partial) else partial
+        rebuilt = " ".join(_shquote(t) for t in tokens[:idx])
+        rebuilt = (rebuilt + " " if rebuilt else "") + _shquote(arg.rstrip(" "))
+        return pre + rebuilt + (" " if arg.endswith(" ") else "")
+
+    @staticmethod
+    def _item(label, sub="", conv="", action="", session="", cmd="", url="") -> dict:
+        return {
+            "label": label,
+            "sub": sub,
+            "convId": conv,
+            "action": action,
+            "session": session,
+            "cmd": cmd,
+            "url": url,
+        }
+
+    def _info(self, title: str, items: list) -> None:
+        rows = [self._item(*it) if isinstance(it, tuple) else it for it in items]
+        self.infoMenuRequested.emit(title, rows or [self._item("(nothing here)")])
+
+    def _resolve_or_err(self, s: str) -> str | None:
+        r = self.mesh.resolve(s)
+        if r is None:
+            self.errorOccurred.emit(f"unknown peer: {s}")
+        return r
+
+    def _resolve_all(self, names: list[str]) -> list[str] | None:
+        out = []
+        for n in names:
+            r = self._resolve_or_err(n)
+            if r is None:
+                return None
+            out.append(r)
+        return out
 
     @Slot(str)
     def runCommand(self, cmd: str) -> None:
-        """Execute a colon command (without leading ':'). Single dispatch path
-        used by both vim cmdline (`:foo`) and the palette (`<space>f` raw mode).
-
-        Action commands emit `notify` (toast) on success.
-        Data commands emit `infoMenuRequested(title, items)` so QML can show
-        them in a structured popup that can also drill into a conv.
-        """
         try:
             parts = shlex.split(cmd)
         except ValueError as e:
@@ -490,345 +771,313 @@ class ChatBridge(QObject):
             return
         if not parts:
             return
-        head = parts[0].lower()
-        args = parts[1:]
+        head, args = parts[0].lower(), parts[1:]
+        mesh = self.mesh
+        gid = conv_group_id(self._active)
 
-        # --- meta / lifecycle ---
         if head in ("q", "qa", "q!", "qa!", "quit", "wq", "x"):
             self.quitRequested.emit()
-            return
-        if head == "w":
-            self.notify.emit("nothing to save")
-            return
-        if head == "scan":
+        elif head == "w":
+            self.notify.emit("nothing to save — messages are saved automatically")
+        elif head == "scan":
             self.scanRequested.emit()
-            return
-        if head in ("palette", "pal", "find", "f"):
+        elif head in ("palette", "pal", "find", "f"):
             self.paletteRequested.emit()
-            return
-
-        # --- conversation switching ---
-        if head == "dm":
+        elif head == "dm":
             if not args:
-                self.errorOccurred.emit("usage: :dm <name|addr>")
-                return
-            resolved = self._gs.resolve(args[0])
-            if resolved is None:
-                self.errorOccurred.emit(f"unknown peer: {args[0]}")
-                return
-            self.setActiveConv("dm:" + resolved)
-            return
-        if head == "group":
+                return self.errorOccurred.emit("usage: :dm <name>")
+            if r := self._resolve_or_err(args[0]):
+                self.setActiveConv(dm_conv(r))
+        elif head == "group":
             if not args:
-                self.errorOccurred.emit("usage: :group <name>")
-                return
-            for gid, group in self._gs.groups.items():
-                if group.name == args[0]:
-                    self.setActiveConv("group:" + gid.hex())
-                    return
+                return self.errorOccurred.emit("usage: :group <name>")
+            for g in mesh.groups.values():
+                if g.name.lower() == args[0].lower():
+                    return self.setActiveConv(g.conv)
             self.errorOccurred.emit(f"group not found: {args[0]}")
-            return
-        if head == "new":
-            if not self._is_writer:
-                self.errorOccurred.emit(
-                    "read-only: another instance holds the writer lock"
-                )
-                return
+        elif head == "new":
             if len(args) < 2:
-                self.errorOccurred.emit("usage: :new <name> <peer1> [peer2] ...")
+                return self.errorOccurred.emit("usage: :new <name> <peer1> [peer2] …")
+            peers = self._resolve_all(args[1:])
+            if peers is None:
                 return
-            name = args[0]
-            addrs: list[str] = []
-            for p in args[1:]:
-                resolved = self._gs.resolve(p)
-                if resolved is None:
-                    self.errorOccurred.emit(f"unknown peer: {p}")
-                    return
-                addrs.append(resolved)
             try:
-                group = self._cm.create_group(name, addrs)
-                self.setActiveConv("group:" + group.group_id.hex())
-                self.notify.emit(f"created group '{name}'")
+                g = mesh.create_group(args[0], peers)
             except ValueError as e:
-                self.errorOccurred.emit(str(e))
-            return
-        if head == "nick":
-            if len(args) == 1:
-                if not self._is_writer:
-                    self.errorOccurred.emit("read-only: cannot broadcast nick")
-                    return
-                self._cm.set_display_name(args[0])
-                self.notify.emit(f"nick: {args[0] or '(cleared)'}")
-            elif len(args) == 2:
-                resolved = self._gs.resolve(args[0])
-                if resolved is None:
-                    self.errorOccurred.emit(f"unknown peer: {args[0]}")
-                    return
-                if args[1] == "":
-                    self._gs.clear_override(resolved)
-                    self.notify.emit(f"cleared override for {resolved}")
-                else:
-                    self._gs.set_override(resolved, args[1])
-                    self.notify.emit(f"override: {resolved} -> {args[1]}")
-                self._peer_model.refresh()
+                return self.errorOccurred.emit(str(e))
+            self.setActiveConv(group_conv(g))
+            self.notify.emit(f"created group “{args[0]}”")
+        elif head in ("add", "kick", "rename", "leave"):
+            if gid is None:
+                return self.errorOccurred.emit("open a group first")
+            if head == "add" and args:
+                peers = self._resolve_all(args)
+                if peers is not None:
+                    mesh.update_group(gid, add=peers)
+            elif head == "kick" and args:
+                if r := self._resolve_or_err(args[0]):
+                    mesh.update_group(gid, remove=[r])
+            elif head == "rename" and args:
+                mesh.update_group(gid, name=" ".join(args))
+            elif head == "leave":
+                mesh.leave_group(gid)
+                self.notify.emit("left the group")
             else:
-                self.errorOccurred.emit("usage: :nick <name>  |  :nick <peer> <name>")
-            return
-        if head in ("next", "bn"):
-            self.cycleConv(1)
-            return
-        if head in ("prev", "bp"):
-            self.cycleConv(-1)
-            return
-        if head in ("clear", "cls"):
-            self._msg_model.clear()
-            self.notify.emit("buffer cleared")
-            return
-        if head == "history":
-            n = 50
-            if args:
-                try:
-                    n = max(1, min(500, int(args[0])))
-                except ValueError:
-                    self.errorOccurred.emit("usage: :history [N]")
-                    return
-            self._reload_history(self._active_conv_id, n)
-            self.notify.emit(f"loaded {n} messages")
-            return
-
-        # --- data commands: pop an info menu ---
-        if head == "list":
-            items = []
-            for it in self._peer_model._items:
-                active = it["convId"] == self._active_conv_id
-                items.append(
-                    {
-                        "label": it["displayName"],
-                        "sub": it["convType"] + (" · active" if active else ""),
-                        "convId": it["convId"],
-                        "action": "",
-                    }
-                )
-            if not items:
-                items = [
-                    {
-                        "label": "(no conversations)",
-                        "sub": "",
-                        "convId": "",
-                        "action": "",
-                    }
-                ]
-            self.infoMenuRequested.emit("conversations", items)
-            return
-        if head == "peers":
-            with self._cm.peers_lock:
-                direct = list(self._cm.peers.keys())
-            direct_set = set(direct)
-            relay = [
-                a
-                for a in self._gs.pubkeys
-                if a != self._local_mac and a not in direct_set
-            ]
-            items = []
-            for a in direct:
-                items.append(
-                    {
-                        "label": self._gs.display_name(a),
-                        "sub": f"direct · {a}",
-                        "convId": "dm:" + a,
-                        "action": "",
-                    }
-                )
-            for a in relay:
-                via = self._cm.indirect_via.get(a, "")
-                via_str = self._gs.display_name(via) if via else "?"
-                items.append(
-                    {
-                        "label": self._gs.display_name(a),
-                        "sub": f"relay via {via_str} · {a}",
-                        "convId": "dm:" + a,
-                        "action": "",
-                    }
-                )
-            if not items:
-                items = [{"label": "(no peers)", "sub": "", "convId": "", "action": ""}]
-            self.infoMenuRequested.emit("peers", items)
-            return
-        if head == "known":
-            with self._cm.peers_lock:
-                direct_set = set(self._cm.peers.keys())
-            items = []
-            for a in sorted(self._gs.pubkeys):
-                if a == self._local_mac:
-                    continue
-                if a in direct_set:
-                    status = "connected"
-                elif a in self._cm.indirect_via:
-                    status = (
-                        f"relay via {self._gs.display_name(self._cm.indirect_via[a])}"
+                self.errorOccurred.emit(f"usage: :{head} …")
+        elif head == "nick":
+            if len(args) == 1:
+                self.setDisplayName(args[0])
+                self.notify.emit(f"you are now “{args[0]}”")
+            elif len(args) == 2:
+                if r := self._resolve_or_err(args[0]):
+                    mesh.set_override(r, args[1] or None)
+                    self.notify.emit(
+                        "nickname cleared" if not args[1] else f"{r} → {args[1]}"
                     )
-                else:
-                    status = "offline"
-                items.append(
-                    {
-                        "label": self._gs.display_name(a),
-                        "sub": f"{status} · {a}",
-                        "convId": "dm:" + a,
-                        "action": "",
-                    }
+            else:
+                self.errorOccurred.emit("usage: :nick <name> | :nick <peer> <name>")
+        elif head in ("next", "bn"):
+            self.cycleConv(1)
+        elif head in ("prev", "bp"):
+            self.cycleConv(-1)
+        elif head in ("clear", "cls"):
+            self._msgs.clear()
+        elif head == "history":
+            n = int(args[0]) if args and args[0].isdigit() else 500
+            self._msgs.load(self._active, n)
+        elif head == "reply":
+            self.replyTo("")
+            if args:
+                self.sendMessage(self._active, " ".join(args))
+        elif head == "react":
+            self.toggleReaction(
+                "", args[0] if args else "👍"
+            ) if args else self.emojiPickerRequested.emit("react")
+        elif head == "edit":
+            self.startEdit("")
+        elif head in ("delete", "del"):
+            self.deleteMessage("")
+        elif head == "copy":
+            self.copyText("")
+        elif head == "file":
+            if args:
+                self._send_path(os.path.expanduser(args[0]), " ".join(args[1:]))
+            else:
+                self.filePickRequested.emit()
+        elif head in ("get", "open"):
+            self.openFile("")
+        elif head == "emoji":
+            self.emojiPickerRequested.emit("insert")
+        elif head == "game":
+            if not self._active:
+                return self.errorOccurred.emit("open a conversation first")
+            if not args:
+                return self._info(
+                    "start a game",
+                    [
+                        self._item(
+                            f"{g['icon']}  {g['name']}",
+                            f"{g['players']}" + (" · installed" if g["user"] else ""),
+                            action="cmd",
+                            cmd=f"game {g['id']}",
+                        )
+                        for g in self.games.catalog()
+                    ],
                 )
-            if not items:
-                items = [
-                    {"label": "(no known peers)", "sub": "", "convId": "", "action": ""}
+            self.startGame(args[0], self._active)
+        elif head == "games":
+            sess = self.games.sessions(self._active or None)
+            self._info(
+                "games",
+                [
+                    self._item(
+                        f"{s['icon']} {s['name']}",
+                        ("invites you · " if s["invitedMe"] else "") + s["status"],
+                        action="game",
+                        session=s["session"],
+                    )
+                    for s in sess
                 ]
-            self.infoMenuRequested.emit("known peers", items)
-            return
-        if head in ("help", "h", "?"):
-            items = [
-                {"label": label, "sub": desc, "convId": "", "action": ""}
-                for label, desc in self._HELP
-            ]
-            self.infoMenuRequested.emit("commands", items)
-            return
-        if head == "about":
+                or [
+                    self._item(
+                        "(no games yet)",
+                        "start one with :game",
+                        action="cmd",
+                        cmd="game",
+                    )
+                ],
+            )
+        elif head == "sharegame":
+            if not args or not self._active:
+                return self.errorOccurred.emit(
+                    "usage: :sharegame <game> (in a conversation)"
+                )
             try:
-                from importlib.metadata import version as _ver
-
-                ver = _ver("muninn")
-            except Exception:
-                ver = "unknown"
-            with self._cm.peers_lock:
-                conn = len(self._cm.peers)
-            items = [
-                {
-                    "label": "Muninn",
-                    "sub": f"v{ver} — encrypted bluetooth chat",
-                    "convId": "",
-                    "action": "",
-                },
-                {
-                    "label": "you",
-                    "sub": f"{self._gs.display_name(self._local_mac)} · {self._local_mac}",
-                    "convId": "",
-                    "action": "",
-                },
-                {
-                    "label": "mode",
-                    "sub": "writer (sending enabled)"
-                    if self._is_writer
-                    else "reader (another instance holds the writer lock)",
-                    "convId": "",
-                    "action": "",
-                },
-                {
-                    "label": "peers",
-                    "sub": f"{conn} connected · {max(0, len(self._gs.pubkeys) - 1)} known",
-                    "convId": "",
-                    "action": "",
-                },
-                {
-                    "label": "license",
-                    "sub": "MIT — see LICENSE / THIRD_PARTY_LICENSES.md",
-                    "convId": "",
-                    "action": "",
-                },
-                {
-                    "label": "Qt 6 / PySide6",
-                    "sub": "LGPL-3.0 — © The Qt Company",
-                    "convId": "",
-                    "action": "url",
-                    "url": "https://www.qt.io/licensing",
-                },
-                {
-                    "label": "github",
-                    "sub": "github.com/LibertyLutherMoffitt/muninn",
-                    "convId": "",
-                    "action": "url",
-                    "url": "https://github.com/LibertyLutherMoffitt/muninn",
-                },
+                path = self.games.path_of(args[0])
+                mesh.send_file(
+                    self._active,
+                    path,
+                    "application/x-muninn-game",
+                    name=os.path.basename(path),
+                )
+            except (OSError, ValueError, KeyError) as e:
+                self.errorOccurred.emit(f"can't share: {e}")
+        elif head == "reconnect":
+            self.node.poke()
+            self.notify.emit("retrying all known devices")
+        elif head == "connect":
+            if args:
+                self.pairDevice(args[0])
+        elif head == "list":
+            self._info(
+                "conversations",
+                [
+                    (
+                        it["displayName"],
+                        f"{it['convType']} · {it['unreadCount']} unread"
+                        if it["unreadCount"]
+                        else it["convType"],
+                        it["convId"],
+                    )
+                    for it in self._peers._items
+                ],
+            )
+        elif head in ("peers", "known"):
+            rows = []
+            for nid, p in sorted(
+                mesh.peers.items(), key=lambda kv: kv[1].display.lower()
+            ):
+                h = mesh.hops(nid)
+                if head == "peers" and h is None:
+                    continue
+                where = (
+                    "direct"
+                    if h == 1
+                    else (
+                        f"relay via {mesh.display_name(mesh.next_hop(nid) or '')} · {h} hops"
+                        if h
+                        else "out of range"
+                    )
+                )
+                rows.append((p.display, f"{where} · {nid}", dm_conv(nid)))
+            self._info("in range" if head == "peers" else "everyone you know", rows)
+        elif head == "status":
+            st = mesh.status()
+            rows = [
+                (
+                    "you",
+                    f"{st['name'] or '(no name)'} · {st['node']} · "
+                    f"{self.transportName} {self.node.transport.local_addr()}",
+                    "",
+                )
             ]
-            self.infoMenuRequested.emit("about", items)
-            return
+            for lk in st["links"]:
+                rows.append(
+                    (
+                        mesh.display_name(lk["node"]),
+                        f"link {lk['addr']} · rtt {lk['rtt_ms']} ms · idle {lk['idle']}s · "
+                        f"↑{lk['out'] // 1024}K ↓{lk['in'] // 1024}K",
+                        dm_conv(lk["node"]),
+                    )
+                )
+            for d, vias in st["routes"].items():
+                rows.append(
+                    (
+                        mesh.display_name(d),
+                        "route "
+                        + ", ".join(
+                            f"via {mesh.display_name(v)} ({h})" for v, h in vias.items()
+                        ),
+                        dm_conv(d),
+                    )
+                )
+            rows.append(
+                (
+                    "queue",
+                    f"{st['outbox']} waiting for delivery · "
+                    f"{len(st['downloads'])} downloads",
+                    "",
+                )
+            )
+            rows.append(
+                ("stats", ", ".join(f"{k} {v}" for k, v in st["stats"].items()), "")
+            )
+            self._info("status", rows)
+        elif head in ("help", "h", "?"):
+            self._info("commands", [(a, b, "") for a, b in self._HELP])
+        elif head == "about":
+            try:
+                from importlib.metadata import version
 
-        self.errorOccurred.emit(f"unknown command: :{head}")
-
-    def _reload_history(self, conv_id: str, n: int) -> None:
-        if not conv_id or self._storage is None:
-            return
-        if conv_id.startswith("dm:"):
-            rows = self._storage.load_dm_history(self._local_mac, conv_id[3:], n)
-        elif conv_id.startswith("group:"):
-            rows = self._storage.load_group_history(
-                bytes.fromhex(conv_id[6:]), self._local_mac, n
+                ver = version("muninn")
+            except Exception:
+                ver = "dev"
+            self._info(
+                "about",
+                [
+                    ("Muninn", f"v{ver} — encrypted Bluetooth mesh chat", ""),
+                    ("you", f"{mesh.name} · {mesh.node_id}", ""),
+                    (
+                        "transport",
+                        f"{self.transportName} · {self.node.transport.local_addr()}",
+                        "",
+                    ),
+                    ("license", "MIT — see LICENSE / THIRD_PARTY_LICENSES.md", ""),
+                    self._item(
+                        "github",
+                        "github.com/LibertyLutherMoffitt/muninn",
+                        action="url",
+                        url="https://github.com/LibertyLutherMoffitt/muninn",
+                    ),
+                ],
             )
         else:
-            return
-        self._msg_model.load_history(rows, self._local_mac, self._gs.display_name)
+            self.errorOccurred.emit(f"unknown command: :{head}  (:help)")
 
     @Slot(int)
     def cycleConv(self, delta: int) -> None:
-        """Move active conv by delta in the peer-list order (wraps)."""
-        items = self._peer_model._items
-        if not items:
+        ids = [it["convId"] for it in self._peers._items]
+        if not ids:
             return
-        ids = [it["convId"] for it in items]
-        try:
-            idx = ids.index(self._active_conv_id)
-        except ValueError:
-            idx = -1
-        new_idx = (idx + delta) % len(ids)
-        self.setActiveConv(ids[new_idx])
+        i = ids.index(self._active) if self._active in ids else -1
+        self.setActiveConv(ids[(i + delta) % len(ids)])
 
     @Slot(result=str)
     def firstConvId(self) -> str:
-        items = self._peer_model._items
-        return items[0]["convId"] if items else ""
+        return self._peers._items[0]["convId"] if self._peers._items else ""
 
     @Slot(result=list)
     def knownPeers(self) -> list:
-        result = []
-        with self._cm.peers_lock:
-            direct = set(self._cm.peers.keys())
-        for addr in self._gs.pubkeys:
-            if addr == self._local_mac:
-                continue
-            result.append(
+        out = []
+        for nid, p in self.mesh.peers.items():
+            h = self.mesh.hops(nid)
+            out.append(
                 {
-                    "mac": addr,
-                    "name": self._gs.display_name(addr),
-                    "status": "direct"
-                    if addr in direct
-                    else ("relay" if addr in self._cm.indirect_via else "offline"),
+                    "mac": nid,
+                    "name": p.display,
+                    "status": "direct" if h == 1 else ("relay" if h else "offline"),
                 }
             )
-        return result
+        return out
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
-    def _do_scan(self) -> None:
-        try:
-            from muninn import bt
+def _thumbnail(path: str) -> bytes:
+    """Small JPEG preview (≤ ~10 KB) so receivers see the picture instantly."""
+    try:
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+        from PySide6.QtGui import QImage
 
-            bt.scan_devices(duration=5, quiet=True)
-            results = bt.discover()
-            self.scanResultsReady.emit([{"mac": r[0], "name": r[1]} for r in results])
-        except Exception as e:
-            self.errorOccurred.emit(f"Scan error: {e}")
-            self.scanResultsReady.emit([])
-
-    def _load_history(self, conv_id: str) -> None:
-        if self._storage is None:
-            self._msg_model.clear()
-            return
-        if conv_id.startswith("dm:"):
-            addr = conv_id[3:]
-            rows = self._storage.load_dm_history(self._local_mac, addr, 50)
-        elif conv_id.startswith("group:"):
-            gid = bytes.fromhex(conv_id[6:])
-            rows = self._storage.load_group_history(gid, self._local_mac, 50)
-        else:
-            self._msg_model.clear()
-            return
-        self._msg_model.load_history(rows, self._local_mac, self._gs.display_name)
+        img = QImage(path)
+        if img.isNull():
+            return b""
+        img = img.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        for q in (70, 50, 30):
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QIODevice.WriteOnly)
+            img.save(buf, "JPEG", q)  # ty: ignore[no-matching-overload]
+            if ba.size() <= 10000:
+                return bytes(ba.data())
+    except Exception:
+        pass
+    return b""

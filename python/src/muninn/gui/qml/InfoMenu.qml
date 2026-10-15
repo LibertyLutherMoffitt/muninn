@@ -15,6 +15,7 @@ Rectangle {
     property string title: ""
 
     signal convSelected(string convId)
+    signal gameSelected(string session)
 
     Behavior on opacity {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
@@ -155,7 +156,15 @@ Rectangle {
         if (itemList.currentIndex < 0) { root.close(); return }
         const item = itemModel.get(itemList.currentIndex)
         if (!item) { root.close(); return }
-        if (item.convId) {
+        if (item.action === "cmd" && item.cmd) {
+            root.close()
+            bridge.runCommand(item.cmd)
+            return
+        } else if (item.action === "game" && item.session) {
+            root.close()
+            root.gameSelected(item.session)
+            return
+        } else if (item.convId) {
             root.convSelected(item.convId)
         } else if (item.action === "url" && item.url) {
             Qt.openUrlExternally(item.url)

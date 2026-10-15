@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muninn"
-version = "0.1.11"
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
   "PyNaCl",
@@ -34,9 +34,12 @@ windows-build = ["pyinstaller"]
 [project.scripts]
 muninn     = "muninn.cli:main"
 muninn-gui = "muninn.gui.main:main"
+muninn-simhub = "muninn.sim.hub:main"
+muninn-bot = "muninn.bot:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
+"muninn" = ["games/*.js", "games/*.md"]
 "muninn.gui" = ["qml/*.qml"]

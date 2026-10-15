@@ -136,8 +136,8 @@ Rectangle {
                     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                         if (currentIndex >= 0) {
                             const item = deviceModel.get(currentIndex)
-                            if (item) {
-                                statusText.text = "Pairing " + item.mac + "…"
+                            if (item && item.muninn) {
+                                statusText.text = "Connecting to " + (item.name || item.mac) + "…"
                                 bridge.pairDevice(item.mac)
                             }
                         }
@@ -155,8 +155,9 @@ Rectangle {
                         Column {
                             spacing: 2
                             Text {
-                                text: model.name || model.mac
-                                color: Theme.textPrimary
+                                text: (model.muninn ? "★ " : "") + (model.name || model.mac)
+                                      + (model.known ? "  · known" : "")
+                                color: model.muninn ? Theme.textPrimary : Theme.textMuted
                                 font.pixelSize: 13
                             }
                             Text {
@@ -169,12 +170,13 @@ Rectangle {
                         Item { Layout.fillWidth: true }
                         Button {
                             id: pairBtn
-                            text: "Pair"
+                            text: model.muninn ? "Connect" : "not Muninn"
+                            enabled: model.muninn
                             activeFocusOnTab: true
                             Keys.onReturnPressed: clicked()
                             Keys.onEnterPressed: clicked()
                             onClicked: {
-                                statusText.text = "Pairing " + model.mac + "…"
+                                statusText.text = "Connecting to " + (model.name || model.mac) + "…"
                                 bridge.pairDevice(model.mac)
                             }
                             contentItem: Text {
@@ -184,7 +186,7 @@ Rectangle {
                                 verticalAlignment: Text.AlignVCenter
                             }
                             background: Rectangle {
-                                color: Theme.accent; radius: 5
+                                color: pairBtn.enabled ? Theme.accent : Theme.surfaceRaised; radius: 5
                                 opacity: pairBtn.hovered ? 0.85 : 1.0
                                 border.color: pairBtn.activeFocus ? "white" : "transparent"
                                 border.width: 1
@@ -245,7 +247,9 @@ Rectangle {
                 deviceModel.append(results[i])
             // reset scanning flag on scan button — find it via parent chain
             scanBtn.scanning = false
-            statusText.text = results.length + " device(s) found"
+            let n = 0
+            for (let i = 0; i < results.length; i++) if (results[i].muninn) n++
+            statusText.text = n + " Muninn device(s) nearby · " + (results.length - n) + " other"
         }
     }
 

@@ -1,66 +1,66 @@
 """Best-effort desktop notifications.
 
-Linux uses `notify-send` (libnotify) which every modern desktop ships. If it
-is missing, we silently no-op — notifications are quality-of-life, never
-critical to message delivery.
-
-Windows support is deferred (the GUI is Linux-first); a Win32 toast helper
-can land alongside `bt/winrt.py` hardware validation.
+Linux: `notify-send` (libnotify). Everywhere else (Windows, or Linux without
+notify-send): a QSystemTrayIcon balloon. Never raises — notifications are
+quality-of-life, never critical to delivery.
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
 import threading
 
-_APP_NAME = "Muninn"
-
-# Cache the lookup so we don't re-shutil.which on every message.
-_NOT_PROBED: object = object()
-_notify_send: str | None | object = _NOT_PROBED
+_tray = None
+_notify_send = shutil.which("notify-send") if sys.platform == "linux" else None
 
 
-def _resolve() -> str | None:
-    global _notify_send
-    if _notify_send is _NOT_PROBED:
-        _notify_send = shutil.which("notify-send")
-    return _notify_send if isinstance(_notify_send, str) else None
+def init(app, icon) -> None:
+    global _tray
+    if _notify_send:
+        return
+    try:
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            _tray = QSystemTrayIcon(icon, app)
+            _tray.setToolTip("Muninn")
+            _tray.show()
+    except Exception:
+        _tray = None
 
 
 def notify(title: str, body: str) -> None:
-    """Fire a transient desktop notification. Never raises."""
-    if sys.platform != "linux":
-        return
-    path = _resolve()
-    if not path:
-        return
+    ns = _notify_send
+    if ns:
 
-    def _run() -> None:
+        def run():
+            try:
+                subprocess.run(
+                    [
+                        ns,
+                        "--app-name",
+                        "Muninn",
+                        "--expire-time",
+                        "5000",
+                        "--category",
+                        "im.received",
+                        title,
+                        body[:200],
+                    ],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+    elif _tray is not None:
         try:
-            subprocess.run(
-                [
-                    path,
-                    "--app-name",
-                    _APP_NAME,
-                    "--expire-time",
-                    "5000",
-                    "--category",
-                    "im.received",
-                    title,
-                    body,
-                ],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env={**os.environ},
-            )
+            _tray.showMessage(title, body[:200])
         except Exception:
             pass
-
-    # notify-send is fast but still touches D-Bus; keep the GUI thread
-    # off the wait by spawning a daemon thread.
-    threading.Thread(target=_run, daemon=True).start()

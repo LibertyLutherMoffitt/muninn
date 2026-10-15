@@ -71,7 +71,7 @@
 
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn";
-          version = "0.1.11";
+          version = "0.2.0";
           src = ./python;
           pyproject = true;
 
@@ -93,11 +93,14 @@
           ps.dbus-python
           ps.pygobject3
           ps.pyside6
+          ps.pytest
+          ps.pytest-timeout
+          ps.pillow
         ]);
 
         muninn-gui = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn-gui";
-          version = "0.1.11";
+          version = "0.2.0";
           src = ./python;
           pyproject = true;
 
@@ -203,6 +206,8 @@
               chmod +x .git/hooks/pre-commit
             fi
 
+            export NIXPKGS_QT6_QML_IMPORT_PATH="${pkgs.qt6.qtdeclarative}/lib/qt-6/qml"
+            export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtsvg}/lib/qt-6/plugins:${pkgs.qt6.qtdeclarative}/lib/qt-6/plugins:${pkgs.qt6.qtwayland}/lib/qt-6/plugins"
             export ANDROID_HOME="${androidSdkRoot}"
             export ANDROID_SDK_ROOT="${androidSdkRoot}"
             export JAVA_HOME="${pkgs.jdk17}"

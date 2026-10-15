@@ -115,7 +115,7 @@ Rectangle {
                     anchors.bottom: avatar.bottom
                     width: 10; height: 10; radius: 5
                     color: model.status === "direct"  ? Theme.success
-                         : model.status === "relay"   ? "#f59e0b"
+                         : model.status === "relay"   ? Theme.warning
                          : model.status === "group"   ? Theme.accent
                                                       : Theme.textMuted
                     border.color: Theme.surface
@@ -140,11 +140,15 @@ Rectangle {
                     }
                     Text {
                         width: parent.width
-                        text: model.lastMessage || ""
-                        color: Theme.textMuted
+                        text: model.typing ? "typing…"
+                            : (model.lastMessage || (model.convType === "group" ? model.via
+                               : model.status === "direct" ? "nearby" : model.status === "relay"
+                               ? "in range via relay" : ""))
+                        color: model.typing ? Theme.accent : Theme.textMuted
+                        font.italic: model.typing
                         font.pixelSize: 11
                         elide: Text.ElideRight
-                        visible: model.lastMessage !== ""
+                        visible: text !== ""
                     }
                 }
 
@@ -156,13 +160,15 @@ Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     width: Math.max(20, badgeText.implicitWidth + 8)
                     height: 20; radius: 10
-                    color: Theme.accent
-                    visible: model.unreadCount > 0
+                    color: model.unreadCount > 0 ? Theme.accent : Theme.surfaceRaised
+                    visible: model.unreadCount > 0 || model.pending > 0
+                    opacity: model.unreadCount > 0 ? 1 : 0.6
 
                     Text {
                         id: badgeText
                         anchors.centerIn: parent
-                        text: model.unreadCount > 99 ? "99+" : model.unreadCount
+                        text: model.unreadCount > 0 ? (model.unreadCount > 99 ? "99+" : model.unreadCount)
+                                                    : "◌" + model.pending
                         color: "white"
                         font.pixelSize: 11
                         font.bold: true
