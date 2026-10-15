@@ -294,7 +294,7 @@ class ChatUI:
         elif cmd == "list":
             unread = mesh.storage.unread_counts()
             last = mesh.storage.last_messages()
-            convs = {dm_conv(p) for p in mesh.peers} | {
+            convs = {dm_conv(p.node_id) for p in mesh.active_peers()} | {
                 g.conv for g in mesh.groups.values()
             }
             for c in sorted(convs, key=lambda c: -(last[c].ts if c in last else 0)):
@@ -304,7 +304,10 @@ class ChatUI:
                     f"{f'  ({u} unread)' if u else ''}"
                 )
         elif cmd in ("peers", "known"):
-            for nid, p in sorted(mesh.peers.items(), key=lambda kv: kv[1].display):
+            for nid, p in sorted(
+                ((p.node_id, p) for p in mesh.active_peers()),
+                key=lambda kv: kv[1].display,
+            ):
                 h = mesh.hops(nid)
                 if cmd == "peers" and h is None:
                     continue
@@ -405,7 +408,7 @@ class ChatUI:
             if buf.startswith(("/dm ", "/new ", "/nick ", "/add ", "/kick ")):
                 opts = [
                     p.display
-                    for p in self.mesh.peers.values()
+                    for p in self.mesh.active_peers()
                     if p.display.lower().startswith(text.lower())
                 ]
             elif buf.startswith("/group "):

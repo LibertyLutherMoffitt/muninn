@@ -52,10 +52,17 @@ class SimLab:
         if self.verbose:
             print(f"{time.strftime('%H:%M:%S')} {s}", flush=True)
 
-    def node(self, name: str, pos=(0, 0), start: bool = True) -> Node:
-        """Create (or restart, keeping its data) a node."""
+    def node(
+        self, name: str, pos=(0, 0), start: bool = True, wipe: bool = False
+    ) -> Node:
+        """Create (or restart, keeping its data) a node. `wipe` simulates a
+        reinstall: same radio address, fresh identity and empty database."""
         addr = None
         db = self.tmp / name / "muninn.db"
+        if wipe:
+            import shutil
+
+            shutil.rmtree(self.tmp / name, ignore_errors=True)
         old = self.nodes.get(name)
         if old is not None:
             addr = old.transport.local_addr()

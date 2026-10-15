@@ -94,6 +94,7 @@ class PeerInfo:
     name_ts: int = 0
     override: str | None = None
     last_seen: int = 0
+    replaced_by: str | None = None  # this identity reinstalled as another
 
     @property
     def display(self) -> str:
@@ -262,8 +263,18 @@ class Mesh:
     # ------------------------------------------------------------------ setup
 
     def _load(self) -> None:
-        for nid, pk, name, name_ts, override, last_seen in self.storage.load_peers():
-            self.peers[nid] = PeerInfo(nid, pk, name, name_ts, override, last_seen)
+        for (
+            nid,
+            pk,
+            name,
+            name_ts,
+            override,
+            last_seen,
+            repl,
+        ) in self.storage.load_peers():
+            self.peers[nid] = PeerInfo(
+                nid, pk, name, name_ts, override, last_seen, repl
+            )
         for gid, name, version, members, left in self.storage.load_groups():
             self.groups[gid] = Group(gid, name, version, set(members), left)
         for e in self.storage.outbox_load():
@@ -375,6 +386,7 @@ class Mesh:
         changed = self._learn_peer(
             P.RosterEntry(hello.node_id, hello.pubkey, hello.name, hello.name_ts)
         )
+        self._check_reinstall(hello.node_id, hello.name, link.transport_addr)
         self.storage.save_transport(hello.node_id, link.transport_addr)
         self.storage.touch_peer(hello.node_id)
 
@@ -424,6 +436,73 @@ class Mesh:
         self._log(f"link down {link.node_id}")
         self._advert_due = 0.0
         self._on_topology_change()
+
+    # ------------------------------------------------------------------ reinstalls
+
+    def _check_reinstall(self, new: str, name: str, addr: str) -> None:
+        """Same radio address, same name, different identity → the person
+        reinstalled Muninn. Carry their conversation over instead of leaving
+        it stranded on a key that no longer exists."""
+        for old, a, _ in self.storage.load_transports():
+            if a != addr or old == new:
+                continue
+            with self.lock:
+                p = self.peers.get(old)
+                live = old in self.links
+            if p is None or p.replaced_by or live:
+                continue
+            if p.name and name and p.name != name:
+                continue
+            self._supersede(old, new, announce=True)
+
+    def _supersede(self, old: str, new: str, announce: bool) -> None:
+        with self.lock:
+            p_old = self.peers.get(old)
+            if p_old is None or p_old.replaced_by or new not in self.peers:
+                return
+            p_old.replaced_by = new
+            if p_old.override and not self.peers[new].override:
+                self.peers[new].override = p_old.override
+                self.storage.set_peer_override(new, p_old.override)
+            for item in [i for i in self.outbox.values() if i.dst == old]:
+                del self.outbox[item.packet_id]
+            groups = [g for g in self.groups.values() if old in g.members]
+            for g in groups:
+                g.members.discard(old)
+                g.members.add(new)
+        entries = self.storage.migrate_peer(old, new)
+        now = time.monotonic()
+        for e in entries:  # reseal for the new key
+            item = OutItem(
+                P.new_packet_id(), new, e.body, int(time.time()), e.msg_id, P.F_RELIABLE
+            )
+            self.storage.outbox_add(
+                OutboxEntry(item.packet_id, new, e.body, item.ts, e.msg_id, 0)
+            )
+            item.next_try = now
+            with self.lock:
+                self.outbox[item.packet_id] = item
+        self._log(f"{old} reinstalled as {new}; moved {len(entries)} pending")
+        self._system(
+            dm_conv(new),
+            f"{self.display_name(new)} reinstalled Muninn (new security key). "
+            "Your conversation continues here.",
+        )
+        if announce:
+            with self.lock:
+                others = [
+                    n
+                    for n, p in self.peers.items()
+                    if not p.replaced_by and n not in (old, new)
+                ]
+            self._send_body(others, C.Body(C.K_REPLACED, {"o": old, "n": new}))
+            for g in groups:
+                if not g.left and self.node_id in g.members:
+                    with self.lock:
+                        g.version += 1
+                    self._save_group(g)
+                    self._send_body(g.members - {self.node_id}, self._group_body(g))
+        self._emit("peers")
 
     def connected(self) -> list[str]:
         with self.lock:
@@ -502,7 +581,7 @@ class Mesh:
             out += [
                 P.RosterEntry(p.node_id, p.pubkey, p.name, p.name_ts)
                 for p in self.peers.values()
-                if p.node_id != exclude
+                if p.node_id != exclude and not p.replaced_by
             ]
         return out
 
@@ -530,6 +609,11 @@ class Mesh:
         self.storage.set_peer_override(node_id, name)
         self._emit("peers")
 
+    def active_peers(self) -> list[PeerInfo]:
+        """Known peers, minus identities that were replaced by a reinstall."""
+        with self.lock:
+            return [p for p in self.peers.values() if not p.replaced_by]
+
     def display_name(self, node_id: str) -> str:
         if node_id == self.node_id:
             return self.name or "me"
@@ -542,7 +626,7 @@ class Mesh:
             return up
         low = name_or_id.lower()
         with self.lock:
-            peers = list(self.peers.values())
+            peers = [p for p in self.peers.values() if not p.replaced_by]
         for p in peers:
             if p.override and p.override.lower() == low:
                 return p.node_id
@@ -901,6 +985,13 @@ class Mesh:
             )
             if self.storage.save_app_event(ev):
                 self._emit("app", ev)
+        elif k == C.K_REPLACED:
+            old, new = str(m.get("o", "")), str(m.get("n", ""))
+            with self.lock:
+                p_old, p_new = self.peers.get(old), self.peers.get(new)
+            same_name = p_old and p_new and (not p_old.name or p_old.name == p_new.name)
+            if same_name and old not in self.links:
+                self._supersede(old, new, announce=False)
         elif k == C.K_RT:
             self._emit(
                 "rt", src, str(m.get("a")), str(m.get("s")), m.get("b"), body.blob

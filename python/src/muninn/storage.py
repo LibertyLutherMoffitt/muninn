@@ -20,7 +20,7 @@ from pathlib import Path
 
 from muninn.protocol import random_node_id
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def data_dir() -> Path:
@@ -182,6 +182,10 @@ class Storage:
                 self._conn.execute("PRAGMA foreign_keys=ON")
             if cur < 2:
                 self._conn.executescript(_SCHEMA_V2)
+            if cur < 3:
+                self._conn.executescript(
+                    "ALTER TABLE peers ADD COLUMN replaced_by TEXT; PRAGMA user_version = 3;"
+                )
 
     # --- identity -----------------------------------------------------------
 
@@ -233,12 +237,65 @@ class Storage:
             (int(time.time()), node_id),
         )
 
-    def load_peers(self) -> list[tuple[str, bytes, str, int, str | None, int]]:
+    def load_peers(
+        self,
+    ) -> list[tuple[str, bytes, str, int, str | None, int, str | None]]:
         return [
-            (r[0], bytes(r[1]), r[2] or "", r[3] or 0, r[4], r[5] or 0)
+            (r[0], bytes(r[1]), r[2] or "", r[3] or 0, r[4], r[5] or 0, r[6])
             for r in self._q(
-                "SELECT node_id, pubkey, name, name_ts, override, last_seen FROM peers"
+                "SELECT node_id, pubkey, name, name_ts, override, last_seen, replaced_by "
+                "FROM peers"
             )
+        ]
+
+    def migrate_peer(self, old: str, new: str) -> list[OutboxEntry]:
+        """`old` reinstalled as `new`: move history, receipts, reactions, group
+        membership and transports over. Returns old's pending outbox entries
+        (removed) so the caller can reseal them for the new key."""
+        with self._lock:
+            c = self._conn
+            c.execute("BEGIN")
+            try:
+                c.execute(
+                    "UPDATE messages SET conv = ? WHERE conv = ?",
+                    ("dm:" + new, "dm:" + old),
+                )
+                c.execute("UPDATE messages SET sender = ? WHERE sender = ?", (new, old))
+                c.execute(
+                    "UPDATE OR IGNORE recipients SET node_id = ? WHERE node_id = ?",
+                    (new, old),
+                )
+                c.execute(
+                    "UPDATE OR IGNORE reactions SET node_id = ? WHERE node_id = ?",
+                    (new, old),
+                )
+                c.execute(
+                    "UPDATE OR IGNORE group_members SET node_id = ? WHERE node_id = ?",
+                    (new, old),
+                )
+                c.execute("DELETE FROM transports WHERE node_id = ?", (old,))
+                c.execute(
+                    "UPDATE peers SET replaced_by = ? WHERE node_id = ?", (new, old)
+                )
+                rows = c.execute(
+                    "SELECT packet_id, dst, body, ts, msg_id, attempts FROM outbox WHERE dst = ?",
+                    (old,),
+                ).fetchall()
+                c.execute("DELETE FROM outbox WHERE dst = ?", (old,))
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
+        return [
+            OutboxEntry(
+                bytes(r[0]),
+                r[1],
+                bytes(r[2]),
+                r[3],
+                bytes(r[4]) if r[4] else None,
+                r[5],
+            )
+            for r in rows
         ]
 
     # --- transports -------------------------------------------------------------

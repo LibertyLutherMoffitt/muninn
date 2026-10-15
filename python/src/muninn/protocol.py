@@ -95,6 +95,14 @@ def random_node_id() -> str:
     return bytes_to_id(bytes(b))
 
 
+def utf8_cut(text: str, limit: int = 255) -> bytes:
+    """Encode and cut to `limit` bytes without splitting a codepoint."""
+    b = text.encode("utf-8")
+    if len(b) <= limit:
+        return b
+    return b[:limit].decode("utf-8", errors="ignore").encode("utf-8")
+
+
 # --- HELLO -----------------------------------------------------------------
 
 
@@ -111,7 +119,7 @@ class Hello:
 def encode_hello(
     pubkey: bytes, node_id: str, name: str, name_ts: int, features: int = 0
 ) -> bytes:
-    nb = name.encode("utf-8")[:255]
+    nb = utf8_cut(name)
     payload = (
         pubkey
         + id_to_bytes(node_id)
@@ -179,7 +187,7 @@ def encode_roster(entries: list[RosterEntry]) -> list[bytes]:
         batch = entries[i : i + 200]
         parts = [struct.pack("!B", len(batch))]
         for e in batch:
-            nb = e.name.encode("utf-8")[:255]
+            nb = utf8_cut(e.name)
             parts += [
                 id_to_bytes(e.node_id),
                 e.pubkey,

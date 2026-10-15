@@ -26,8 +26,19 @@ K_APP = 10  # {g?, a, s, y, b, q?}               reliable
 K_RT = 11  # {a, s, b} blob?                     unreliable
 K_TYPING = 12  # {g?}                            unreliable
 K_GROUP_REQ = 13  # {g}                          unreliable
+K_REPLACED = 14  # {o: old id, n: new id}         reliable (reinstall notice)
 
-RELIABLE_KINDS = {K_TEXT, K_REACT, K_EDIT, K_DELETE, K_FILE, K_GROUP, K_RECEIPT, K_APP}
+RELIABLE_KINDS = {
+    K_TEXT,
+    K_REACT,
+    K_EDIT,
+    K_DELETE,
+    K_FILE,
+    K_GROUP,
+    K_RECEIPT,
+    K_APP,
+    K_REPLACED,
+}
 
 KIND_NAMES = {
     K_TEXT: "text",
@@ -43,6 +54,7 @@ KIND_NAMES = {
     K_RT: "rt",
     K_TYPING: "typing",
     K_GROUP_REQ: "group_req",
+    K_REPLACED: "replaced",
 }
 
 

@@ -33,3 +33,16 @@ class NaclTest {
         assertFailsWith<SecurityException> { Nacl.open(ct, Nacl.beforeNm(Nacl.publicKey(a), b)) }
     }
 }
+
+class Utf8CutTest {
+    @kotlin.test.Test
+    fun neverSplitsCodepoints() {
+        for (name in listOf("é".repeat(200), "✈".repeat(100), "a" + "🐍".repeat(70), "plain")) {
+            val b = P.utf8Cut(name)
+            kotlin.test.assertTrue(b.size <= 255)
+            val s = String(b, Charsets.UTF_8)
+            kotlin.test.assertTrue(name.startsWith(s) && !s.contains('�'))
+            if (name.toByteArray().size > 255) kotlin.test.assertTrue(b.size >= 252) // only the partial char is dropped
+        }
+    }
+}

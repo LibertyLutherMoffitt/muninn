@@ -171,7 +171,7 @@ private fun PeerChecklist(selected: Set<String>, exclude: Set<String> = emptySet
     val peers by produceState(emptyList<Pair<String, String>>(), tick) {
         value = withContext(Dispatchers.IO) {
             val m = Runtime.node?.mesh ?: return@withContext emptyList()
-            synchronized(m.lock) { m.peers.values.map { it.nodeId to it.display } }.filter { it.first !in exclude }.sortedBy { it.second.lowercase() }
+            m.activePeers().map { it.nodeId to it.display }.filter { it.first !in exclude }.sortedBy { it.second.lowercase() }
         }
     }
     if (peers.isEmpty()) Text("You don't know anyone yet — connect to someone first.", Modifier.padding(16.dp))

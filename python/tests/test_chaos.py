@@ -310,3 +310,41 @@ def test_random_chaos_soak(seed):
         )
     finally:
         lab.close()
+
+
+def test_reinstalled_peer_keeps_conversation(lab):
+    a = lab.node("a", (0, 0))
+    b = lab.node("b", (1, 0))
+    c = lab.node("c", (2, 0))
+    wait_until(
+        lambda: len(a.mesh.connected()) == 2 and len(c.mesh.connected()) == 2, 30
+    )
+    old_b = b.node_id
+    gid = a.mesh.create_group("trio", [old_b, c.node_id])
+    a.mesh.send_text(dm_conv(old_b), "before reinstall")
+    wait_until(lambda: "before reinstall" in inbound(b, dm_conv(a.node_id)), 15)
+    b.stop()
+    wait_until(lambda: old_b not in a.mesh.connected(), 30)
+    a.mesh.send_text(dm_conv(old_b), "while you were gone")
+    b2 = lab.node("b", (1, 0), wipe=True)  # same radio, new identity
+    assert b2.node_id != old_b
+    wait_until(
+        lambda: "while you were gone" in inbound(b2, dm_conv(a.node_id)),
+        40,
+        msg="queued message resealed for new key",
+    )
+    # a's history moved to the new identity, old one hidden
+    assert "before reinstall" in inbound(a, dm_conv(b2.node_id))
+    assert all(p.node_id != old_b for p in a.mesh.active_peers())
+    # group membership follows, also on c (who heard via K_REPLACED/group update)
+    wait_until(lambda: b2.node_id in a.mesh.groups[gid].members, 10)
+    wait_until(
+        lambda: (
+            b2.node_id in c.mesh.groups[gid].members
+            and old_b not in c.mesh.groups[gid].members
+        ),
+        30,
+    )
+    wait_until(lambda: gid in b2.mesh.groups, 30, msg="new b learns the group")
+    b2.mesh.send_text(group_conv(gid), "back in the group")
+    wait_until(lambda: "back in the group" in inbound(c, group_conv(gid)), 30)

@@ -55,3 +55,11 @@ def test_malformed():
     for fn in (P.decode_packet, P.decode_ack, P.decode_hello):
         with pytest.raises(P.MalformedFrame):
             fn(b"\x00" * 5)
+
+
+def test_utf8_cut_never_splits_a_codepoint():
+    for name in ["é" * 200, "✈" * 100, "a" + "🐍" * 70, "plain"]:
+        b = P.utf8_cut(name)
+        assert len(b) <= 255
+        b.decode("utf-8")  # must not raise
+        assert name.startswith(b.decode("utf-8"))

@@ -8,7 +8,7 @@ data class Identity(val privkey: ByteArray, val nodeId: String, var displayName:
 
 data class PeerRow(
     val nodeId: String, val pubkey: ByteArray, val name: String, val nameTs: Long,
-    val override: String?, val lastSeen: Long,
+    val override: String?, val lastSeen: Long, val replacedBy: String? = null,
 )
 
 data class GroupRow(val groupId: ByteArray, val name: String, val version: Int, val members: List<String>, val left: Boolean)
@@ -66,6 +66,8 @@ interface Storage {
     fun setPeerOverride(nodeId: String, name: String?)
     fun touchPeer(nodeId: String)
     fun loadPeers(): List<PeerRow>
+    /** `old` reinstalled as `new`: move history/receipts/reactions/groups; returns old's outbox (removed). */
+    fun migratePeer(old: String, new: String): List<OutboxEntry>
 
     fun saveTransport(nodeId: String, addr: String)
     fun loadTransports(): List<Triple<String, String, Long>> // node, addr, lastOk (newest first)
@@ -140,6 +142,23 @@ class MemStorage(override val filesDir: File) : Storage {
         peers[nodeId]?.let { peers[nodeId] = it.copy(lastSeen = P.now()) }; Unit
     }
     override fun loadPeers() = synchronized(lock) { peers.values.toList() }
+
+    override fun migratePeer(old: String, new: String): List<OutboxEntry> = synchronized(lock) {
+        for ((k, m) in messages.entries.toList()) {
+            var x = m
+            if (x.conv == "dm:$old") x = x.copy(conv = "dm:$new")
+            if (x.sender == old) x = x.copy(sender = new)
+            messages[k] = x
+        }
+        recipients.values.forEach { r -> r.remove(old)?.let { r.putIfAbsent(new, it) } }
+        reactions.values.forEach { l -> l.replaceAll { if (it.first == old) new to it.second else it } }
+        for ((k, g) in groups) if (old in g.members) groups[k] = g.copy(members = g.members.map { if (it == old) new else it }.distinct())
+        transports.keys.removeIf { it.first == old }
+        peers[old]?.let { peers[old] = it.copy(replacedBy = new) }
+        val out = outbox.values.filter { it.dst == old }
+        outbox.values.removeIf { it.dst == old }
+        out
+    }
 
     override fun saveTransport(nodeId: String, addr: String) = synchronized(lock) { transports[nodeId to addr] = P.now() }
     override fun loadTransports() = synchronized(lock) {

@@ -118,7 +118,7 @@ object Runtime {
             }
         }
         val out = ArrayList<ConvItem>()
-        val peers = synchronized(m.lock) { m.peers.values.toList() }
+        val peers = m.activePeers()
         val groups = synchronized(m.lock) { m.groups.values.toList() }
         for (p in peers) {
             val conv = dmConv(p.nodeId)

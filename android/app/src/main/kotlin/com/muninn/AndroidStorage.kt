@@ -18,7 +18,7 @@ import com.muninn.core.StoredMessage
 import java.io.File
 
 /** SQLite [Storage] — same schema as python/src/muninn/storage.py (v2). */
-class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 1), Storage {
+class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 2), Storage {
     override val filesDir: File = File(ctx.filesDir, "files").apply { mkdirs() }
     private val lock = Any()
 
@@ -31,7 +31,9 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 1
         SCHEMA.split(";").map { it.trim() }.filter { it.isNotEmpty() }.forEach(db::execSQL)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) db.execSQL("ALTER TABLE peers ADD COLUMN replaced_by TEXT")
+    }
 
     private inline fun <T> w(f: (SQLiteDatabase) -> T): T = synchronized(lock) { f(writableDatabase) }
     private fun now() = P.now()
@@ -96,8 +98,32 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 1
         db.execSQL("UPDATE peers SET last_seen = ? WHERE node_id = ?", arrayOf(now(), nodeId))
     }
 
-    override fun loadPeers() = query("SELECT node_id, pubkey, name, name_ts, override, last_seen FROM peers") {
-        PeerRow(it.getString(0), it.getBlob(1), it.getString(2) ?: "", it.getLong(3), it.getString(4), it.getLong(5))
+    override fun loadPeers() = query("SELECT node_id, pubkey, name, name_ts, override, last_seen, replaced_by FROM peers") {
+        PeerRow(it.getString(0), it.getBlob(1), it.getString(2) ?: "", it.getLong(3), it.getString(4), it.getLong(5), it.getString(6))
+    }
+
+    override fun migratePeer(old: String, new: String): List<OutboxEntry> = w { db ->
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE messages SET conv = ? WHERE conv = ?", arrayOf("dm:$new", "dm:$old"))
+            db.execSQL("UPDATE messages SET sender = ? WHERE sender = ?", arrayOf(new, old))
+            db.execSQL("UPDATE OR IGNORE recipients SET node_id = ? WHERE node_id = ?", arrayOf(new, old))
+            db.execSQL("UPDATE OR IGNORE reactions SET node_id = ? WHERE node_id = ?", arrayOf(new, old))
+            db.execSQL("UPDATE OR IGNORE group_members SET node_id = ? WHERE node_id = ?", arrayOf(new, old))
+            db.execSQL("DELETE FROM transports WHERE node_id = ?", arrayOf(old))
+            db.execSQL("UPDATE peers SET replaced_by = ? WHERE node_id = ?", arrayOf(new, old))
+            val out = db.rawQuery("SELECT packet_id, dst, body, ts, msg_id, attempts FROM outbox WHERE dst = ?", arrayOf(old)).use { c ->
+                val l = ArrayList<OutboxEntry>()
+                while (c.moveToNext()) l.add(OutboxEntry(c.getBlob(0), c.getString(1), c.getBlob(2), c.getLong(3),
+                    if (c.isNull(4)) null else c.getBlob(4), c.getInt(5)))
+                l
+            }
+            db.execSQL("DELETE FROM outbox WHERE dst = ?", arrayOf(old))
+            db.setTransactionSuccessful()
+            out
+        } finally {
+            db.endTransaction()
+        }
     }
 
     // ---- transports ---------------------------------------------------------
@@ -325,7 +351,7 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 1
             CREATE TABLE identity (id INTEGER PRIMARY KEY CHECK (id = 0), privkey BLOB NOT NULL, node_id TEXT NOT NULL,
                 display_name TEXT NOT NULL DEFAULT '', name_ts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
             CREATE TABLE peers (node_id TEXT PRIMARY KEY, pubkey BLOB NOT NULL, name TEXT, name_ts INTEGER NOT NULL DEFAULT 0,
-                override TEXT, first_seen INTEGER, last_seen INTEGER);
+                override TEXT, first_seen INTEGER, last_seen INTEGER, replaced_by TEXT);
             CREATE TABLE transports (node_id TEXT NOT NULL, addr TEXT NOT NULL, last_ok INTEGER NOT NULL, PRIMARY KEY (node_id, addr));
             CREATE TABLE groups (group_id BLOB PRIMARY KEY, name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
                 left_group INTEGER NOT NULL DEFAULT 0, updated_at INTEGER);

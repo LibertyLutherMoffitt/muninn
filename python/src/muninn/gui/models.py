@@ -92,8 +92,8 @@ class PeerListModel(QAbstractListModel):
             who = "you: " if msg.sender == m.node_id and msg.kind != "system" else ""
             return who + msg.text.replace("\n", " "), msg.ts
 
+        peers = m.active_peers()
         with m.lock:
-            peers = list(m.peers.values())
             groups = list(m.groups.values())
         for p in peers:
             conv = dm_conv(p.node_id)

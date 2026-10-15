@@ -62,7 +62,7 @@ fun mono(): Double = System.nanoTime() / 1e9
 
 data class PeerInfo(
     val nodeId: String, val pubkey: ByteArray, var name: String = "", var nameTs: Long = 0,
-    var override: String? = null, var lastSeen: Long = 0,
+    var override: String? = null, var lastSeen: Long = 0, var replacedBy: String? = null,
 ) {
     val display: String get() = override?.takeIf { it.isNotEmpty() } ?: name.ifEmpty { nodeId }
 }
@@ -134,7 +134,7 @@ class Mesh(
     }
 
     init {
-        for (p in storage.loadPeers()) peers[p.nodeId] = PeerInfo(p.nodeId, p.pubkey, p.name, p.nameTs, p.override, p.lastSeen)
+        for (p in storage.loadPeers()) peers[p.nodeId] = PeerInfo(p.nodeId, p.pubkey, p.name, p.nameTs, p.override, p.lastSeen, p.replacedBy)
         for (g in storage.loadGroups()) groups[g.groupId.hex()] = Group(g.groupId, g.name, g.version, g.members.toMutableSet(), g.left)
         for (e in storage.outboxLoad()) outbox[e.packetId.hex()] = OutItem(e.packetId, e.dst, e.body, e.ts, e.msgId, P.F_RELIABLE)
         for (f in storage.loadFiles()) {
@@ -298,6 +298,7 @@ class Mesh(
         }
         oldToClose?.close()
         val changed = learnPeer(P.RosterEntry(hello.nodeId, hello.pubkey, hello.name, hello.nameTs))
+        checkReinstall(hello.nodeId, hello.name, link.transportAddr)
         storage.saveTransport(hello.nodeId, link.transportAddr)
         storage.touchPeer(hello.nodeId)
         thread("link-r ${hello.nodeId}") { link.reader() }
@@ -310,6 +311,54 @@ class Mesh(
         onTopologyChange()
         return hello.nodeId
     }
+
+    // ================================================================ reinstalls
+
+    /** Same radio address + same name, different identity → reinstalled app. */
+    private fun checkReinstall(new: String, name: String, addr: String) {
+        for ((old, a, _) in storage.loadTransports()) {
+            if (a != addr || old == new) continue
+            val (p, live) = synchronized(lock) { peers[old] to (old in links) }
+            if (p == null || p.replacedBy != null || live) continue
+            if (p.name.isNotEmpty() && name.isNotEmpty() && p.name != name) continue
+            supersede(old, new, announce = true)
+        }
+    }
+
+    private fun supersede(old: String, new: String, announce: Boolean) {
+        val touched: List<Group>
+        synchronized(lock) {
+            val pOld = peers[old] ?: return
+            val pNew = peers[new] ?: return
+            if (pOld.replacedBy != null) return
+            pOld.replacedBy = new
+            if (pOld.override != null && pNew.override == null) { pNew.override = pOld.override; storage.setPeerOverride(new, pOld.override) }
+            outbox.values.removeIf { it.dst == old }
+            touched = groups.values.filter { old in it.members }
+            touched.forEach { it.members.remove(old); it.members.add(new) }
+        }
+        val entries = storage.migratePeer(old, new)
+        val now = mono()
+        for (e in entries) {
+            val item = OutItem(Nacl.randomBytes(16), new, e.body, P.now(), e.msgId, P.F_RELIABLE, nextTry = now)
+            storage.outboxAdd(OutboxEntry(item.packetId, new, e.body, item.ts, e.msgId, 0))
+            synchronized(lock) { outbox[item.packetId.hex()] = item }
+        }
+        log("$old reinstalled as $new; moved ${entries.size} pending")
+        system(dmConv(new), "${displayName(new)} reinstalled Muninn (new security key). Your conversation continues here.")
+        if (announce) {
+            val others = synchronized(lock) { peers.values.filter { it.replacedBy == null && it.nodeId != old && it.nodeId != new }.map { it.nodeId } }
+            sendBody(others, Body.B(Body.REPLACED, mapOf("o" to old, "n" to new)))
+            for (g in touched) if (!g.left && nodeId in g.members) {
+                synchronized(lock) { g.version += 1 }
+                saveGroup(g)
+                sendBody(synchronized(lock) { g.members.filter { it != nodeId } }, groupBody(g))
+            }
+        }
+        emit { it.onPeers() }
+    }
+
+    fun activePeers(): List<PeerInfo> = synchronized(lock) { peers.values.filter { it.replacedBy == null } }
 
     private fun preferNew(old: Link, new: Link): Boolean {
         if (mono() - old.lastRx > Tun.PING_INTERVAL * 2.5) return true
@@ -396,7 +445,7 @@ class Mesh(
 
     private fun rosterEntries(exclude: String?): List<P.RosterEntry> = synchronized(lock) {
         listOf(P.RosterEntry(nodeId, pubkey, name, nameTs)) +
-            peers.values.filter { it.nodeId != exclude }.map { P.RosterEntry(it.nodeId, it.pubkey, it.name, it.nameTs) }
+            peers.values.filter { it.nodeId != exclude && it.replacedBy == null }.map { P.RosterEntry(it.nodeId, it.pubkey, it.name, it.nameTs) }
     }
 
     private fun gossip(entries: List<P.RosterEntry>, exclude: String?) {
@@ -424,7 +473,7 @@ class Mesh(
 
     fun resolve(s: String): String? {
         val up = s.uppercase()
-        val ps = synchronized(lock) { if (up in peers) return up; peers.values.toList() }
+        val ps = synchronized(lock) { if (up in peers) return up; peers.values.filter { it.replacedBy == null } }
         val low = s.lowercase()
         ps.firstOrNull { it.override?.lowercase() == low }?.let { return it.nodeId }
         ps.firstOrNull { it.name.lowercase() == low }?.let { return it.nodeId }
@@ -688,6 +737,12 @@ class Mesh(
             Body.APP -> {
                 val ev = AppEvent(m.str("i").unhex(), m.str("s"), m.str("a"), convFor(src, m), src, m.int("q"), m.str("y"), m["b"], ts)
                 if (storage.saveAppEvent(ev)) emit { it.onApp(ev) }
+            }
+            Body.REPLACED -> {
+                val old = m.str("o"); val new = m.str("n")
+                val (pOld, pNew, live) = synchronized(lock) { Triple(peers[old], peers[new], old in links) }
+                if (pOld != null && pNew != null && (pOld.name.isEmpty() || pOld.name == pNew.name) && !live)
+                    supersede(old, new, announce = false)
             }
             Body.RT -> emit { it.onRt(src, m.str("a"), m.str("s"), m["b"], body.blob) }
         }

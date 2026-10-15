@@ -79,7 +79,7 @@ object P {
     )
 
     fun encodeHello(pubkey: ByteArray, nodeId: String, name: String, nameTs: Long, features: Int = 0): ByteArray {
-        val nb = name.toByteArray().let { if (it.size > 255) it.copyOf(255) else it }
+        val nb = utf8Cut(name)
         val bb = ByteBuffer.allocate(32 + 6 + 1 + 4 + 4 + 1 + nb.size)
         bb.put(pubkey).put(idToBytes(nodeId)).put(VERSION.toByte()).putInt(features)
             .putInt(nameTs.toInt()).put(nb.size.toByte()).put(nb)
@@ -126,7 +126,7 @@ object P {
     fun encodeRoster(entries: List<RosterEntry>): List<ByteArray> =
         entries.chunked(200).map { batch ->
             val parts = batch.map { e ->
-                val nb = e.name.toByteArray().let { if (it.size > 255) it.copyOf(255) else it }
+                val nb = utf8Cut(e.name)
                 ByteBuffer.allocate(6 + 32 + 4 + 1 + nb.size)
                     .put(idToBytes(e.nodeId)).put(e.pubkey).putInt(e.nameTs.toInt())
                     .put(nb.size.toByte()).put(nb).array()
@@ -203,6 +203,17 @@ object P {
     }
 
     fun now(): Long = System.currentTimeMillis() / 1000
+
+    /** UTF-8 bytes cut to `limit` without splitting a codepoint. */
+    fun utf8Cut(text: String, limit: Int = 255): ByteArray {
+        val b = text.toByteArray(Charsets.UTF_8)
+        if (b.size <= limit) return b
+        var i = limit - 1
+        while (i > 0 && (b[i].toInt() and 0xC0) == 0x80) i-- // start of last char
+        val lead = b[i].toInt() and 0xff
+        val len = when { lead < 0x80 -> 1; lead >= 0xF0 -> 4; lead >= 0xE0 -> 3; else -> 2 }
+        return b.copyOf(if (i + len <= limit) i + len else i)
+    }
 }
 
 /** Encrypted packet bodies. Mirrors python/src/muninn/content.py. */
@@ -220,8 +231,9 @@ object Body {
     const val RT = 11
     const val TYPING = 12
     const val GROUP_REQ = 13
+    const val REPLACED = 14
 
-    val RELIABLE = setOf(TEXT, REACT, EDIT, DELETE, FILE, GROUP, RECEIPT, APP)
+    val RELIABLE = setOf(TEXT, REACT, EDIT, DELETE, FILE, GROUP, RECEIPT, APP, REPLACED)
 
     class B(val kind: Int, val meta: Map<String, Any?> = emptyMap(), val blob: ByteArray = ByteArray(0)) {
         val reliable get() = kind in RELIABLE

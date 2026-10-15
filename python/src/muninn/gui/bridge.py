@@ -200,7 +200,9 @@ class ChatBridge(QObject):
 
     @Property(int, notify=statusChanged)
     def reachablePeerCount(self) -> int:
-        return len([p for p in self.mesh.peers if self.mesh.reachable(p)])
+        return len(
+            [p for p in self.mesh.active_peers() if self.mesh.reachable(p.node_id)]
+        )
 
     @Property(str, constant=True)
     def transportName(self) -> str:
@@ -735,7 +737,7 @@ class ChatBridge(QObject):
 
     def _peer_candidates(self) -> list[str]:
         out = []
-        for p in self.mesh.peers.values():
+        for p in self.mesh.active_peers():
             out.append(p.display)
         return out
 
@@ -1002,9 +1004,8 @@ class ChatBridge(QObject):
             )
         elif head in ("peers", "known"):
             rows = []
-            for nid, p in sorted(
-                mesh.peers.items(), key=lambda kv: kv[1].display.lower()
-            ):
+            for p in sorted(mesh.active_peers(), key=lambda p: p.display.lower()):
+                nid = p.node_id
                 h = mesh.hops(nid)
                 if head == "peers" and h is None:
                     continue
@@ -1107,7 +1108,8 @@ class ChatBridge(QObject):
     @Slot(result=list)
     def knownPeers(self) -> list:
         out = []
-        for nid, p in self.mesh.peers.items():
+        for p in self.mesh.active_peers():
+            nid = p.node_id
             h = self.mesh.hops(nid)
             out.append(
                 {
