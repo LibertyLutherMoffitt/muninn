@@ -7,8 +7,17 @@ import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.util.Log
+import android.bluetooth.BluetoothClass
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
 import com.muninn.core.Conn
+import com.muninn.core.ScanResult
 import com.muninn.core.Transport
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
@@ -21,11 +30,11 @@ val MUNINN_RFCOMM_UUID: UUID = UUID.fromString("320bcf9c-94fe-46f4-b9bf-83535caf
  * Insecure RFCOMM (no bonding, no pairing prompts between Android devices).
  * Good-citizen rules: we only ever dial addresses the core hands us — peers we
  * already talked to, or devices whose SDP record advertises the Muninn UUID.
- * Background inquiry is off on Android (it disrupts the user's own Bluetooth
- * audio and drains battery); discovery happens from the "Nearby" screen.
+ * Background inquiry follows the user's scan mode (Node/ScanPolicy); unknown
+ * devices are only probed if they are phones or computers, never paired.
  */
 @SuppressLint("MissingPermission")
-class BtTransport(ctx: Context) : Transport {
+class BtTransport(private val ctx: Context) : Transport {
     private val adapter: BluetoothAdapter? = ctx.getSystemService(BluetoothManager::class.java)?.adapter
     @Volatile private var server: BluetoothServerSocket? = null
     @Volatile private var stopped = false
@@ -84,6 +93,54 @@ class BtTransport(ctx: Context) : Transport {
             throw java.io.IOException("connect $addr: ${e.message}")
         }
         return BtConn(sock)
+    }
+
+    /** One inquiry (~12 s on Android). Kind from Class of Device, Muninn-ness
+     *  from cached SDP UUIDs (null = unknown → maybe probe-worthy). */
+    override fun scan(durationMs: Long): List<ScanResult> {
+        val a = adapter ?: return emptyList()
+        if (!a.isEnabled) return emptyList()
+        val found = ConcurrentHashMap<String, ScanResult>()
+        val done = CountDownLatch(1)
+        val rx = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                when (i.action) {
+                    BluetoothDevice.ACTION_FOUND -> {
+                        val d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) ?: return
+                        val rssi = i.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE).toInt().takeIf { it != Short.MIN_VALUE.toInt() }
+                        found[d.address] = ScanResult(d.address, runCatching { d.name }.getOrNull() ?: "", muninnOf(d), rssi, kindOf(d))
+                    }
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> done.countDown()
+                }
+            }
+        }
+        ctx.registerReceiver(rx, IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_FOUND); addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+        })
+        try {
+            if (a.isDiscovering) a.cancelDiscovery()
+            a.startDiscovery()
+            done.await(maxOf(durationMs, 13_000), TimeUnit.MILLISECONDS)
+        } finally {
+            runCatching { a.cancelDiscovery() }
+            runCatching { ctx.unregisterReceiver(rx) }
+        }
+        return found.values.toList()
+    }
+
+    private fun muninnOf(d: BluetoothDevice): Boolean? {
+        val u = d.uuids ?: return null
+        if (u.isEmpty()) return null
+        return u.any { it.uuid == MUNINN_RFCOMM_UUID }
+    }
+
+    private fun kindOf(d: BluetoothDevice): String = when (d.bluetoothClass?.majorDeviceClass) {
+        BluetoothClass.Device.Major.PHONE -> "phone"
+        BluetoothClass.Device.Major.COMPUTER -> "computer"
+        BluetoothClass.Device.Major.AUDIO_VIDEO -> "audio"
+        BluetoothClass.Device.Major.PERIPHERAL -> "peripheral"
+        BluetoothClass.Device.Major.WEARABLE -> "wearable"
+        else -> "other"
     }
 
     /** Bonded devices whose cached SDP record says Muninn — no radio traffic. */

@@ -386,6 +386,8 @@ class Mesh:
         changed = self._learn_peer(
             P.RosterEntry(hello.node_id, hello.pubkey, hello.name, hello.name_ts)
         )
+        with self.lock:
+            self.peers[hello.node_id].last_seen = int(time.time())
         self._check_reinstall(hello.node_id, hello.name, link.transport_addr)
         self.storage.save_transport(hello.node_id, link.transport_addr)
         self.storage.touch_peer(hello.node_id)
@@ -433,6 +435,10 @@ class Mesh:
                 self.routes[dest].pop(link.node_id, None)
                 if not self.routes[dest]:
                     del self.routes[dest]
+        with self.lock:
+            if link.node_id in self.peers:
+                self.peers[link.node_id].last_seen = int(time.time())
+        self.storage.touch_peer(link.node_id)
         self._log(f"link down {link.node_id}")
         self._advert_due = 0.0
         self._on_topology_change()
@@ -714,7 +720,12 @@ class Mesh:
                 if any(v in self.links for v in vias)
             }
             newly = now_reach - self._reachable
+            gone = self._reachable - now_reach
             self._reachable = now_reach
+            stamp = int(time.time())
+            for nid in newly | gone:  # "last seen" covers relayed peers too
+                if nid in self.peers:
+                    self.peers[nid].last_seen = stamp
             self._advert_due = min(self._advert_due, time.monotonic() + 0.3)
         for dest in newly:
             self._flush_for(dest)

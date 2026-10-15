@@ -542,7 +542,10 @@ class Mesh(
             val now = HashSet(links.keys)
             for ((d, vias) in routes) if (vias.keys.any { it in links }) now.add(d)
             newly = now - reachableSet
+            val gone = reachableSet - now
             reachableSet = now
+            val stamp = P.now()
+            for (id in newly + gone) peers[id]?.lastSeen = stamp
             advertDue = minOf(advertDue, mono() + 0.3)
         }
         newly.forEach { flushFor(it) }

@@ -58,6 +58,9 @@ class AppEvent(
 interface Storage {
     val filesDir: File
 
+    fun getSetting(key: String): String?
+    fun setSetting(key: String, value: String)
+
     fun getIdentity(): Identity?
     fun createIdentity(privkey: ByteArray, name: String): Identity
     fun setDisplayName(name: String, nameTs: Long)
@@ -121,7 +124,12 @@ class MemStorage(override val filesDir: File) : Storage {
     private val files = LinkedHashMap<String, FileRecord>()
     private val appEvents = LinkedHashMap<String, AppEvent>()
 
+    private val settings = HashMap<String, String>()
+
     init { filesDir.mkdirs() }
+
+    override fun getSetting(key: String) = synchronized(lock) { settings[key] }
+    override fun setSetting(key: String, value: String) = synchronized(lock) { settings[key] = value }
 
     override fun getIdentity() = synchronized(lock) { identity }
     override fun createIdentity(privkey: ByteArray, name: String) = synchronized(lock) {

@@ -64,7 +64,7 @@ def main() -> None:
         sys.exit(1)
 
     notifications.init(app, QIcon())
-    peer_model = PeerListModel(node.mesh)
+    peer_model = PeerListModel(node.mesh, node.presence)
     msg_model = MessageListModel(node.mesh)
     bridge = ChatBridge(node, peer_model, msg_model)
     vim = VimEditor()

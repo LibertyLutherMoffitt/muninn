@@ -55,7 +55,7 @@ object Runtime {
         val name = p.getString("name", null)?.takeIf { it.isNotEmpty() }
         val t: Transport = if (sim.isNotEmpty()) SimTransport(sim, name ?: Build.MODEL) else BtTransport(app)
         transport = t
-        val n = Node(t, AndroidStorage(app), name, log = { Log.d(TAG, it) }, autoScan = sim.isNotEmpty())
+        val n = Node(t, AndroidStorage(app), name, log = { Log.d(TAG, it) })
         val gh = GameHost(n.mesh, { bundledGames(app) }, File(app.filesDir, "games"))
         n.mesh.addListener(object : MeshListener {
             override fun onMessage(m: StoredMessage) {
@@ -122,17 +122,11 @@ object Runtime {
         val groups = synchronized(m.lock) { m.groups.values.toList() }
         for (p in peers) {
             val conv = dmConv(p.nodeId)
-            val h = m.hops(p.nodeId)
-            val status = when { h == 1 -> "direct"; h != null -> "relay"; else -> "offline" }
+            val pres = n.presence(p.nodeId)
             val (text, ts) = preview(conv)
-            if (ts == 0L && status == "offline" && (unread[conv] ?: 0) == 0) continue
-            val sub = when (status) {
-                "direct" -> "nearby"
-                "relay" -> "in range via ${m.displayName(m.nextHop(p.nodeId) ?: "")}"
-                else -> "out of range"
-            }
-            out.add(ConvItem(conv, p.display, false, text, if (ts > 0) ts else p.lastSeen, unread[conv] ?: 0, status,
-                m.typingIn(conv).isNotEmpty(), m.pendingCount(p.nodeId), sub))
+            if (ts == 0L && pres.state == "offline" && (unread[conv] ?: 0) == 0) continue
+            out.add(ConvItem(conv, p.display, false, text, if (ts > 0) ts else p.lastSeen, unread[conv] ?: 0, pres.state,
+                m.typingIn(conv).isNotEmpty(), m.pendingCount(p.nodeId), pres.text))
         }
         for (g in groups) {
             val (text, ts) = preview(g.conv)
@@ -158,12 +152,7 @@ object Runtime {
         if (typing.isNotEmpty()) return typing.joinToString() + if (typing.size == 1) " is typing…" else " are typing…"
         if (conv.startsWith("dm:")) {
             val id = conv.substring(3)
-            val h = m.hops(id)
-            return when {
-                h == 1 -> "nearby · direct"
-                h != null -> "in range via ${m.displayName(m.nextHop(id) ?: "")} · $h hops"
-                else -> "out of range" + m.pendingCount(id).let { if (it > 0) " · $it waiting to send" else "" }
-            }
+            return n.presence(id).text + m.pendingCount(id).let { if (it > 0) " · $it waiting to send" else "" }
         }
         val gid = convGroupId(conv) ?: return ""
         val g = synchronized(m.lock) { m.groups[gid.hex()] } ?: return ""

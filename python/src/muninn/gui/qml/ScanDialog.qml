@@ -136,7 +136,7 @@ Rectangle {
                     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                         if (currentIndex >= 0) {
                             const item = deviceModel.get(currentIndex)
-                            if (item && item.muninn) {
+                            if (item && (item.muninn || item.maybe)) {
                                 statusText.text = "Connecting to " + (item.name || item.mac) + "…"
                                 bridge.pairDevice(item.mac)
                             }
@@ -170,8 +170,8 @@ Rectangle {
                         Item { Layout.fillWidth: true }
                         Button {
                             id: pairBtn
-                            text: model.muninn ? "Connect" : "not Muninn"
-                            enabled: model.muninn
+                            text: model.muninn ? "Connect" : (model.maybe ? "Try" : model.kind)
+                            enabled: model.muninn || model.maybe
                             activeFocusOnTab: true
                             Keys.onReturnPressed: clicked()
                             Keys.onEnterPressed: clicked()

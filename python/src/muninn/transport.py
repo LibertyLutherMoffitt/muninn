@@ -11,6 +11,24 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
+
+
+@dataclass
+class ScanResult:
+    addr: str
+    name: str
+    # True: advertises Muninn. False: advertises other services only.
+    # None: unknown (BlueZ often omits 128-bit UUIDs from inquiry).
+    muninn: bool | None
+    kind: str = "other"  # phone | computer | audio | peripheral | wearable | other
+    rssi: int | None = None
+
+    @property
+    def probeable(self) -> bool:
+        """Could be a Muninn peer worth one polite look: an unknown phone or
+        computer. Headsets, watches, mice etc. are never contacted."""
+        return self.muninn is None and self.kind in ("phone", "computer")
 
 
 class Transport:
@@ -33,9 +51,14 @@ class Transport:
         """Muninn-capable devices currently known to be nearby: [(addr, name)]."""
         return []
 
-    def scan(self, duration: float = 5.0) -> list[tuple[str, str, bool]]:
-        """Active inquiry. Returns every device seen: [(addr, name, is_muninn)]."""
+    def scan(self, duration: float = 5.0) -> list[ScanResult]:
+        """Active inquiry. Returns every device seen."""
         return []
+
+    def probe(self, addr: str):
+        """Try a Muninn connection to an *unconfirmed* device without pairing
+        or prompting anyone. Returns a socket or raises."""
+        return self.connect(addr)
 
     def should_defer(self, addr: str) -> bool:
         """True if we should give the peer a head start dialing us first."""
@@ -62,6 +85,17 @@ class BtTransport(Transport):
     def start(self, on_incoming) -> None:
         self.bt.create_server()
 
+        def stay_visible():
+            # BlueZ drops discoverability after DiscoverableTimeout (180 s by
+            # default); new seat neighbours must still be able to find us.
+            while not self._stop.wait(120):
+                try:
+                    self.bt.set_discoverable(True)
+                except Exception:
+                    pass
+
+        threading.Thread(target=stay_visible, daemon=True).start()
+
         def acceptor():
             while not self._stop.is_set():
                 try:
@@ -82,7 +116,15 @@ class BtTransport(Transport):
             pass
 
     def connect(self, addr: str, timeout: float = 20.0):
+        # Known / confirmed peers: pair if needed (link keys persist).
         self.bt.ensure_paired(addr)
+        sock, _ = self.bt.connect(addr)
+        return sock
+
+    def probe(self, addr: str):
+        # Unconfirmed device: never pair (a pairing prompt on a stranger's
+        # phone is exactly what we must not cause). ConnectProfile without a
+        # bond only succeeds if the other side runs Muninn's open profile.
         sock, _ = self.bt.connect(addr)
         return sock
 
@@ -93,12 +135,20 @@ class BtTransport(Transport):
             return []
 
     def scan(self, duration: float = 5.0):
-        try:
+        if hasattr(self.bt, "inquiry"):
+            try:
+                return [ScanResult(**d) for d in self.bt.inquiry(duration)]
+            except Exception:
+                return []
+        try:  # WinRT: no class/RSSI info
             seen = self.bt.scan_devices(duration=duration, quiet=True)
         except Exception:
             return []
         muninn = {a.upper() for a, _ in self.discover()}
-        return [(a.upper(), n, a.upper() in muninn) for a, n in seen]
+        return [
+            ScanResult(a.upper(), n, a.upper() in muninn or None, "other")
+            for a, n in seen
+        ]
 
     def should_defer(self, addr: str) -> bool:
         # Simultaneous ConnectProfile calls can wedge bluetoothd: the higher

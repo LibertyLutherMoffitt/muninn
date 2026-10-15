@@ -41,9 +41,10 @@ _CONV_ROLES = _roles(
 
 
 class PeerListModel(QAbstractListModel):
-    def __init__(self, mesh: Mesh, parent=None):
+    def __init__(self, mesh: Mesh, presence=None, parent=None):
         super().__init__(parent)
         self.mesh = mesh
+        self.presence = presence  # node_id -> {"state", "text"}
         self._items: list[dict] = []
 
     def roleNames(self):
@@ -98,9 +99,19 @@ class PeerListModel(QAbstractListModel):
         for p in peers:
             conv = dm_conv(p.node_id)
             h = m.hops(p.node_id)
-            status = "direct" if h == 1 else ("relay" if h else "offline")
+            pres = self.presence(p.node_id) if self.presence else None
+            status = (
+                pres["state"]
+                if pres
+                else ("direct" if h == 1 else ("relay" if h else "offline"))
+            )
             text, ts = preview(conv)
-            if not ts and status == "offline" and not unread.get(conv):
+            if (
+                not ts
+                and status in ("offline", "nearby")
+                and not unread.get(conv)
+                and status != "nearby"
+            ):
                 # Known-but-never-talked-to and not around: keep the list tidy.
                 continue
             items.append(
@@ -113,7 +124,7 @@ class PeerListModel(QAbstractListModel):
                     "lastTs": ts or p.last_seen,
                     "unreadCount": unread.get(conv, 0),
                     "status": status,
-                    "via": m.next_hop(p.node_id) or "",
+                    "via": pres["text"] if pres else (m.next_hop(p.node_id) or ""),
                     "hops": h or 0,
                     "typing": bool(m.typing_in(conv)),
                     "pending": m.pending_count(p.node_id),

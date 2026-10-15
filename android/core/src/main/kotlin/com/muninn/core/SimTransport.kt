@@ -15,6 +15,8 @@ class SimTransport(
     val name: String = "",
     private var addr: String? = null,
     var pos: Pair<Double, Double>? = null,
+    val kind: String = "phone",
+    val advertise: Boolean = true,
 ) : Transport {
     override val maxParallelDials = 2
     private val hubHost = hub.substringBeforeLast(":").ifEmpty { "127.0.0.1" }
@@ -54,7 +56,7 @@ class SimTransport(
     @Synchronized
     private fun register() {
         val s = open()
-        val msg = linkedMapOf<String, Any?>("op" to "register", "name" to name, "addr" to addr)
+        val msg = linkedMapOf<String, Any?>("op" to "register", "name" to name, "addr" to addr, "kind" to kind, "advertise" to advertise)
         pos?.let { msg["pos"] = listOf(it.first, it.second) }
         send(s, msg)
         val res = readLine(s)
@@ -132,6 +134,6 @@ class SimTransport(
         waiting[rid] = latch to out
         send(c, mapOf("op" to "discover", "rid" to rid))
         latch.await(maxOf(durationMs * 3, 15_000), TimeUnit.MILLISECONDS)
-        return out.map { ScanResult(it.str("addr"), it.str("name"), it.bool("muninn"), it.int("rssi")) }
+        return out.map { ScanResult(it.str("addr"), it.str("name"), it["muninn"] as? Boolean, it.int("rssi"), it.str("kind", "other")) }
     }
 }

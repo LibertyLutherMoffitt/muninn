@@ -221,14 +221,9 @@ class ChatBridge(QObject):
         c = self._active
         if c.startswith("dm:"):
             nid = c[3:]
-            h = self.mesh.hops(nid)
-            if h == 1:
-                return "nearby · direct"
-            if h:
-                via = self.mesh.display_name(self.mesh.next_hop(nid) or "")
-                return f"in range via {via} · {h} hops"
+            pres = self.node.presence(nid)
             n = self.mesh.pending_count(nid)
-            return "out of range" + (f" · {n} waiting to send" if n else "")
+            return pres["text"] + (f" · {n} waiting to send" if n else "")
         gid = conv_group_id(c)
         if gid and gid in self.mesh.groups:
             g = self.mesh.groups[gid]
@@ -555,10 +550,17 @@ class ChatBridge(QObject):
                 known = {a for _, a, _ in self.node.storage.load_transports()}
                 out = sorted(
                     (
-                        {"mac": a, "name": n or a, "muninn": ok, "known": a in known}
-                        for a, n, ok in res
+                        {
+                            "mac": r.addr,
+                            "name": r.name or r.addr,
+                            "muninn": bool(r.muninn),
+                            "maybe": r.probeable,
+                            "kind": r.kind,
+                            "known": r.addr in known,
+                        }
+                        for r in res
                     ),
-                    key=lambda d: (not d["muninn"], d["name"].lower()),
+                    key=lambda d: (not d["muninn"], not d["maybe"], d["name"].lower()),
                 )
                 self.scanResultsReady.emit(out)
             except Exception as e:
@@ -571,7 +573,8 @@ class ChatBridge(QObject):
     def pairDevice(self, addr: str) -> None:
         def run():
             try:
-                nid = self.node.connect_to(addr)
+                r = self.node.sightings.get(addr.upper())
+                nid = self.node.connect_to(addr, probe=bool(r and not r.muninn))
                 if nid:
                     self.notify.emit(f"connected to {self.mesh.display_name(nid)}")
                 else:
@@ -678,6 +681,8 @@ class ChatBridge(QObject):
         "game",
         "games",
         "sharegame",
+        "scanmode",
+        "whoami",
         "clear",
         "help",
         "about",
@@ -715,6 +720,8 @@ class ChatBridge(QObject):
         (":status", "links, routes and queues"),
         (":scan / :connect <addr>", "find / dial a nearby device"),
         (":reconnect", "retry every known device now"),
+        (":scanmode [eager|balanced|quiet]", "how hard to look for new people"),
+        (":whoami", "your name, id, radio and scan mode"),
         (":history [N]", "load more history"),
         (":next / :prev", "cycle conversations (Ctrl-N / Ctrl-P)"),
         (":palette", "command palette (<space>f)"),
@@ -982,6 +989,53 @@ class ChatBridge(QObject):
                 )
             except (OSError, ValueError, KeyError) as e:
                 self.errorOccurred.emit(f"can't share: {e}")
+        elif head == "scanmode":
+            from muninn import scanpolicy
+
+            if args:
+                try:
+                    pol = self.node.set_scan_mode(args[0].lower())
+                except ValueError as e:
+                    return self.errorOccurred.emit(str(e))
+                self.notify.emit(f"scan mode: {pol.label} — {pol.description}")
+            else:
+                cur = self.node.policy.name
+                self._info(
+                    "scan mode",
+                    [
+                        self._item(
+                            ("● " if p.name == cur else "  ") + p.label,
+                            p.description,
+                            action="cmd",
+                            cmd=f"scanmode {p.name}",
+                        )
+                        for p in scanpolicy.POLICIES.values()
+                    ],
+                )
+        elif head == "whoami":
+            st = self.node.status()
+            self._info(
+                "you",
+                [
+                    ("name", mesh.name or "(not set — :nick <name>)", ""),
+                    ("id", mesh.node_id, ""),
+                    (
+                        "radio",
+                        f"{self.transportName} {self.node.transport.local_addr()}",
+                        "",
+                    ),
+                    (
+                        "nearby",
+                        f"{len(mesh.connected())} connected · {st['sighted']} devices seen",
+                        "",
+                    ),
+                    (
+                        "scan mode",
+                        f"{self.node.policy.label} — {self.node.policy.description}",
+                        "",
+                    ),
+                ],
+            )
         elif head == "reconnect":
             self.node.poke()
             self.notify.emit("retrying all known devices")
@@ -1005,20 +1059,25 @@ class ChatBridge(QObject):
         elif head in ("peers", "known"):
             rows = []
             for p in sorted(mesh.active_peers(), key=lambda p: p.display.lower()):
-                nid = p.node_id
-                h = mesh.hops(nid)
-                if head == "peers" and h is None:
+                pres = self.node.presence(p.node_id)
+                if head == "peers" and pres["state"] not in ("direct", "relay"):
                     continue
-                where = (
-                    "direct"
-                    if h == 1
-                    else (
-                        f"relay via {mesh.display_name(mesh.next_hop(nid) or '')} · {h} hops"
-                        if h
-                        else "out of range"
-                    )
+                rows.append(
+                    (p.display, f"{pres['text']} · {p.node_id}", dm_conv(p.node_id))
                 )
-                rows.append((p.display, f"{where} · {nid}", dm_conv(nid)))
+            if head == "known":
+                for r in self.node.scan_results:
+                    if r.muninn is False or r.addr in {
+                        a for _, a, _ in self.node.storage.load_transports()
+                    }:
+                        continue
+                    rows.append(
+                        (
+                            r.name or r.addr,
+                            f"seen nearby ({r.kind}) · not introduced yet · {r.addr}",
+                            "",
+                        )
+                    )
             self._info("in range" if head == "peers" else "everyone you know", rows)
         elif head == "status":
             st = mesh.status()

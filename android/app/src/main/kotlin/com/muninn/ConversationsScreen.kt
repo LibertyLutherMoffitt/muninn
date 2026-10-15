@@ -65,7 +65,11 @@ fun Avatar(name: String, status: String?, size: Int = 44) {
             Box(
                 Modifier.align(Alignment.BottomEnd).size(13.dp).clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surface).padding(2.dp).clip(CircleShape)
-                    .background(when (status) { "direct" -> GREEN; "relay" -> AMBER; else -> MaterialTheme.colorScheme.outline }),
+                    .background(when (status) {
+                        "direct" -> GREEN; "relay" -> AMBER
+                        "nearby" -> Color(0xFF7FA7D9)
+                        else -> MaterialTheme.colorScheme.outline
+                    }),
             )
         }
     }

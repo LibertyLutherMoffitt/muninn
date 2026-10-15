@@ -18,7 +18,7 @@ import com.muninn.core.StoredMessage
 import java.io.File
 
 /** SQLite [Storage] — same schema as python/src/muninn/storage.py (v2). */
-class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 2), Storage {
+class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 3), Storage {
     override val filesDir: File = File(ctx.filesDir, "files").apply { mkdirs() }
     private val lock = Any()
 
@@ -33,6 +33,7 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 2
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) db.execSQL("ALTER TABLE peers ADD COLUMN replaced_by TEXT")
+        if (oldVersion < 3) db.execSQL("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
     }
 
     private inline fun <T> w(f: (SQLiteDatabase) -> T): T = synchronized(lock) { f(writableDatabase) }
@@ -56,6 +57,14 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 2
             while (c.moveToNext()) out.add(row(c))
             out
         }
+    }
+
+    override fun getSetting(key: String): String? =
+        query("SELECT value FROM settings WHERE key = ?", arrayOf(key)) { it.getString(0) }.firstOrNull()
+
+    override fun setSetting(key: String, value: String) = w { db ->
+        db.execSQL("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            arrayOf(key, value))
     }
 
     // ---- identity ---------------------------------------------------------
@@ -374,7 +383,8 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 2
                 chunks INTEGER NOT NULL, path TEXT NOT NULL, state TEXT NOT NULL, have BLOB);
             CREATE TABLE app_events (event_id BLOB PRIMARY KEY, session TEXT NOT NULL, app TEXT NOT NULL, conv TEXT NOT NULL,
                 sender TEXT NOT NULL, seq INTEGER NOT NULL, type TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL);
-            CREATE INDEX idx_app_events_session ON app_events(session, seq)
+            CREATE INDEX idx_app_events_session ON app_events(session, seq);
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)
         """.trimIndent()
     }
 }

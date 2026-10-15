@@ -7,7 +7,7 @@ import json
 import socket
 import threading
 
-from muninn.transport import Transport
+from muninn.transport import ScanResult, Transport
 
 
 def _parse(hub: str) -> tuple[str, int]:
@@ -35,7 +35,11 @@ class SimTransport(Transport):
         name: str = "",
         addr: str | None = None,
         pos: tuple[float, float] | None = None,
+        kind: str = "computer",
+        advertise: bool = True,
     ):
+        self.kind = kind
+        self.advertise = advertise
         self.hub = _parse(hub) if isinstance(hub, str) else hub
         self.name = name
         self._addr = addr
@@ -55,7 +59,13 @@ class SimTransport(Transport):
 
     def _register(self) -> None:
         s = self._open()
-        msg = {"op": "register", "name": self.name, "addr": self._addr}
+        msg = {
+            "op": "register",
+            "name": self.name,
+            "addr": self._addr,
+            "kind": self.kind,
+            "advertise": self.advertise,
+        }
         if self.pos is not None:
             msg["pos"] = list(self.pos)
         s.sendall((json.dumps(msg) + "\n").encode())
@@ -158,7 +168,12 @@ class SimTransport(Transport):
                 (json.dumps({"op": "discover", "rid": rid}) + "\n").encode()
             )
         ev.wait(timeout=max(duration * 3, 15))
-        return [(d["addr"], d["name"], d["muninn"]) for d in out]
+        return [
+            ScanResult(
+                d["addr"], d["name"], d["muninn"], d.get("kind", "other"), d.get("rssi")
+            )
+            for d in out
+        ]
 
 
 class Admin:

@@ -105,7 +105,9 @@ fun NearbyScreen(discovery: BtDiscovery) {
     fun connect(addr: String, label: String) {
         connecting = connecting + addr
         scope.launch(Dispatchers.IO) {
-            val r = runCatching { Runtime.node?.connectTo(addr) }
+            val confirmed = discovery.devices.value.firstOrNull { it.address == addr }?.muninn == true ||
+                simResults.firstOrNull { it.addr == addr }?.muninn == true
+            val r = runCatching { Runtime.node?.connectTo(addr, probe = !confirmed) }
             connecting = connecting - addr
             r.onSuccess { id ->
                 if (id != null) {
@@ -117,7 +119,7 @@ fun NearbyScreen(discovery: BtDiscovery) {
     }
 
     val rows: List<Triple<String, String, Boolean>> =
-        if (sim) simResults.map { Triple(it.addr, it.name, it.muninn) }
+        if (sim) simResults.map { Triple(it.addr, it.name, it.muninn == true) }
         else devices.map { Triple(it.address, it.label, it.muninn) }
     val shown = rows.filter { showAll || it.third }.sortedBy { !it.third }
     val busy = if (sim) simScanning else scanning
@@ -321,6 +323,25 @@ fun SettingsScreen() {
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
             }) { Text("Allow background") }
+            HorizontalDivider()
+            Text("Finding new people", style = MaterialTheme.typography.titleSmall)
+            var mode by remember { mutableStateOf(Runtime.node?.policy?.name ?: com.muninn.core.ScanPolicy.DEFAULT.name) }
+            com.muninn.core.ScanPolicy.ALL.values.forEach { pol ->
+                Row(Modifier.fillMaxWidth().clickable {
+                    mode = pol.name
+                    Thread { runCatching { Runtime.node?.setScanMode(pol.name) } }.start()
+                }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.RadioButton(selected = mode == pol.name, onClick = null)
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text(pol.label)
+                        Text(pol.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            Text("Muninn never pairs with or prompts other people's devices; headsets and watches are never contacted. " +
+                "Looking around briefly slows Bluetooth audio — choose Quiet if that bothers you.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Start after reboot", Modifier.weight(1f))
                 Switch(checked = boot, onCheckedChange = { boot = it; p.edit().putBoolean("start_on_boot", it).apply() })

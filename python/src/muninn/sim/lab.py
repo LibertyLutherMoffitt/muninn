@@ -53,7 +53,13 @@ class SimLab:
             print(f"{time.strftime('%H:%M:%S')} {s}", flush=True)
 
     def node(
-        self, name: str, pos=(0, 0), start: bool = True, wipe: bool = False
+        self,
+        name: str,
+        pos=(0, 0),
+        start: bool = True,
+        wipe: bool = False,
+        advertise: bool = True,
+        kind: str = "computer",
     ) -> Node:
         """Create (or restart, keeping its data) a node. `wipe` simulates a
         reinstall: same radio address, fresh identity and empty database."""
@@ -66,7 +72,9 @@ class SimLab:
         old = self.nodes.get(name)
         if old is not None:
             addr = old.transport.local_addr()
-        t = SimTransport(self.addr, name=name, pos=pos, addr=addr)
+        t = SimTransport(
+            self.addr, name=name, pos=pos, addr=addr, kind=kind, advertise=advertise
+        )
         n = Node(t, db_path=db, name=name, log=self.log)
         self.nodes[name] = n
         if start:

@@ -59,6 +59,8 @@ class Device:
     name: str
     pos: tuple[float, float]
     muninn: bool = True
+    kind: str = "phone"
+    advertise: bool = True  # False: service record not visible in inquiry
     writer: asyncio.StreamWriter | None = None  # control channel
     tx_free_at: float = 0.0  # shared airtime
     online: bool = True
@@ -89,6 +91,7 @@ class Hub:
         self.conns: dict[int, Conn] = {}
         self.blocked: set[frozenset] = set()
         self.forced: dict[frozenset, float] = {}  # pair -> quality override
+        self.probes: dict[str, int] = {}  # addr -> connect attempts it received
         self.flaps: dict[frozenset, tuple[float, float]] = {}  # pair -> (up_s, down_s)
         self._next = 1
         self.events: list[str] = []
@@ -114,10 +117,26 @@ class Hub:
             "Echo Buds",
             "OnePlus Nord",
         ]
+        kinds = {
+            "iPhone": "phone",
+            "Galaxy S22": "phone",
+            "OnePlus Nord": "phone",
+            "Kindle": "other",
+            "MX Master 3": "peripheral",
+            "Pixel Watch": "wearable",
+            "Garmin Venu": "wearable",
+            "Fitbit Charge": "wearable",
+        }
         for _ in range(n):
             addr = _rand_addr(self.rng)
             pos = (self.rng.uniform(0, 40), self.rng.uniform(0, 6))
-            self.devices[addr] = Device(addr, self.rng.choice(names), pos, muninn=False)
+            name = self.rng.choice(names)
+            kind = kinds.get(name, "audio")
+            d = Device(addr, name, pos, muninn=False, kind=kind)
+            # Other passengers' phones/laptops: inquiry often doesn't reveal
+            # their services, so they look exactly like a hidden Muninn peer.
+            d.advertise = not (kind == "phone" and self.rng.random() < 0.6)
+            self.devices[addr] = d
 
     def dist(self, a: Device, b: Device) -> float:
         return math.hypot(a.pos[0] - b.pos[0], (a.pos[1] - b.pos[1]) * 0.6)
@@ -193,6 +212,8 @@ class Hub:
         dev.writer = writer
         dev.online = True
         dev.muninn = True
+        dev.kind = msg.get("kind", dev.kind)
+        dev.advertise = bool(msg.get("advertise", True))
         self.log(f"register {addr} {dev.name} at {dev.pos}")
         await self._send(writer, {"ok": True, "addr": addr})
         try:
@@ -230,7 +251,8 @@ class Hub:
                 {
                     "addr": other.addr,
                     "name": other.name,
-                    "muninn": other.muninn,
+                    "muninn": other.muninn if other.advertise else None,
+                    "kind": other.kind,
                     "rssi": int(-40 - 50 * (1 - q)),
                 }
             )
@@ -246,6 +268,7 @@ class Hub:
         a, b = msg["from"].upper(), msg["to"].upper()
         q = self.quality(a, b)
         target = self.devices.get(b)
+        self.probes[b] = self.probes.get(b, 0) + 1
         if q <= 0 or target is None:
             await asyncio.sleep(self.ms(self.p["page_timeout_ms"]))
             return await self._fail(writer, "page timeout")
@@ -407,6 +430,8 @@ class Hub:
                         "name": d.name,
                         "pos": d.pos,
                         "muninn": d.muninn,
+                        "kind": d.kind,
+                        "advertise": d.advertise,
                         "online": d.online and (d.writer is not None or not d.muninn),
                     }
                     for d in self.devices.values()
@@ -423,6 +448,7 @@ class Hub:
                     if c.wb is not None
                 ],
                 "blocked": [sorted(p) for p in self.blocked],
+                "connect_attempts": self.probes,
                 "flaps": [[*sorted(p), *v] for p, v in self.flaps.items()],
                 "events": self.events[-int(m.get("events", 30)) :],
             }
@@ -458,6 +484,8 @@ class Hub:
                     not m.get("b") or m["b"].upper() in (conn.a, conn.b)
                 ):
                     self.close(conn, "admin kill")
+        elif cmd == "hide":  # service record invisible to inquiry
+            self.devices[m["addr"].upper()].advertise = not m.get("show")
         elif cmd == "decoys":
             self._make_decoys(int(m["n"]))
         elif cmd == "reset":

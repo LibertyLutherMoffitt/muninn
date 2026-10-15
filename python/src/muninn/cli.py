@@ -71,6 +71,8 @@ HELP = """\
 /file <path> [caption]     send a file / picture
 /get <#n>                  download an offered file (big files are manual)
 /scan                      look for nearby devices
+/scanmode [eager|balanced|quiet]  how hard to look for new people
+/whoami                    your name, id, radio and scan mode
 /connect <addr>            dial a device by Bluetooth address
 /status                    links, routes, queues
 /emoji <prefix>            search emoji shortcodes
@@ -308,11 +310,12 @@ class ChatUI:
                 ((p.node_id, p) for p in mesh.active_peers()),
                 key=lambda kv: kv[1].display,
             ):
-                h = mesh.hops(nid)
-                if cmd == "peers" and h is None:
+                pres = self.node.presence(nid)
+                if cmd == "peers" and pres["state"] not in ("direct", "relay"):
                     continue
-                where = "direct" if h == 1 else (f"{h} hops" if h else "offline")
-                self.out(f"  {p.display:20} {where:10} {nid}")
+                n = mesh.pending_count(nid)
+                held = f" · {n} held for them" if n else ""
+                self.out(f"  {p.display:20} {pres['text']}{held}   {nid}")
         elif cmd == "history":
             if self._need_conv():
                 n = int(args[0]) if args and args[0].isdigit() else 30
@@ -349,8 +352,31 @@ class ChatUI:
                     mesh.download(bytes.fromhex(m.meta["f"]))
         elif cmd == "scan":
             self.out("  scanning…")
-            for addr, name, ok in self.node.scan_now(6):
-                self.out(f"  {'★' if ok else ' '} {addr}  {name}")
+            for r in sorted(
+                self.node.scan_now(6), key=lambda r: (not r.muninn, not r.probeable)
+            ):
+                tag = "★ muninn" if r.muninn else ("? maybe " if r.probeable else "  ")
+                self.out(f"  {tag:9} {r.addr}  {r.name}  ({r.kind})")
+        elif cmd == "scanmode":
+            from muninn import scanpolicy
+
+            if args:
+                try:
+                    pol = self.node.set_scan_mode(args[0].lower())
+                    self.out(f"  scan mode {pol.label}: {pol.description}")
+                except ValueError as e:
+                    self.out(f"! {e}")
+            else:
+                for p in scanpolicy.POLICIES.values():
+                    mark = "*" if p is self.node.policy else " "
+                    self.out(f"  {mark} {p.name:9} {p.description}")
+        elif cmd == "whoami":
+            st = self.node.status()
+            self.out(f"  {mesh.name or '(no name: /nick <name>)'}  id {mesh.node_id}")
+            self.out(
+                f"  radio {self.node.transport.local_addr()} · {len(mesh.connected())} connected"
+                f" · {st['sighted']} devices seen · scan mode {self.node.policy.name}"
+            )
         elif cmd == "connect" and args:
             threading.Thread(target=self._connect, args=(args[0],), daemon=True).start()
         elif cmd == "status":

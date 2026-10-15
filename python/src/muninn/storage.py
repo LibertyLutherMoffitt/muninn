@@ -20,7 +20,7 @@ from pathlib import Path
 
 from muninn.protocol import random_node_id
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def data_dir() -> Path:
@@ -186,6 +186,11 @@ class Storage:
                 self._conn.executescript(
                     "ALTER TABLE peers ADD COLUMN replaced_by TEXT; PRAGMA user_version = 3;"
                 )
+            if cur < 4:
+                self._conn.executescript(
+                    "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);"
+                    "PRAGMA user_version = 4;"
+                )
 
     # --- identity -----------------------------------------------------------
 
@@ -213,6 +218,19 @@ class Storage:
         self._x(
             "UPDATE identity SET display_name = ?, name_ts = ? WHERE id = 0",
             (name, name_ts),
+        )
+
+    # --- settings -------------------------------------------------------------
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        rows = self._q("SELECT value FROM settings WHERE key = ?", (key,))
+        return rows[0][0] if rows else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._x(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
         )
 
     # --- peers ----------------------------------------------------------------

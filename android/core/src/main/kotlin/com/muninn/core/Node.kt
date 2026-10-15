@@ -4,7 +4,11 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class ScanResult(val addr: String, val name: String, val muninn: Boolean, val rssi: Int? = null)
+/** muninn: true = advertises Muninn, false = other services only, null = unknown. */
+data class ScanResult(val addr: String, val name: String, val muninn: Boolean?, val rssi: Int? = null, val kind: String = "other") {
+    /** Worth one polite look: an unknown phone or computer. Never headsets etc. */
+    val probeable get() = muninn == null && (kind == "phone" || kind == "computer")
+}
 
 /** Something that can listen, dial and discover (Bluetooth RFCOMM, sim hub, ...). */
 interface Transport {
@@ -13,6 +17,8 @@ interface Transport {
     fun start(onIncoming: (Conn, String) -> Unit)
     fun stop()
     fun connect(addr: String): Conn
+    /** Connect to an *unconfirmed* device without pairing or prompting anyone. */
+    fun probe(addr: String): Conn = connect(addr)
     /** Muninn-capable devices already known to be nearby, without a new inquiry. */
     fun discover(): List<Pair<String, String>> = emptyList()
     /** Active inquiry (costly: only when useful). */
@@ -22,28 +28,33 @@ interface Transport {
 
 /**
  * One device: identity + storage + mesh + transport + dialer. Mirrors
- * python/src/muninn/node.py.
- *
- * Dialing policy (good Bluetooth citizen): only addresses we have talked to
- * before or that SDP/sim confirmed speak Muninn are ever dialed; everything
- * else is left alone.
+ * python/src/muninn/node.py, including the good-citizen dialling rules:
+ * known peers always; Muninn-confirmed devices; within the scan policy's
+ * budget one quiet, pairing-free probe of an *unknown phone or computer*.
+ * Headsets, watches and peripherals are never contacted.
  */
 class Node(
     val transport: Transport,
     val storage: Storage,
     name: String? = null,
     val log: (String) -> Unit = {},
-    /** Background inquiry. Off = only manual scans + known peers + inbound. */
-    var autoScan: Boolean = true,
 ) {
     val identity: Identity
     val mesh: Mesh
+    @Volatile var policy: ScanPolicy = ScanPolicy.get(storage.getSetting(ScanPolicy.SETTING_KEY))
+        private set
     private val stopped = AtomicBoolean(false)
+    private val scanNow = java.util.concurrent.Semaphore(0)
     private val backoff = ConcurrentHashMap<String, Pair<Double, Double>>() // addr -> (nextOk, delay)
     private val deferred = ConcurrentHashMap<String, Double>()
-    private val discovered = ConcurrentHashMap<String, Long>()
+    private val confirmed = ConcurrentHashMap<String, Long>()
+    private val probeQueue = java.util.Collections.synchronizedList(ArrayList<String>())
+    private val refused = ConcurrentHashMap<String, Long>() // addr -> until (ms)
+    val sightings = ConcurrentHashMap<String, ScanResult>()
+    private val sightedAt = ConcurrentHashMap<String, Long>()
     private val dialing = ConcurrentHashMap.newKeySet<String>()
     @Volatile var scanResults: List<ScanResult> = emptyList()
+    @Volatile var lastInquiry = 0.0
 
     init {
         var ident = storage.getIdentity() ?: storage.createIdentity(Nacl.newSecretKey(), name ?: "")
@@ -70,9 +81,35 @@ class Node(
 
     fun stop() {
         stopped.set(true)
+        scanNow.release()
         runCatching { transport.stop() }
         mesh.stop()
     }
+
+    fun setScanMode(name: String): ScanPolicy {
+        val p = ScanPolicy.ALL[name] ?: throw IllegalArgumentException("scan mode must be one of ${ScanPolicy.ALL.keys}")
+        policy = p
+        storage.setSetting(ScanPolicy.SETTING_KEY, name)
+        scanNow.release()
+        return p
+    }
+
+    // ---- presence ----------------------------------------------------------
+
+    data class Presence(val state: String, val text: String, val hops: Int)
+
+    fun presence(node: String): Presence {
+        val h = mesh.hops(node)
+        if (h == 1) return Presence("direct", "nearby · connected", 1)
+        if (h != null) return Presence("relay", "in range via ${mesh.displayName(mesh.nextHop(node) ?: "")} · $h hops", h)
+        val addrs = storage.loadTransports().filter { it.first == node }.map { it.second }
+        val seen = addrs.maxOfOrNull { sightedAt[it] ?: 0 } ?: 0
+        if (System.currentTimeMillis() - seen < 120_000) return Presence("nearby", "nearby, not connecting yet", 0)
+        val last = synchronized(mesh.lock) { mesh.peers[node]?.lastSeen } ?: 0
+        return Presence("offline", if (last > 0) "last seen ${ago(last)}" else "not seen yet", 0)
+    }
+
+    // ---- dialing -------------------------------------------------------------
 
     private fun relaxBackoff() {
         val linked = mesh.linkInfo().map { it["addr"] as String }.toSet()
@@ -80,28 +117,31 @@ class Node(
         for ((addr, v) in backoff) if (addr !in linked && v.second > 8) backoff[addr] = minOf(v.first, now + 3) to v.second / 2
     }
 
-    fun poke(addr: String? = null) { if (addr == null) backoff.clear() else backoff.remove(addr.uppercase()) }
+    fun poke(addr: String? = null) {
+        if (addr == null) { backoff.clear(); scanNow.release() } else backoff.remove(addr.uppercase())
+    }
 
-    private fun candidates(): List<String> {
+    private fun candidates(): List<Pair<String, Boolean>> {
         val linkedNodes = mesh.connected().toSet()
-        val out = LinkedHashSet<String>()
+        val out = LinkedHashMap<String, Boolean>()
+        for ((node, addr, _) in storage.loadTransports()) if (node !in linkedNodes) out.putIfAbsent(addr, false)
         val now = System.currentTimeMillis()
-        discovered.entries.sortedByDescending { it.value }.forEach { if (now - it.value < 180_000) out.add(it.key) }
-        for ((node, addr, _) in storage.loadTransports()) if (node !in linkedNodes) out.add(addr)
+        confirmed.entries.sortedByDescending { it.value }.forEach { if (now - it.value < 180_000) out.putIfAbsent(it.key, false) }
+        synchronized(probeQueue) { probeQueue.toList() }.forEach { out.putIfAbsent(it, true) }
         val own = runCatching { transport.localAddr().uppercase() }.getOrNull()
-        return out.filter { it != own }
+        return out.filter { it.key != own }.map { it.key to it.value }
     }
 
     private fun dialLoop() {
         while (!stopped.get()) {
             Thread.sleep(500)
-            try { candidates().forEach { maybeDial(it) } } catch (e: Throwable) { log("dial loop: $e") }
+            try { candidates().forEach { (a, p) -> maybeDial(a, p) } } catch (e: Throwable) { log("dial loop: $e") }
         }
     }
 
-    private fun maybeDial(addr: String) {
+    private fun maybeDial(addr: String, probe: Boolean) {
         val now = mono()
-        if (mesh.hasTransport(addr)) { backoff.remove(addr); return }
+        if (mesh.hasTransport(addr)) { backoff.remove(addr); probeQueue.remove(addr); return }
         if (now < (backoff[addr]?.first ?: 0.0)) return
         if (transport.shouldDefer(addr)) {
             val first = deferred.getOrPut(addr) { now }
@@ -111,50 +151,97 @@ class Node(
             if (addr in dialing || dialing.size >= transport.maxParallelDials) return
             dialing.add(addr)
         }
-        Thread({ dial(addr) }, "dial").apply { isDaemon = true; start() }
+        if (probe) probeQueue.remove(addr)
+        Thread({ dial(addr, probe) }, "dial").apply { isDaemon = true; start() }
     }
 
-    private fun dial(addr: String) {
+    private fun dial(addr: String, probe: Boolean) {
         val conn = try {
-            transport.connect(addr)
+            if (probe) transport.probe(addr) else transport.connect(addr)
         } catch (e: Throwable) {
-            val d = minOf(maxOf((backoff[addr]?.second ?: 1.0) * 2, 2.0), 45.0)
-            backoff[addr] = (mono() + d * (0.8 + Math.random() * 0.4)) to d
+            if (probe) refused[addr] = System.currentTimeMillis() + (policy.probeBackoff * 1000).toLong()
+            else {
+                val d = minOf(maxOf((backoff[addr]?.second ?: 1.0) * 2, 2.0), policy.peerBackoffMax)
+                backoff[addr] = (mono() + d * (0.8 + Math.random() * 0.4)) to d
+            }
             return
         } finally {
             dialing.remove(addr)
         }
         deferred.remove(addr)
-        if (mesh.addLink(conn, addr, true) == null) backoff[addr] = (mono() + 2) to 2.0 else backoff.remove(addr)
+        if (mesh.addLink(conn, addr, true) == null) {
+            if (probe) refused[addr] = System.currentTimeMillis() + (policy.probeBackoff * 1000).toLong()
+            backoff[addr] = (mono() + 2) to 2.0
+        } else backoff.remove(addr)
     }
+
+    // ---- discovery -------------------------------------------------------------
 
     private fun scanLoop() {
         var first = true
         while (!stopped.get()) {
             try {
                 transport.discover().forEach { markSeen(it.first) }
-                if (autoScan && (first || mesh.connected().isEmpty())) {
-                    scanResults = transport.scan(5000).also { r -> r.filter { it.muninn }.forEach { markSeen(it.addr) } }
-                }
+                val p = policy
+                val interval = if (mesh.connected().isEmpty()) p.inquiryAlone else p.inquiryLinked
+                val due = interval > 0 && mono() - lastInquiry >= interval
+                val forced = scanNow.tryAcquire()
+                if ((first && p.inquiryAlone > 0) || due || forced) ingest(transport.scan(5000))
             } catch (e: Throwable) { log("scan: $e") }
             first = false
-            val interval = if (mesh.connected().isEmpty()) 20_000L else 120_000L
-            Thread.sleep((interval * (0.8 + Math.random() * 0.4)).toLong())
+            scanNow.tryAcquire((2000 * (0.8 + Math.random() * 0.4)).toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+                .let { if (it) scanNow.release() }
+        }
+    }
+
+    private fun ingest(results: List<ScanResult>) {
+        lastInquiry = mono()
+        scanResults = results
+        val now = System.currentTimeMillis()
+        var budget = policy.probeBudget
+        val known = storage.loadTransports().map { it.second }.toSet()
+        for (r in results.sortedByDescending { it.rssi ?: -100 }) {
+            val addr = r.addr.uppercase()
+            sightings[addr] = r
+            sightedAt[addr] = now
+            if (r.muninn == true) markSeen(addr)
+            else if (r.probeable && budget > 0 && addr !in known && (refused[addr] ?: 0) < now &&
+                addr !in probeQueue && !mesh.hasTransport(addr)) {
+                probeQueue.add(addr); budget--
+            }
         }
     }
 
     fun markSeen(addr: String) {
         val a = addr.uppercase()
-        val fresh = System.currentTimeMillis() - (discovered[a] ?: 0) > 60_000
-        discovered[a] = System.currentTimeMillis()
+        val fresh = System.currentTimeMillis() - (confirmed[a] ?: 0) > 60_000
+        confirmed[a] = System.currentTimeMillis()
+        sightedAt[a] = System.currentTimeMillis()
         if (fresh) backoff.remove(a)
     }
 
-    fun scanNow(durationMs: Long = 6000): List<ScanResult> =
-        transport.scan(durationMs).also { r -> scanResults = r; r.filter { it.muninn }.forEach { markSeen(it.addr) } }
+    fun scanNow(durationMs: Long = 6000): List<ScanResult> = transport.scan(durationMs).also { ingest(it) }
 
-    fun connectTo(addr: String): String? {
+    fun connectTo(addr: String, probe: Boolean = false): String? {
         backoff.remove(addr.uppercase())
-        return mesh.addLink(transport.connect(addr), addr, true)
+        return mesh.addLink(if (probe) transport.probe(addr) else transport.connect(addr), addr, true)
+    }
+
+    fun status(): Map<String, Any?> = mapOf(
+        "scan_mode" to policy.name,
+        "sighted" to sightedAt.values.count { System.currentTimeMillis() - it < 120_000 },
+        "probe_queue" to probeQueue.size,
+    )
+
+    companion object {
+        fun ago(ts: Long): String {
+            val d = P.now() - ts
+            return when {
+                d < 90 -> "just now"
+                d < 3600 -> "${d / 60} min ago"
+                d < 86400 -> "${d / 3600} h ago"
+                else -> "${d / 86400} d ago"
+            }
+        }
     }
 }

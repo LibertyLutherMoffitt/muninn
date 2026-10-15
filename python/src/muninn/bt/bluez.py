@@ -62,7 +62,13 @@ class _Agent(dbus.service.Object):
 
     @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
     def AuthorizeService(self, device, uuid):
-        pass
+        # Good citizen: being paired with us for Muninn must not open up any
+        # other profile (audio, network, file transfer...) on this machine.
+        if str(uuid).lower() != SERVICE_UUID.lower():
+            raise dbus.DBusException(
+                "Muninn only authorizes its own service",
+                name="org.bluez.Error.Rejected",
+            )
 
     @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
     def Cancel(self):
@@ -205,6 +211,55 @@ def discover() -> list[tuple[str, str]]:
             name = str(device.get("Name", addr))
             results.append((addr, name))
     return results
+
+
+_MAJOR_CLASS = {1: "computer", 2: "phone", 4: "audio", 5: "peripheral", 7: "wearable"}
+
+
+def device_kind(cls: int) -> str:
+    """Bluetooth Class of Device → coarse kind (major device class)."""
+    return _MAJOR_CLASS.get((int(cls) >> 8) & 0x1F, "other") if cls else "other"
+
+
+def inquiry(duration: float = 5.0) -> list[dict]:
+    """Run an inquiry, then report every device BlueZ knows about:
+    {addr, name, muninn (True/False/None = unknown), kind, rssi}."""
+    try:
+        bus = dbus.SystemBus()
+        adapter = dbus.Interface(
+            bus.get_object("org.bluez", "/org/bluez/hci0"), "org.bluez.Adapter1"
+        )
+        try:
+            adapter.StartDiscovery()
+        except dbus.DBusException:
+            pass  # already discovering
+        time.sleep(duration)
+        try:
+            adapter.StopDiscovery()
+        except dbus.DBusException:
+            pass
+        objects = dbus.Interface(
+            bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager"
+        ).GetManagedObjects()
+    except dbus.DBusException:
+        return []
+    out = []
+    for _path, ifaces in objects.items():
+        d = ifaces.get("org.bluez.Device1")
+        if not d or not d.get("Address"):
+            continue
+        uuids = [str(u).lower() for u in d.get("UUIDs", [])]
+        muninn = True if SERVICE_UUID.lower() in uuids else (False if uuids else None)
+        out.append(
+            {
+                "addr": str(d["Address"]).upper(),
+                "name": str(d.get("Name", d.get("Alias", ""))),
+                "muninn": muninn,
+                "kind": device_kind(int(d.get("Class", 0))),
+                "rssi": int(d["RSSI"]) if "RSSI" in d else None,
+            }
+        )
+    return out
 
 
 def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str, str]]:
