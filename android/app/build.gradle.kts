@@ -12,19 +12,18 @@ android {
         applicationId = "com.muninn"
         minSdk = 31
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
-        ndk {
-            // Modern Android only. Drops obsolete mips/armeabi/x86 .so blobs
-            // shipped by lazysodium + JNA, ~halves the APK.
-            abiFilters += listOf("arm64-v8a", "x86_64", "armeabi-v7a")
-        }
     }
 
     buildFeatures {
         compose = true
     }
+
+    // Games, stickers and emoji data are shared with the desktop client and
+    // live in the Python package; pack them as assets.
+    sourceSets["main"].assets.srcDirs("src/main/assets", layout.buildDirectory.dir("generated/muninnAssets"))
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -60,7 +59,13 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // libsodium — wire-compatible with PyNaCl Box on the desktop client.
-    implementation("com.goterl:lazysodium-android:5.1.0@aar")
-    implementation("net.java.dev.jna:jna:5.13.0@aar")
+    implementation(project(":core"))
 }
+
+val muninnAssets by tasks.registering(Copy::class) {
+    val shared = rootDir.resolve("../python/src/muninn")
+    from(shared.resolve("games")) { include("*.js"); into("games") }
+    from(shared.resolve("assets")) { include("emoji.json", "stickers/*.gif") }
+    into(layout.buildDirectory.dir("generated/muninnAssets"))
+}
+tasks.named("preBuild") { dependsOn(muninnAssets) }

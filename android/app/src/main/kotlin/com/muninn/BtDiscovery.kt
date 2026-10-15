@@ -148,20 +148,8 @@ class BtDiscovery(private val context: Context) {
         _scanning.value = false
     }
 
-    /**
-     * Record the peer as known (so the connect loop dials it) and kick off
-     * bonding. Bonding is best-effort UX — insecure RFCOMM works without it —
-     * so we register the peer regardless of how/whether the bond completes.
-     */
-    fun bond(address: String) {
-        KnownPeers.add(context, address)
-        val device = adapter?.getRemoteDevice(address) ?: return
-        if (device.bondState == BluetoothDevice.BOND_BONDED) return
-        adapter?.cancelDiscovery() // bonding is unreliable during inquiry
-        updateBond(address, BluetoothDevice.BOND_BONDING)
-        runCatching { device.createBond() }
-            .onFailure { Log.w(TAG, "createBond($address) failed: ${it.message}") }
-    }
+    /** Remember that we're dialing this device (UI spinner). */
+    fun markConnecting(address: String, on: Boolean) = updateBond(address, if (on) BluetoothDevice.BOND_BONDING else BluetoothDevice.BOND_NONE)
 
     // --- internal state mutation ---
 

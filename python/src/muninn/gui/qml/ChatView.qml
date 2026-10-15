@@ -377,6 +377,8 @@ Item {
                                        onTriggered: bridge.openFile(model.msgId) }
                             MenuItem { text: "Show in folder"; visible: model.fileState === "complete"
                                        height: visible ? implicitHeight : 0; onTriggered: bridge.openFolder(model.msgId) }
+                            MenuItem { text: "Save to my stickers"; visible: model.fileState === "complete" && model.isImage
+                                       height: visible ? implicitHeight : 0; onTriggered: bridge.saveSticker(model.msgId) }
                             MenuItem { text: "Install game"; visible: model.fileState === "complete" && model.fileName.endsWith(".js")
                                        height: visible ? implicitHeight : 0; onTriggered: bridge.installGame(model.msgId) }
                         }

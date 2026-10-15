@@ -69,7 +69,7 @@ class SimTransport(
 
     override fun start(onIncoming: (Conn, String) -> Unit) {
         this.onIncoming = onIncoming
-        if (ctrl == null) register()
+        if (ctrl == null) runCatching { register() } // ctrlLoop keeps retrying
         Thread({ ctrlLoop() }, "sim-ctrl").apply { isDaemon = true; start() }
     }
 

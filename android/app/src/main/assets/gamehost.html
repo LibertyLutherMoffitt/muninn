@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1115; color: #e5e7eb;
+               font-family: sans-serif; overflow: hidden; touch-action: none; }
+  canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  #err { position: absolute; top: 8px; left: 8px; right: 8px; color: #ef4444; font-size: 14px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="err"></div>
+<script>
+// Muninn game host (Android). Mirrors python/src/muninn/gui/qml/GameView.qml:
+// state = setup(players, seed) folded over moves (ignoring out-of-turn /
+// illegal ones) so every device computes the same game.
+(function () {
+  var canvas = document.getElementById("c");
+  var err = document.getElementById("err");
+  var game = null, info = {}, state = null, ui = {}, W = 0, H = 0, OX = 0, OY = 0, last = 0;
+
+  function turnOf(s) { try { return game.turn ? game.turn(s) : null; } catch (e) { return null; } }
+  function myTurn() {
+    if (!info.started || info.ended || !state) return false;
+    var t = turnOf(state);
+    return t === null || t === undefined || t === info.me;
+  }
+  function view() {
+    return { w: W, h: H, me: info.me, players: info.players || [], names: info.names || {}, ui: ui, myTurn: myTurn() };
+  }
+  var forcedW = 0, forcedH = 0;  // set by the host app (WebView viewport can lie)
+  function layout() {
+    var aspect = (game && game.aspect) || 1;
+    var r = canvas.getBoundingClientRect();
+    var w = forcedW || r.width, h = forcedH || r.height;
+    if (forcedW) { canvas.style.width = w + "px"; canvas.style.height = h + "px"; }
+    W = Math.min(w, h * aspect); H = W / aspect;
+    OX = (w - W) / 2; OY = (h - H) / 2;
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    paint();
+  }
+  function paint() {
+    var ctx = canvas.getContext("2d");
+    var dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.translate(OX, OY);
+    ctx.fillStyle = "#151820"; ctx.fillRect(0, 0, W, H);
+    if (!game || !state) return;
+    try { game.render(ctx, state, view()); } catch (e) { err.textContent = "render error: " + e; }
+  }
+  function status() {
+    var st = { over: false, text: "" };
+    try { if (game && game.status && state) st = game.status(state, info.names || {}); } catch (e) {}
+    return st;
+  }
+  function report() {
+    var st = status();
+    Android.status(JSON.stringify({ over: !!st.over, text: st.text || "", myTurn: myTurn(),
+                                    realtime: !!(game && game.tick) }));
+  }
+  function replay() {
+    if (!game || !info.session) return;
+    try {
+      var s = game.setup(info.players, info.seed);
+      var moves = info.moves || [];
+      for (var i = 0; i < moves.length; i++) {
+        var t = turnOf(s);
+        if (t !== null && t !== undefined && t !== moves[i].sender) continue;
+        try { s = game.move(s, moves[i].sender, moves[i].m); } catch (e) {}
+      }
+      state = s;
+    } catch (e) { err.textContent = "game error: " + e; }
+  }
+  function input(ev) {
+    if (!game || !game.input || !state) return;
+    var r = null;
+    try { r = game.input(state, view(), ev); } catch (e) { return; }
+    if (!r) return;
+    if (r.ui) { for (var k in r.ui) ui[k] = r.ui[k]; paint(); }
+    if (r.move !== undefined && r.move !== null) {
+      if (!myTurn()) { Android.toast("not your turn"); return; }
+      try { game.move(state, info.me, r.move); } catch (e) { Android.toast("illegal move: " + e); return; }
+      ui = {};
+      Android.move(JSON.stringify(r.move));
+    }
+    if (r.rt !== undefined) Android.rt(JSON.stringify(r.rt));
+  }
+
+  window.muninn = {
+    load: function () {
+      try { game = (new Function(Android.code() + "\n;return game;"))(); }
+      catch (e) { err.textContent = "Could not load game: " + e; }
+      layout();
+    },
+    update: function (json) {
+      info = JSON.parse(json);
+      replay(); paint(); report();
+    },
+    rt: function (sender, json) {
+      if (!game || !game.onRt) return;
+      try { state = game.onRt(state, sender, JSON.parse(json)); paint(); } catch (e) {}
+    },
+    key: function (k, down) { input({ type: "key", key: k, down: down }); },
+    size: function (w, h) { forcedW = w; forcedH = h; layout(); }
+  };
+
+  canvas.addEventListener("pointerdown", function (e) {
+    var r = canvas.getBoundingClientRect();
+    var x = e.clientX - r.left - OX, y = e.clientY - r.top - OY;
+    if (x < 0 || y < 0 || x > W || y > H) return;
+    input({ type: "click", x: x, y: y });
+  });
+  window.addEventListener("resize", layout);
+  // WebView may report a 0-height viewport at load; catch the real size.
+  var lastRect = "";
+  function checkSize() {
+    var r = canvas.getBoundingClientRect();
+    var k = r.width + "x" + r.height;
+    if (k !== lastRect) { lastRect = k; layout(); }
+  }
+  if (window.ResizeObserver) new ResizeObserver(checkSize).observe(canvas);
+  setInterval(checkSize, 400);
+
+  var lastW = 0, lastH = 0;
+  function frame(ts) {
+    if (window.innerWidth !== lastW || window.innerHeight !== lastH) {
+      lastW = window.innerWidth; lastH = window.innerHeight; layout();
+    }
+    if (game && game.tick && info.started && !info.ended && state) {
+      var dt = last ? (ts - last) / 1000 : 0.033;
+      try {
+        var r = game.tick(state, dt, view());
+        if (r) { state = r.state; if (r.rt !== undefined) Android.rt(JSON.stringify(r.rt)); }
+      } catch (e) {}
+      paint();
+    }
+    last = ts;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  window.muninn.load();
+})();
+</script>
+</body>
+</html>

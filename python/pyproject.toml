@@ -41,5 +41,5 @@ muninn-bot = "muninn.bot:main"
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-"muninn" = ["games/*.js", "games/*.md"]
+"muninn" = ["games/*.js", "games/*.md", "assets/*.json", "assets/stickers/*.gif"]
 "muninn.gui" = ["qml/*.qml"]

@@ -2,8 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- neverForLocation: we discover Muninn peers, never derive location, so we
-         can run classic discovery without the ACCESS_FINE_LOCATION prompt. -->
+    <!-- neverForLocation: we discover Muninn peers, never derive location. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
@@ -11,17 +10,24 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Only used by the developer simulator mode (Settings → Developer). -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
 
     <application
         android:label="Muninn"
         android:theme="@style/Theme.Muninn"
+        android:usesCleartextTraffic="true"
         android:allowBackup="false">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.Muninn"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -34,5 +40,22 @@
             android:name=".MuninnService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <receiver android:name=".ReplyReceiver" android:exported="false" />
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.muninn.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

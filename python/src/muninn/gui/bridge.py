@@ -492,6 +492,49 @@ class ChatBridge(QObject):
             for cat, items in emoji.CATEGORIES.items()
         ]
 
+    def _sticker_dirs(self) -> list[tuple[str, str]]:
+        from pathlib import Path
+
+        user = Path(self.node.storage.path).parent / "stickers"
+        user.mkdir(parents=True, exist_ok=True)
+        bundled = Path(emoji.__file__).parent / "assets" / "stickers"
+        return [("saved", str(user)), ("pack", str(bundled))]
+
+    @Slot(result=list)
+    def stickers(self) -> list:
+        out = []
+        for kind, d in self._sticker_dirs():
+            for p in sorted(os.listdir(d)):
+                if p.lower().endswith((".gif", ".png", ".webp", ".jpg")):
+                    full = os.path.join(d, p)
+                    out.append(
+                        {
+                            "name": os.path.splitext(p)[0],
+                            "kind": kind,
+                            "url": QUrl.fromLocalFile(full).toString(),
+                            "path": full,
+                        }
+                    )
+        return out
+
+    @Slot(str)
+    def sendSticker(self, path: str) -> None:
+        if not self._active:
+            return self.errorOccurred.emit("Open a conversation first")
+        self._send_path(path)
+
+    @Slot(str)
+    def saveSticker(self, msg_id: str) -> None:
+        r = self._msgs.get(msg_id or self._target())
+        if not r or r["fileState"] != "complete" or not r["isImage"]:
+            return self.errorOccurred.emit("Only downloaded pictures/GIFs can be saved")
+        import shutil
+
+        src = QUrl(r["fileUrl"]).toLocalFile()
+        dst = os.path.join(self._sticker_dirs()[0][1], os.path.basename(src))
+        shutil.copyfile(src, dst)
+        self.notify.emit("saved to your stickers")
+
     @Slot(result=list)
     def quickReactions(self) -> list:
         return list(emoji.QUICK_REACTIONS)
@@ -564,16 +607,31 @@ class ChatBridge(QObject):
         self.gameOpenRequested.emit(sid)
         return sid
 
+    @staticmethod
+    def _plain(v):
+        """QML hands JS objects over as QJSValue; turn them into JSON-able data."""
+        from PySide6.QtQml import QJSValue
+
+        if isinstance(v, QJSValue):
+            v = v.toVariant()
+        if isinstance(v, dict):
+            return {str(k): ChatBridge._plain(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [ChatBridge._plain(x) for x in v]
+        if isinstance(v, float) and v.is_integer():
+            return int(v)
+        return v
+
     @Slot(str, str, QVariant)
     def gameAction(self, session: str, type_: str, body) -> None:
         try:
-            self.games.act(session, type_, body)
+            self.games.act(session, type_, self._plain(body))
         except ValueError as e:
             self.errorOccurred.emit(str(e))
 
     @Slot(str, QVariant)
     def gameRtSend(self, session: str, body) -> None:
-        self.games.rt(session, body)
+        self.games.rt(session, self._plain(body))
 
     @Slot(str)
     def installGame(self, msg_id: str) -> None:
