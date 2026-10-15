@@ -154,14 +154,14 @@ Android side, will lose or stall messages silently.
 - [x] Explicit flapping-link tests (weak links several rows apart, on/off).
 
 ### 2.6b Worth porting from origin/master (parallel v1 line, pending user decision)
-- [ ] Key change / reinstall: reseal queued messages to a peer's new key
+- [x] Key change / reinstall: reseal queued messages to a peer's new key
   (v2 currently pins the first key and refuses a changed one forever).
-- [ ] Richer presence: "nearby but won't connect", "last seen 3h ago", sightings.
-- [ ] Unattended first contact on Linux when BlueZ's cache lacks the UUID
+- [x] Richer presence: "nearby but won't connect", "last seen 3h ago", sightings.
+- [x] Unattended first contact on Linux when BlueZ's cache lacks the UUID
   (theirs probes every visible device; v2 must do it without bothering
   strangers' devices — e.g. SDP-only probe of phone/computer class devices).
-- [ ] Android background discovery + discoverability prompt flow.
-- [ ] User-set scan mode (aggressive / balanced / conservative) on all clients.
+- [x] Android background discovery + discoverability prompt flow.
+- [x] User-set scan mode (aggressive / balanced / conservative) on all clients.
 - [ ] Shared wire-vector conformance file checked by both languages, byte-offset
   protocol tests, storage/dialer unit tests.
 - [ ] Android screenshot tests without an emulator (Paparazzi).
@@ -205,6 +205,11 @@ Android side, will lose or stall messages silently.
   Python↔Kotlin interop tests (DM, relays both ways, mixed group, files, flaps).
 - **36ea102** Android app rewritten on the core; verified in emulator against the
   sim hub (chat w/ bots + Qt GUI, cross-platform tic-tac-toe).
+- **d736061** reinstalled peers keep their conversation; UTF-8-safe names.
+- **4512eb0** v2 became master (v1 line merged with `-s ours`, history kept).
+- **4f0891a** (mislabelled "style: formatter pass") polite discovery of hidden
+  peers, scan modes, presence, BlueZ agent hardening, Android background
+  inquiry. 34 Python tests + Kotlin tests green.
 - Next: more games (chess, checkers, connect4, reversi, real-time demo),
   BT good-citizen audit (bluez agent), Python scan policy, Windows check,
   Android notification/background testing, netsim real-BT test of new app,
