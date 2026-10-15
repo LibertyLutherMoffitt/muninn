@@ -153,6 +153,24 @@ Android side, will lose or stall messages silently.
 - [x] Game API generic (any turn-based game; real-time when latency allows).
 - [x] Explicit flapping-link tests (weak links several rows apart, on/off).
 
+### 2.6b Worth porting from origin/master (parallel v1 line, pending user decision)
+- [ ] Key change / reinstall: reseal queued messages to a peer's new key
+  (v2 currently pins the first key and refuses a changed one forever).
+- [ ] Richer presence: "nearby but won't connect", "last seen 3h ago", sightings.
+- [ ] Unattended first contact on Linux when BlueZ's cache lacks the UUID
+  (theirs probes every visible device; v2 must do it without bothering
+  strangers' devices — e.g. SDP-only probe of phone/computer class devices).
+- [ ] Android background discovery + discoverability prompt flow.
+- [ ] User-set scan mode (aggressive / balanced / conservative) on all clients.
+- [ ] Shared wire-vector conformance file checked by both languages, byte-offset
+  protocol tests, storage/dialer unit tests.
+- [ ] Android screenshot tests without an emulator (Paparazzi).
+- [ ] GUI design tokens + shared PresenceDot/EmptyState, message runs.
+- [ ] CLI `/whoami`, presence in `/peers`, "held for …" for queued sends.
+- [ ] Docs: TESTING.md, REVIEW.md (Linux vs Windows behaviour), PROTOCOL
+  validation rules (UTF-8-safe name truncation — v2 has the same bug).
+- [ ] Notifications VISIBILITY_PRIVATE on the lock screen.
+
 ### 2.7 Backlog (only after everything else is done & polished)
 - [ ] **Linked devices ("same person")** — phone + laptop act as one contact.
   Sketch:
