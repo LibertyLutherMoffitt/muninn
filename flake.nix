@@ -33,6 +33,41 @@
         androidSdk = androidComposition.androidsdk;
         androidSdkRoot = "${androidSdk}/libexec/android-sdk";
 
+        # Separate SDK with emulator + system image so the default shell
+        # doesn't pull ~2 GB of images. Used by `nix run .#android-emu`.
+        androidEmuSdk =
+          (pkgs.androidenv.composeAndroidPackages {
+            platformVersions = ["34"];
+            abiVersions = ["x86_64"];
+            includeEmulator = true;
+            includeSystemImages = true;
+            systemImageTypes = ["google_apis"];
+            includeNDK = false;
+            includeSources = false;
+          }).androidsdk;
+
+        # Headless KVM emulator. AVD lives in $XDG_DATA_HOME/muninn-avd so it
+        # survives restarts. Drive it with adb (screencap / input).
+        android-emu = pkgs.writeShellApplication {
+          name = "android-emu";
+          runtimeInputs = [androidEmuSdk];
+          text = ''
+            export ANDROID_SDK_ROOT="${androidEmuSdk}/libexec/android-sdk"
+            export ANDROID_HOME="$ANDROID_SDK_ROOT"
+            export ANDROID_USER_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}/muninn-avd"
+            export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+            mkdir -p "$ANDROID_AVD_HOME"
+            name=muninn
+            if [ ! -d "$ANDROID_AVD_HOME/$name.avd" ]; then
+              echo no | avdmanager create avd -n "$name" -d pixel_6 \
+                -k "system-images;android-34;google_apis;x86_64" --force
+              printf 'hw.keyboard=yes\nhw.ramSize=4096\n' >> "$ANDROID_AVD_HOME/$name.avd/config.ini"
+            fi
+            exec emulator -avd "$name" -no-window -no-audio -no-boot-anim \
+              -gpu swiftshader_indirect -no-snapshot-save "$@"
+          '';
+        };
+
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn";
           version = "0.1.11";
@@ -95,11 +130,35 @@
             mainProgram = "muninn-gui";
           };
         };
+
+        # Muninn GUI on a private Xvfb display for headless testing over ssh.
+        # Drive with `DISPLAY=:98 xdotool ...`, screenshot with
+        # `DISPLAY=:98 import -window root out.png`. Software Qt Quick backend
+        # because Xvfb has no usable GLX. Uses a throwaway data dir so the real
+        # identity DB isn't touched (override with MUNINN_TEST_DATA).
+        gui-headless = pkgs.writeShellApplication {
+          name = "gui-headless";
+          runtimeInputs = [pkgs.xvfb muninn-gui];
+          text = ''
+            display="''${MUNINN_DISPLAY:-:98}"
+            data="''${MUNINN_TEST_DATA:-$(mktemp -d)}"
+            Xvfb "$display" -screen 0 1280x800x24 >/dev/null 2>&1 &
+            xvfb=$!
+            trap 'kill $xvfb 2>/dev/null' EXIT
+            sleep 1
+            echo "DISPLAY=$display data=$data" >&2
+            DISPLAY="$display" QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software \
+              XDG_DATA_HOME="$data" MUNINN_NAME="''${MUNINN_NAME:-headless}" \
+              muninn-gui "$@"
+          '';
+        };
       in {
         packages = {
           default = muninn-linux;
           muninn-linux = muninn-linux;
           muninn-gui = muninn-gui;
+          android-emu = android-emu;
+          gui-headless = gui-headless;
           cli = muninn-linux;
           gui = muninn-gui;
         };
@@ -112,6 +171,12 @@
             pkgs.qt6.qtbase
             pkgs.qt6.qtdeclarative
             pkgs.qt6.qtwayland
+
+            # Headless GUI testing (xvfb-run + xdotool + screenshots)
+            pkgs.xvfb
+            pkgs.xvfb-run
+            pkgs.xdotool
+            pkgs.imagemagick
 
             # Tooling
             pkgs.ruff

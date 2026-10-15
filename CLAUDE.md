@@ -28,6 +28,24 @@ Don't run individual linters — `prek` runs the full suite as configured in `.p
 
 Pre-commit hooks run automatically via prek, which enters the nix dev shell itself — commits work from anywhere.
 
+### Headless testing (over ssh, no display)
+
+```bash
+nix run .#gui-headless &                 # GUI on Xvfb :98, throwaway data dir
+DISPLAY=:98 xdotool type ':help'         # drive it (xdotool in dev shell)
+DISPLAY=:98 import -window root out.png  # screenshot
+
+nix run .#android-emu &                  # headless KVM emulator (API 34 x86_64)
+adb install -r -g android/app/build/outputs/apk/debug/app-debug.apk
+adb shell monkey -p com.muninn -c android.intent.category.LAUNCHER 1
+adb exec-out screencap -p > out.png      # drive with `adb shell input tap/text`
+adb emu kill
+```
+
+Xvfb has no usable GLX, so `gui-headless` sets `QT_QUICK_BACKEND=software`.
+The headless GUI still owns the host's real BT adapter when it is the writer.
+Emulator Bluetooth is virtual and can't reach the host adapter.
+
 ## Intentional Decisions (don't "fix" these)
 
 - **Static keypairs** — generated once, persisted to the SQLite `identity` table, reused across restarts and reconnects. Same shared secret every handshake. Intentional for simplicity.
