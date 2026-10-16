@@ -104,7 +104,7 @@ fun ConversationsScreen() {
             when {
                 !bt -> "Bluetooth is off"
                 direct == 0 -> "Looking for people nearby…"
-                else -> "$direct nearby · $reach reachable"
+                else -> "$direct connected" + if (reach > direct) " · ${reach - direct} via relay" else ""
             }
         }
     }

@@ -1,5 +1,19 @@
 package com.muninn
 
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.layout.offset
+import com.muninn.core.hex
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -121,7 +135,12 @@ fun ChatScreen(conv: String) {
 
     var draft by remember(conv) { mutableStateOf("") }
     var replyTo by remember(conv) { mutableStateOf<StoredMessage?>(null) }
+    // swiping / tapping "reply" or "edit" puts the cursor in the composer
+    val composerFocus = remember { FocusRequester() }
     var editing by remember(conv) { mutableStateOf<StoredMessage?>(null) }
+    LaunchedEffect(replyTo, editing) {
+        if (replyTo != null || editing != null) runCatching { composerFocus.requestFocus() }
+    }
     var selected by remember { mutableStateOf<StoredMessage?>(null) }
     var showStickers by remember { mutableStateOf(false) }
     var showGames by remember { mutableStateOf(false) }
@@ -233,7 +252,7 @@ fun ChatScreen(conv: String) {
                             }
                         },
                         placeholder = { Text("Message  ·  :shortcodes: work") },
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp, max = 160.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp, max = 160.dp).focusRequester(composerFocus),
                         shape = RoundedCornerShape(24.dp),
                         colors = TextFieldDefaults.colors(
                             focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
@@ -269,7 +288,8 @@ fun ChatScreen(conv: String) {
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 } else {
                     val showSender = isGroup && m.sender != me && (prev == null || prev.sender != m.sender || prev.kind == "system")
-                    Bubble(m, me, showSender, msgs, onLong = { selected = m })
+                    Bubble(m, me, showSender, msgs, onLong = { selected = m },
+                        onReply = { replyTo = m; editing = null })
                 }
             }
         }
@@ -321,11 +341,43 @@ fun ChatScreen(conv: String) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun Bubble(m: StoredMessage, me: String, showSender: Boolean, all: List<StoredMessage>, onLong: () -> Unit) {
+private fun Bubble(m: StoredMessage, me: String, showSender: Boolean, all: List<StoredMessage>,
+                   onLong: () -> Unit, onReply: () -> Unit) {
     val ctx = LocalContext.current
     val out = m.sender == me
     val mesh = Runtime.node?.mesh
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = if (out) Alignment.End else Alignment.Start) {
+    // Swipe right to reply: the bubble follows the finger (with resistance),
+    // a reply arrow fades in, a tick of haptics at the threshold.
+    val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val threshold = with(density) { 56.dp.toPx() }
+    val maxPull = with(density) { 84.dp.toPx() }
+    val dx = remember { Animatable(0f) }
+    var armed by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth().pointerInput(m.msgId.hex()) {
+        if (m.deleted || m.kind == "system") return@pointerInput
+        detectHorizontalDragGestures(
+            onDragEnd = {
+                if (armed) onReply()
+                armed = false
+                scope.launch { dx.animateTo(0f, spring(dampingRatio = 0.6f)) }
+            },
+            onDragCancel = { armed = false; scope.launch { dx.animateTo(0f) } },
+        ) { change, amount ->
+            val next = (dx.value + amount * 0.6f).coerceIn(0f, maxPull)
+            if (next != dx.value) change.consume()
+            scope.launch { dx.snapTo(next) }
+            val now = next >= threshold
+            if (now && !armed) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            armed = now
+        }
+    }) {
+    Text("↩", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleLarge,
+        modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp)
+            .graphicsLayer { alpha = (dx.value / threshold).coerceIn(0f, 1f); scaleX = alpha; scaleY = alpha })
+    Column(Modifier.fillMaxWidth().offset { IntOffset(dx.value.roundToInt(), 0) },
+        horizontalAlignment = if (out) Alignment.End else Alignment.Start) {
         Surface(
             shape = RoundedCornerShape(16.dp, 16.dp, if (out) 4.dp else 16.dp, if (out) 16.dp else 4.dp),
             color = if (out) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
@@ -376,6 +428,7 @@ private fun Bubble(m: StoredMessage, me: String, showSender: Boolean, all: List<
                 }
             }
         }
+    }
     }
 }
 
