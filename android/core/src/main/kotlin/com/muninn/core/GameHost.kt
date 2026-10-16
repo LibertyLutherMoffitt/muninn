@@ -10,7 +10,9 @@ import java.io.File
  */
 class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, String>, private val userDir: File) {
 
-    data class Meta(val id: String, val name: String, val icon: String, val min: Int, val max: Int)
+    /** One header option: [choices] for the invite UI, [default] if none picked. */
+    data class Option(val id: String, val label: String, val choices: List<Any?>, val default: Any?)
+    data class Meta(val id: String, val name: String, val icon: String, val min: Int, val max: Int, val options: List<Option> = emptyList())
 
     companion object {
         private val HEADER = Regex("""^\s*//\s*@muninn-game\s+(\{.*\})\s*$""")
@@ -23,7 +25,29 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
             val id = j.str("id")
             if (!Regex("[a-z0-9_\\-]{1,32}").matches(id)) throw IllegalArgumentException("bad game id")
             val min = j.int("min", 2)
-            return Meta(id, j.str("name", id), j.str("icon", "🎮"), min, j.int("max", min))
+            @Suppress("UNCHECKED_CAST")
+            val opts = (j["options"] as? List<Any?>).orEmpty().mapNotNull { o ->
+                val m = o as? Map<String, Any?> ?: return@mapNotNull null
+                Option(m.str("id"), m.str("label", m.str("id")), (m["choices"] as? List<Any?>).orEmpty(), m["default"])
+            }
+            return Meta(id, j.str("name", id), j.str("icon", "🎮"), min, j.int("max", min), opts)
+        }
+
+        /** Mirror of gamehost.resolve_opts: validate, fill defaults. */
+        fun resolveOpts(meta: Meta, opts: Map<String, Any?>?): Map<String, Any?> {
+            val given = opts.orEmpty()
+            val out = LinkedHashMap<String, Any?>()
+            for (o in meta.options) {
+                var v = given[o.id] ?: o.default
+                if (o.choices.isNotEmpty() && o.choices.none { it == v }) {
+                    v = o.choices.firstOrNull { it.toString() == v.toString() }
+                        ?: throw IllegalArgumentException("${o.id} must be one of: ${o.choices.joinToString(", ")}")
+                }
+                out[o.id] = v
+            }
+            val unknown = given.keys - out.keys
+            if (unknown.isNotEmpty()) throw IllegalArgumentException("unknown option(s): ${unknown.sorted().joinToString(", ")}")
+            return out
         }
     }
 
@@ -47,15 +71,16 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
         return meta.id
     }
 
-    fun invite(conv: String, gameId: String): String {
+    fun invite(conv: String, gameId: String, opts: Map<String, Any?>? = null): String {
         val src = sources()[gameId] ?: throw IllegalArgumentException("no such game: $gameId")
         if (src.toByteArray().size > MAX_CODE) throw IllegalArgumentException("game code too large")
         val meta = parseHeader(src)
+        val chosen = resolveOpts(meta, opts)
         if (mesh.convMembers(conv).isEmpty()) throw IllegalArgumentException("nobody to play with here")
         val session = Nacl.randomBytes(6).hex()
         mesh.appEvent(conv, gameId, session, "invite", mapOf(
             "game" to gameId, "name" to meta.name, "icon" to meta.icon, "min" to meta.min, "max" to meta.max,
-            "seed" to (Math.random() * Int.MAX_VALUE).toLong(), "code" to src,
+            "seed" to (Math.random() * Int.MAX_VALUE).toLong(), "code" to src, "opts" to chosen,
         ), 0)
         return session
     }
@@ -80,13 +105,14 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
         val status = when {
             ended.isNotEmpty() -> "${mesh.displayName(ended[0].sender)} " + if (ended[0].type == "resign") "resigned" else "ended the game"
             started -> "in progress · ${moves.size} moves"
-            else -> "waiting for ${maxOf(mn - players.size, 1)} more player(s)"
+            players.size >= mn -> "${players.size}/$mx joined — ready, the host can start"
+            else -> (mn - players.size).let { n -> "waiting for $n more player${if (n > 1) "s" else ""}" }
         }
         val names = (joined + me).toSet().associateWith { mesh.displayName(it) }
         val shown = if (started) players else joined
         return mapOf(
             "session" to session, "app" to inv.app, "conv" to inv.conv, "name" to b.str("name", inv.app),
-            "icon" to b.str("icon", "🎮"), "creator" to creator, "seed" to b.long("seed"), "min" to mn, "max" to mx,
+            "icon" to b.str("icon", "🎮"), "creator" to creator, "seed" to b.long("seed"), "opts" to ((b["opts"] as? Map<*, *>) ?: emptyMap<String, Any?>()), "min" to mn, "max" to mx,
             "joined" to joined, "players" to shown, "declined" to declined, "started" to started,
             "ended" to ended.isNotEmpty(), "endedBy" to (ended.firstOrNull()?.sender ?: ""),
             "endType" to (ended.firstOrNull()?.type ?: ""), "me" to me, "amPlayer" to (me in shown),

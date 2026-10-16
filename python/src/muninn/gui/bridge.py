@@ -616,9 +616,9 @@ class ChatBridge(QObject):
         return self.games.code_for(session)
 
     @Slot(str, str, result=str)
-    def startGame(self, game_id: str, conv: str) -> str:
+    def startGame(self, game_id: str, conv: str, opts: dict | None = None) -> str:
         try:
-            sid = self.games.invite(conv or self._active, game_id)
+            sid = self.games.invite(conv or self._active, game_id, opts)
         except ValueError as e:
             self.errorOccurred.emit(str(e))
             return ""
@@ -732,7 +732,7 @@ class ChatBridge(QObject):
         (":file [path]", "send a file or picture (or drag & drop)"),
         (":get / :open", "download / open the selected file"),
         (":emoji", "emoji picker (Ctrl+E). :shortcodes: expand on send"),
-        (":game [name]", "start a game in this conversation"),
+        (":game [name] [opt=value]", "start a game in this conversation"),
         (":games", "games in this conversation"),
         (":sharegame <name>", "send a game's code to this conversation"),
         (":list", "conversations"),
@@ -971,7 +971,28 @@ class ChatBridge(QObject):
                         for g in self.games.catalog()
                     ],
                 )
-            self.startGame(args[0], self._active)
+            # options as key=value; ask for missing ones one menu at a time
+            game = next((g for g in self.games.catalog() if g["id"] == args[0]), None)
+            opts = dict(a.split("=", 1) for a in args[1:] if "=" in a)
+            missing = [
+                o for o in (game or {}).get("options", []) if o["id"] not in opts
+            ]
+            if game and missing:
+                o = missing[0]
+                base = "game " + " ".join(args)
+                return self._info(
+                    f"{game['icon']}  {game['name']} — {o['label']}",
+                    [
+                        self._item(
+                            str(c),
+                            "default" if c == o.get("default") else "",
+                            action="cmd",
+                            cmd=f"{base} {o['id']}={c}",
+                        )
+                        for c in o.get("choices", [])
+                    ],
+                )
+            self.startGame(args[0], self._active, opts)
         elif head == "games":
             sess = self.games.sessions(self._active or None)
             self._info(

@@ -79,6 +79,10 @@ def test_bundled_games_exist():
         "reversi",
         "dots",
         "pong",
+        "uttt",
+        "uuttt",
+        "unlimited",
+        "chess4",
     } <= ids
 
 
@@ -96,7 +100,8 @@ def test_random_playthrough(engine, path, seed):
         assert r["n"] == 0  # real-time: no turn moves
         return
     assert not r.get("stuck"), r
-    if meta["id"] != "chess":  # random chess may not finish in 400 plies
+    # may not finish in 400 random plies (unlimited: 8 players, endless board)
+    if meta["id"] not in ("chess", "chess4", "uuttt", "unlimited"):
         assert r["over"], r
     assert isinstance(r["text"], str) and r["text"]
 
@@ -137,3 +142,66 @@ def test_checkers_forced_capture_and_multijump(engine):
       b[1]='a'; b[10]='b'; b[26]='b'; s.b=b;   // a at row0 can double-jump
       var l=game.legal(s); return JSON.stringify(l);})()""")
     assert json.loads(r.toString()) == [[1, 19, 33]]
+
+
+def test_ultimate_sends_opponent_to_matching_board(engine):
+    load(engine, BUNDLED / "uttt.js")
+    r = engine.evaluate("""(function(){var s=game.setup(['A','B'],1);
+      s=game.move(s,'A',4*9+2);            // centre board, top-right cell
+      var t1=JSON.stringify(s.target);       // -> board 2
+      var ok=game.legalAt(s,2*9+0), bad=game.legalAt(s,5*9+0);
+      return [t1, ok, bad];})()""")
+    assert r.toVariant() == ["[2]", True, False]
+    # a decided target board frees the opponent
+    r = engine.evaluate("""(function(){var s=game.setup(['A','B'],1);
+      var seq=[0*9+3, 3*9+0, 0*9+4, 4*9+0, 0*9+5];  // A wins board 0 (row 3,4,5)
+      for(var i=0;i<seq.length;i++) s=game.move(s,i%2?'B':'A',seq[i]);
+      var won=s.won['0'];
+      s=game.move(s,'B',5*9+0);              // sends A to board 0, which is decided
+      return [won, JSON.stringify(s.target)];})()""")
+    assert r.toVariant() == [0, "[]"]
+
+
+def test_ultimate2_has_three_levels(engine):
+    load(engine, BUNDLED / "uuttt.js")
+    r = engine.evaluate("""(function(){var s=game.setup(['A','B'],1);
+      s=game.move(s,'A',4*81+7*9+2);  // top 4, mid 7, cell 2 -> small board (7,2)
+      return [s.b.length, JSON.stringify(s.target)];})()""")
+    assert r.toVariant() == [729, "[7,2]"]
+
+
+def test_unlimited_adjacency_options_and_players(engine):
+    load(engine, BUNDLED / "unlimited.js")
+    r = engine.evaluate("""(function(){var s=game.setup(['A','B','C'],1,{k:3});
+      var first=game.legalAt(s,5,5);
+      s=game.move(s,'A',[0,0]);
+      var far=game.legalAt(s,2,0), near=game.legalAt(s,1,1);
+      s=game.move(s,'B',[1,0]); s=game.move(s,'C',[0,1]);
+      s=game.move(s,'A',[-1,-1]); s=game.move(s,'B',[2,0]); s=game.move(s,'C',[0,2]);
+      s=game.move(s,'A',[1,1]);   // A: (-1,-1),(0,0),(1,1) -> 3 in a row
+      return [first, far, near, game.turn(s), game.status(s,{A:'A',B:'B',C:'C'}).over];})()""")
+    assert r.toVariant() == [False, False, True, "-", True]
+
+
+def test_chess4_opening_and_elimination(engine):
+    load(engine, BUNDLED / "chess4.js")
+    r = engine.evaluate("""(function(){var s=game.setup(['R','B','Y','G'],1);
+      var pieces=s.b.filter(function(p){return p;}).length;
+      return [pieces, game.moves(s,'R').length, game.turn(s)];})()""")
+    # 4 x 16 pieces; red: 8 pawns x 2 + 2 knights x 2
+    assert r.toVariant() == [64, 20, "R"]
+    r = engine.evaluate("""(function(){var s=game.setup(['R','Y'],1);
+      return [s.cols.join(''), s.b.filter(function(p){return p;}).length];})()""")
+    assert r.toVariant() == ["ry", 32]
+
+
+def test_game_options_are_validated():
+    from muninn.gamehost import resolve_opts
+
+    meta = parse_header((BUNDLED / "unlimited.js").read_text())
+    assert resolve_opts(meta, None) == {"k": 4}
+    assert resolve_opts(meta, {"k": "6"}) == {"k": 6}
+    with pytest.raises(ValueError):
+        resolve_opts(meta, {"k": 99})
+    with pytest.raises(ValueError):
+        resolve_opts(meta, {"zz": 1})

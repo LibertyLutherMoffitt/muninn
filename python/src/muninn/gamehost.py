@@ -9,12 +9,12 @@ The plugin's code travels inside the invite, so every participant runs the
 exact same rules even if their installed copy differs (or they never had it).
 
 Session event types (all reliable app events, app id = game id):
-    invite  {game, name, icon, min, max, seed, code}
+    invite  {game, name, icon, min, max, seed, code, opts}
     join    {}               decline {}
     start   {players: [...]} (creator, for games with min < max)
     move    {m: <any JSON>}  seq = move number (1, 2, ...)
     resign  {}               end {}  (abandon)
-State = setup(players, seed) folded over moves sorted by (seq, ts, sender);
+State = setup(players, seed, opts) folded over moves sorted by (seq, ts, sender);
 illegal / out-of-turn moves are ignored identically everywhere.
 """
 
@@ -50,7 +50,30 @@ def parse_header(src: str) -> dict:
     meta.setdefault("icon", "🎮")
     meta.setdefault("min", 2)
     meta.setdefault("max", meta["min"])
+    meta.setdefault("options", [])
     return meta
+
+
+def resolve_opts(meta: dict, opts: dict | None) -> dict:
+    """Validate chosen options against the header's `options` (each
+    {id, label, choices, default}); missing ones get their default."""
+    out = {}
+    opts = opts or {}
+    for o in meta.get("options", []):
+        v = opts.get(o["id"], o.get("default"))
+        choices = o.get("choices")
+        if choices and v not in choices:
+            # accept "5" for 5 from text UIs
+            v = next((c for c in choices if str(c) == str(v)), None)
+            if v is None:
+                raise ValueError(
+                    f"{o['id']} must be one of: {', '.join(map(str, choices))}"
+                )
+        out[o["id"]] = v
+    unknown = set(opts) - set(out)
+    if unknown:
+        raise ValueError(f"unknown option(s): {', '.join(sorted(unknown))}")
+    return out
 
 
 class GameRegistry:
@@ -89,6 +112,7 @@ class GameRegistry:
                     "name": meta["name"],
                     "icon": meta["icon"],
                     "players": players + " players",
+                    "options": meta["options"],
                     "user": p.parent == self.user_dir,
                 }
             )
@@ -107,7 +131,7 @@ class GameRegistry:
 
     # --- sessions ---------------------------------------------------------------
 
-    def invite(self, conv: str, game_id: str) -> str:
+    def invite(self, conv: str, game_id: str, opts: dict | None = None) -> str:
         files = self._files()
         if game_id not in files:
             raise ValueError(f"no such game: {game_id}")
@@ -115,6 +139,7 @@ class GameRegistry:
         if len(src.encode()) > MAX_CODE:
             raise ValueError("game code too large to send in an invite")
         meta = parse_header(src)
+        chosen = resolve_opts(meta, opts)
         if not self.mesh.conv_members(conv):
             raise ValueError("nobody to play with in this conversation")
         session = os.urandom(6).hex()
@@ -131,6 +156,7 @@ class GameRegistry:
                 "max": meta["max"],
                 "seed": random.randrange(2**31),
                 "code": src,
+                "opts": chosen,
             },
             0,
         )
@@ -178,9 +204,11 @@ class GameRegistry:
             )
         elif started:
             status = f"in progress · {len(moves)} moves"
+        elif len(players) >= mn:
+            status = f"{len(players)}/{mx} joined — ready, the host can start"
         else:
-            waiting = mn - len(players)
-            status = f"waiting for {max(waiting, 1)} more player(s)"
+            n = mn - len(players)
+            status = f"waiting for {n} more player{'s' if n > 1 else ''}"
         return {
             "session": session,
             "app": inv.app,
@@ -189,6 +217,7 @@ class GameRegistry:
             "icon": b.get("icon", "🎮"),
             "creator": creator,
             "seed": b.get("seed", 0),
+            "opts": b.get("opts") or {},
             "min": mn,
             "max": mx,
             "joined": joined,

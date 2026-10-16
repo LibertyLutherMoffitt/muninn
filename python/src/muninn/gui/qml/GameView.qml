@@ -19,10 +19,27 @@ Rectangle {
     property var ui: ({})        // plugin-local view state (selection, hover…)
     property string error: ""
     property var st: ({ over: false, text: "" })
+    // host-level zoom/pan: wheel zooms at the cursor, drag pans, 0 resets
+    property real zoom: 1
+    property real panX: 0
+    property real panY: 0
+
+    function clampPan() {
+        if (zoom <= 1) { zoom = 1; panX = 0; panY = 0; return }
+        panX = Math.min(0, Math.max(board.width - board.width * zoom, panX))
+        panY = Math.min(0, Math.max(board.height - board.height * zoom, panY))
+    }
+    function zoomAt(f, x, y) {
+        const nz = Math.max(1, Math.min(8, zoom * f))
+        panX = x - (x - panX) * nz / zoom
+        panY = y - (y - panY) * nz / zoom
+        zoom = nz
+        clampPan(); board.requestPaint()
+    }
 
     function open(sid) {
         session = sid
-        error = ""; ui = ({}); game = null
+        error = ""; ui = ({}); game = null; zoom = 1; panX = 0; panY = 0
         const code = bridge.gameCode(sid)
         try {
             game = (new Function(code + "\n;return game;"))()
@@ -51,7 +68,7 @@ Rectangle {
         info = bridge.gameSession(session)
         if (!game || !info.session) { board.requestPaint(); return }
         try {
-            let s = game.setup(info.players, info.seed)
+            let s = game.setup(info.players, info.seed, info.opts || {})
             const moves = info.moves || []
             for (let i = 0; i < moves.length; i++) {
                 const t = turnOf(s)
@@ -118,6 +135,8 @@ Rectangle {
             Item { Layout.fillWidth: true }
             Button { text: "Resign"; visible: !!(root.info.started && !root.info.ended && root.info.amPlayer && !root.st.over)
                      onClicked: bridge.gameAction(root.session, "resign", {}) }
+            Button { text: "⤢ Fit (0)"; visible: root.zoom > 1
+                     onClicked: { root.zoom = 1; root.clampPan(); board.requestPaint() } }
             Button { text: "Close (Esc)"; onClicked: root.close() }
         }
 
@@ -161,13 +180,30 @@ Rectangle {
                     ctx.fillStyle = "#151820"
                     ctx.fillRect(0, 0, width, height)
                     if (!root.game || !root.state) return
+                    ctx.translate(root.panX, root.panY)
+                    ctx.scale(root.zoom, root.zoom)
                     try { root.game.render(ctx, root.state, root.view()) }
                     catch (e) { ctx.fillStyle = "#ef4444"; ctx.fillText("render error: " + e, 10, 20) }
                 }
                 MouseArea {
                     anchors.fill: parent
                     hoverEnabled: true
-                    onClicked: (m) => root.input({ type: "click", x: m.x, y: m.y })
+                    property point start
+                    property real sx; property real sy
+                    property bool dragging: false
+                    cursorShape: dragging ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                    onPressed: (m) => { start = Qt.point(m.x, m.y); sx = root.panX; sy = root.panY; dragging = false }
+                    onPositionChanged: (m) => {
+                        if (!pressed || root.zoom <= 1) return
+                        if (!dragging && Math.hypot(m.x - start.x, m.y - start.y) > 6) dragging = true
+                        if (dragging) { root.panX = sx + m.x - start.x; root.panY = sy + m.y - start.y
+                                        root.clampPan(); board.requestPaint() }
+                    }
+                    onReleased: (m) => {
+                        if (dragging) { dragging = false; return }
+                        root.input({ type: "click", x: (m.x - root.panX) / root.zoom, y: (m.y - root.panY) / root.zoom })
+                    }
+                    onWheel: (w) => root.zoomAt(w.angleDelta.y > 0 ? 1.2 : 1 / 1.2, w.x, w.y)
                 }
             }
         }
@@ -175,6 +211,11 @@ Rectangle {
 
     Keys.onEscapePressed: root.close()
     Keys.onPressed: (e) => {
+        if (e.text === "0" || e.text === "+" || e.text === "-") {
+            if (e.text === "0") { zoom = 1; clampPan(); board.requestPaint() }
+            else zoomAt(e.text === "+" ? 1.25 : 0.8, board.width / 2, board.height / 2)
+            e.accepted = true; return
+        }
         const names = { [Qt.Key_Left]: "ArrowLeft", [Qt.Key_Right]: "ArrowRight",
                         [Qt.Key_Up]: "ArrowUp", [Qt.Key_Down]: "ArrowDown", [Qt.Key_Space]: " " }
         const k = names[e.key] || e.text

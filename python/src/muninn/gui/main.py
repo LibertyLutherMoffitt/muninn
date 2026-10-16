@@ -83,9 +83,6 @@ def main() -> None:
     vim = VimEditor()
 
     engine = QQmlApplicationEngine()
-    engine.warnings.connect(
-        lambda ws: [print("QML:", w.toString(), file=sys.stderr) for w in ws]
-    )
     ctx = engine.rootContext()
     ctx.setContextProperty("bridge", bridge)
     ctx.setContextProperty("peerModel", peer_model)

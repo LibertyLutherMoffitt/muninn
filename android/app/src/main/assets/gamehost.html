@@ -7,20 +7,25 @@
   html, body { margin: 0; height: 100%; background: #0f1115; color: #e5e7eb;
                font-family: sans-serif; overflow: hidden; touch-action: none; }
   canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  #unzoom { position: absolute; right: 10px; bottom: 10px; display: none; padding: 8px 12px;
+            border: 0; border-radius: 16px; background: #2a1f4a; color: #e5e7eb; font-size: 14px; }
   #err { position: absolute; top: 8px; left: 8px; right: 8px; color: #ef4444; font-size: 14px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="err"></div>
+<button id="unzoom" onclick="muninn.resetZoom()">⤢ fit</button>
 <script>
 // Muninn game host (Android). Mirrors python/src/muninn/gui/qml/GameView.qml:
-// state = setup(players, seed) folded over moves (ignoring out-of-turn /
+// state = setup(players, seed, opts) folded over moves (ignoring out-of-turn /
 // illegal ones) so every device computes the same game.
 (function () {
   var canvas = document.getElementById("c");
   var err = document.getElementById("err");
   var game = null, info = {}, state = null, ui = {}, W = 0, H = 0, OX = 0, OY = 0, last = 0;
+  // Host-level zoom/pan (pinch, drag, double-tap) so big boards work on a phone.
+  var Z = 1, PX = 0, PY = 0;
 
   function turnOf(s) { try { return game.turn ? game.turn(s) : null; } catch (e) { return null; } }
   function myTurn() {
@@ -48,7 +53,8 @@
     var dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.translate(OX, OY);
+    ctx.translate(OX + PX, OY + PY);
+    ctx.scale(Z, Z);
     ctx.fillStyle = "#151820"; ctx.fillRect(0, 0, W, H);
     if (!game || !state) return;
     try { game.render(ctx, state, view()); } catch (e) { err.textContent = "render error: " + e; }
@@ -66,7 +72,7 @@
   function replay() {
     if (!game || !info.session) return;
     try {
-      var s = game.setup(info.players, info.seed);
+      var s = game.setup(info.players, info.seed, info.opts || {});
       var moves = info.moves || [];
       for (var i = 0; i < moves.length; i++) {
         var t = turnOf(s);
@@ -106,15 +112,67 @@
       try { state = game.onRt(state, sender, JSON.parse(json)); paint(); } catch (e) {}
     },
     key: function (k, down) { input({ type: "key", key: k, down: down }); },
-    size: function (w, h) { forcedW = w; forcedH = h; layout(); }
+    size: function (w, h) { forcedW = w; forcedH = h; layout(); },
+    resetZoom: function () { Z = 1; clampPan(); paint(); }
   };
 
-  canvas.addEventListener("pointerdown", function (e) {
+  // --- gestures: tap = click, one-finger drag = pan (when zoomed), pinch = zoom.
+  // (No double-tap zoom: the first tap would already have played a move.)
+  function clampPan() {
+    PX = Math.min(0, Math.max(W - W * Z, PX));
+    PY = Math.min(0, Math.max(H - H * Z, PY));
+    if (Z <= 1) { Z = 1; PX = 0; PY = 0; }
+    document.getElementById("unzoom").style.display = Z > 1 ? "block" : "none";
+  }
+  function zoomAt(f, x, y) {   // x, y relative to the board's top-left
+    var nz = Math.max(1, Math.min(8, Z * f));
+    PX = x - (x - PX) * nz / Z; PY = y - (y - PY) * nz / Z; Z = nz;
+    clampPan(); paint();
+  }
+  var pts = {}, gesture = null;
+  function local(e) {
     var r = canvas.getBoundingClientRect();
-    var x = e.clientX - r.left - OX, y = e.clientY - r.top - OY;
+    return { x: e.clientX - r.left - OX, y: e.clientY - r.top - OY };
+  }
+  function pinchInfo() {
+    var k = Object.keys(pts); if (k.length < 2) return null;
+    var a = pts[k[0]], b = pts[k[1]];
+    return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+  canvas.addEventListener("pointerdown", function (e) {
+    pts[e.pointerId] = local(e);
+    var n = Object.keys(pts).length;
+    if (n === 1) gesture = { kind: "tap", start: local(e), px: PX, py: PY };
+    else if (n === 2) { var p = pinchInfo(); gesture = { kind: "pinch", d: p.d, z: Z, x: p.x, y: p.y }; }
+  });
+  canvas.addEventListener("pointermove", function (e) {
+    if (!(e.pointerId in pts) || !gesture) return;
+    pts[e.pointerId] = local(e);
+    if (gesture.kind === "pinch") {
+      var p = pinchInfo(); if (!p || !gesture.d) return;
+      var target = gesture.z * p.d / gesture.d;
+      zoomAt(target / Z, p.x, p.y);
+      PX += p.x - gesture.x; PY += p.y - gesture.y; gesture.x = p.x; gesture.y = p.y;
+      clampPan(); paint();
+    } else {
+      var q = local(e), dx = q.x - gesture.start.x, dy = q.y - gesture.start.y;
+      if (gesture.kind === "tap" && Math.hypot(dx, dy) > 10 && Z > 1) gesture.kind = "pan";
+      if (gesture.kind === "pan") { PX = gesture.px + dx; PY = gesture.py + dy; clampPan(); paint(); }
+    }
+  });
+  function up(e) {
+    var was = gesture;
+    delete pts[e.pointerId];
+    if (Object.keys(pts).length) { if (was && was.kind === "pinch") gesture = { kind: "done" }; return; }
+    gesture = null;
+    if (!was || was.kind !== "tap" || e.type === "pointercancel") return;
+    var q = local(e);
+    var x = (q.x - PX) / Z, y = (q.y - PY) / Z;
     if (x < 0 || y < 0 || x > W || y > H) return;
     input({ type: "click", x: x, y: y });
-  });
+  }
+  canvas.addEventListener("pointerup", up);
+  canvas.addEventListener("pointercancel", up);
   window.addEventListener("resize", layout);
   // WebView may report a 0-height viewport at load; catch the real size.
   var lastRect = "";

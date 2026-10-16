@@ -210,7 +210,8 @@ Item {
                                         anchors.fill: parent
                                         fillMode: Image.PreserveAspectFit
                                         horizontalAlignment: Image.AlignLeft
-                                        source: image.full ? model.fileUrl : model.thumbUrl
+                                        // non-image files must not be fed to the image decoder
+                                        source: !model.isImage ? "" : image.full ? model.fileUrl : model.thumbUrl
                                         playing: image.full && model.isGif
                                         asynchronous: true
                                         cache: false

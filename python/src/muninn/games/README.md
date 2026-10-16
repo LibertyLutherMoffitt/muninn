@@ -18,13 +18,23 @@ The first line must be a JSON header:
 `id` is `[a-z0-9_-]{1,32}`. `min`/`max` = number of players. Invites carry the
 code, so keep files under 40 KB.
 
+Optional **settings** chosen by whoever invites (shown as a menu / chips):
+
+```js
+// @muninn-game {"id": "unlimited", …, "options": [{"id": "k", "label": "In a row to win", "choices": [3, 4, 5, 6, 7], "default": 4}]}
+```
+
+The chosen values travel in the invite and reach `setup(players, seed, opts)`
+(missing ones get their default; unknown ones are rejected). Text front ends
+take them as `:game unlimited k=5`.
+
 ## The `game` object
 
 ```js
 var game = {
   aspect: 1.0,                       // board width / height
 
-  setup(players, seed) {},           // -> initial state (plain JSON data)
+  setup(players, seed, opts) {},     // -> initial state (plain JSON data)
   turn(state) {},                    // -> id of the player to move, or null
                                      //    (null = anyone may move / simultaneous)
   move(state, player, move) {},      // -> NEW state; throw on illegal moves.
@@ -52,12 +62,19 @@ var game = {
 1. **invite** (creator) → others **join**/**decline**. The game starts when
    `max` players joined, or when the creator presses *Start* (≥ `min`).
 2. Players = creator + joiners in join order.
-3. State = `setup(players, seed)` folded over every **move** event, ordered by
+3. State = `setup(players, seed, opts)` folded over every **move** event, ordered by
    move number. A move whose sender isn't `turn(state)` (when non-null), or
    that makes `move()` throw, is ignored — identically on every device, so all
    players always agree.
 4. Moves are delivered reliably (retried across relays and disconnects).
    Real-time `rt` datagrams are best-effort and may be dropped.
+
+### Zoom
+
+Both hosts zoom and pan for you (pinch / drag on Android, mouse wheel / drag /
+`+` `-` `0` on desktop) and hand `input()` board coordinates, so a game just
+draws its whole board into `view.w × view.h`. Big boards (Ultimate²: 27×27,
+Unlimited: grows) need nothing extra.
 
 ### Canvas subset
 

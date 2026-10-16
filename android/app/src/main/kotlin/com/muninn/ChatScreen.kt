@@ -13,6 +13,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -522,17 +527,36 @@ private fun GamesSheet(conv: String, onDone: () -> Unit) {
             HorizontalDivider()
         }
         Text("Start a game", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp, 8.dp))
+        var picking by remember { mutableStateOf<String?>(null) }   // game whose options are open
+        val chosen = remember { mutableStateMapOf<String, Any?>() }
+        fun invite(g: com.muninn.core.GameHost.Meta) {
+            val opts = g.options.associate { o -> o.id to (chosen[o.id] ?: o.default) }
+            scope.launch(Dispatchers.IO) {
+                runCatching { Runtime.games!!.invite(conv, g.id, opts) }
+                    .onSuccess { sid -> withContext(Dispatchers.Main) { onDone(); Nav.go(Screen.Game(sid)) } }
+                    .onFailure { Runtime.toast(it.message ?: "can't start") }
+            }
+        }
         catalog.forEach { g ->
             Row(Modifier.fillMaxWidth().clickable {
-                scope.launch(Dispatchers.IO) {
-                    runCatching { Runtime.games!!.invite(conv, g.id) }
-                        .onSuccess { sid -> withContext(Dispatchers.Main) { onDone(); Nav.go(Screen.Game(sid)) } }
-                        .onFailure { Runtime.toast(it.message ?: "can't start") }
-                }
+                if (g.options.isEmpty()) invite(g)
+                else { picking = if (picking == g.id) null else g.id; chosen.clear() }
             }.padding(horizontal = 20.dp, vertical = 12.dp)) {
                 Text("${g.icon}  ${g.name}", modifier = Modifier.weight(1f))
                 Text(if (g.min == g.max) "${g.min} players" else "${g.min}–${g.max} players",
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (picking == g.id) Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)) {
+                g.options.forEach { o ->
+                    Text(o.label, style = MaterialTheme.typography.labelMedium)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        o.choices.forEach { c ->
+                            FilterChip(selected = (chosen[o.id] ?: o.default) == c, onClick = { chosen[o.id] = c },
+                                label = { Text(c.toString()) })
+                        }
+                    }
+                }
+                Button(onClick = { invite(g) }, modifier = Modifier.padding(top = 4.dp)) { Text("Invite") }
             }
         }
         if (catalog.isEmpty()) Text("No games installed", Modifier.padding(20.dp))
