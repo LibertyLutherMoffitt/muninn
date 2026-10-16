@@ -199,35 +199,41 @@ Rectangle {
                 delegate: ItemDelegate {
                     id: rowDel
                     width: resultList.width
-                    height: 40
+                    height: 34
+                    padding: 0; leftPadding: 12; rightPadding: 10
                     highlighted: resultList.currentIndex === index
                     background: Rectangle {
-                        color: rowDel.highlighted ? Theme.accent
-                             : rowDel.hovered     ? Theme.bg
+                        color: rowDel.highlighted ? Theme.accentSoft
+                             : rowDel.hovered     ? Theme.surface
                                                   : "transparent"
-                        radius: 5
-                        opacity: rowDel.highlighted ? 0.7 : 1.0
-                        Behavior on color {
-                            ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
-                        }
+                        radius: 6
+                        Rectangle { visible: rowDel.highlighted; width: 3; radius: 2; color: Theme.accent
+                                    anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                                    anchors.margins: 6 }
+                        Behavior on color { ColorAnimation { duration: 100; easing.type: Easing.OutQuad } }
                     }
-                    contentItem: Row {
-                        spacing: 10
-                        anchors.verticalCenter: parent.verticalCenter
+                    contentItem: Item {
                         Text {
-                            text: model.icon || "   "
-                            color: Theme.textMuted
-                            font.pixelSize: 13
+                            id: ic
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 22; horizontalAlignment: Text.AlignHCenter
+                            text: model.icon || ""
+                            color: Theme.textMuted; font.pixelSize: 13
                         }
                         Text {
+                            id: lb
+                            anchors.left: ic.right; anchors.leftMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Math.min(implicitWidth, parent.width * 0.45); elide: Text.ElideRight
                             text: model.label
-                            color: Theme.textPrimary
-                            font.pixelSize: 13
+                            color: Theme.textPrimary; font.pixelSize: 13
                         }
                         Text {
+                            anchors.left: lb.right; anchors.leftMargin: 12; anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            elide: Text.ElideRight
                             text: model.sub || ""
-                            color: Theme.textMuted
-                            font.pixelSize: 11
+                            color: Theme.textMuted; font.pixelSize: 11
                         }
                     }
                     onClicked: { resultList.currentIndex = index; root.activate() }
@@ -252,6 +258,7 @@ Rectangle {
         Qt.callLater(function() { searchInput.forceActiveFocus() })
     }
 
+    function grabFocus() { searchInput.forceActiveFocus() }
     function close() {
         root._open = false
         root.opacity = 0

@@ -27,6 +27,7 @@ class VimMode(enum.Enum):
     VISUAL_LINE = "VISUAL_LINE"
     OP_PENDING = "OP_PENDING"
     CMDLINE = "CMDLINE"
+    MESSAGES = "MESSAGES"  # k from the composer's top line: pick a message
 
 
 # Qt key codes (int values)
@@ -72,6 +73,10 @@ class VimEditor(QObject):
     paletteRequested = Signal(str)  # initial palette text ("" = fuzzy, ":…" = raw)
     scanRequested = Signal()
     commandRequested = Signal(str)  # raw command line w/o leading :
+    # MESSAGES mode: delta (0 = newest), and actions on the selected message:
+    # reply react edit delete copy open first last clear quick:<1-8>
+    messageNav = Signal(int)
+    messageAction = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -144,6 +149,21 @@ class VimEditor(QObject):
             f"pending={self._pending!r} count={self._count} pre={self._pre_count} "
             f"pos={self._pos} buflen={len(self._buf)}"
         )
+        if self._mode == VimMode.MESSAGES:
+            self._handle_messages(key_text, key_code)
+            return
+        if (
+            self._mode == VimMode.NORMAL
+            and not self._pending
+            and self._count is None
+            and (key_text == "k" or key_code == _K["Up"])
+            and "\n" not in self._buf[: self._pos]
+        ):
+            # Already on the top line: k continues upward into the messages.
+            self._enter_mode(VimMode.MESSAGES)
+            self.messageNav.emit(0)
+            return
+
         if key_code in (_K["Return"], _K["Enter"]):
             if shift and self._mode == VimMode.INSERT:
                 # Shift+Enter = newline in insert mode
@@ -193,6 +213,55 @@ class VimEditor(QObject):
             self._handle_visual(key_text, key_code, ctrl, shift)
         else:
             self._handle_normal(key_text, key_code, ctrl, shift)
+
+    _MSG_KEYS = {
+        "r": "reply",
+        "e": "edit",
+        "y": "copy",
+        "o": "open",
+        "+": "react",
+        "R": "react",
+        "g": "first",
+        "G": "last",
+    }
+
+    def _handle_messages(self, key_text: str, key_code: int) -> None:
+        if key_text == "d":  # dd = delete for everyone (one d is too easy)
+            if self._pending == "d":
+                self._pending = ""
+                self.messageAction.emit("delete")
+            else:
+                self._pending = "d"
+            return
+        self._pending = ""
+        if key_code == _K["Escape"] or key_text in ("i", "a", "q"):
+            self.messageAction.emit("clear")
+            self._enter_mode(
+                VimMode.INSERT if key_text in ("i", "a") else VimMode.NORMAL
+            )
+            self._emit()
+        elif key_text == "j" or key_code == _K["Down"]:
+            self.messageNav.emit(1)
+        elif key_text == "k" or key_code == _K["Up"]:
+            self.messageNav.emit(-1)
+        elif key_code in (_K["Return"], _K["Enter"]):
+            self.messageAction.emit("reply")
+        elif key_text in self._MSG_KEYS:
+            self.messageAction.emit(self._MSG_KEYS[key_text])
+        elif key_text in "12345678" and key_text:
+            self.messageAction.emit("quick:" + key_text)
+        if self._mode == VimMode.MESSAGES and (
+            key_code in (_K["Return"], _K["Enter"]) or key_text in ("r", "e")
+        ):
+            self._enter_mode(VimMode.INSERT)  # now type the reply / edit
+            self._emit()
+
+    @Slot()
+    def leaveMessages(self) -> None:
+        """j past the newest message: back to the composer."""
+        if self._mode == VimMode.MESSAGES:
+            self._enter_mode(VimMode.NORMAL)
+            self._emit()
 
     @Slot(str)
     def setCmdLine(self, text: str) -> None:

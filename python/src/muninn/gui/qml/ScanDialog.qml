@@ -2,275 +2,249 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Modal BT scan / pair dialog. Toggle with <space>s or :scan.
+// "People nearby" — find Muninn devices and connect. Opens with <space>s or
+// :scan, scans by itself, and keeps each device's state live while probes
+// finish in the background. Mirrors the Android Nearby screen.
 Rectangle {
     id: root
-    // Become visible eagerly when opening so child controls are focusable
-    // before the fade-in finishes; stay visible during the fade-out.
     visible: _open || opacity > 0
     opacity: 0
-    color: Qt.rgba(0, 0, 0, 0.55)
+    color: Qt.rgba(0, 0, 0, 0.6)
     anchors.fill: parent
 
     property bool _open: false
+    property bool scanning: false
+    property bool showAll: false
+    property int scans: 0
+    property var states: ({})          // addr -> live state
+    property var connecting: ({})      // addr -> true while dialling
+    property var results: []
 
-    Behavior on opacity {
-        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+    readonly property var stateLabel: ({
+        "connected": "connected", "checking": "checking for Muninn…", "muninn": "running Muninn",
+        "not_muninn": "not running Muninn", "ignored": "not a phone or computer — left alone",
+        "unknown": "" })
+
+    Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+    property real _scale: _open ? 1.0 : 0.94
+    Behavior on _scale { NumberAnimation { duration: 200; easing.type: Easing.OutBack } }
+
+    MouseArea { anchors.fill: parent; onClicked: root.close() }
+
+    function stateOf(d) { return states[d.mac] || d.state || "unknown" }
+    function isMuninn(d) { const s = stateOf(d); return d.muninn || s === "muninn" || s === "connected" }
+    function rebuild() {
+        const sel = deviceModel.count ? deviceModel.get(list.currentIndex) : null
+        const keep = sel ? sel.mac : ""
+        deviceModel.clear()
+        const rows = results.filter(d => showAll || isMuninn(d))
+        rows.sort((a, b) => (isMuninn(b) - isMuninn(a)) || (b.rssi - a.rssi))
+        for (let i = 0; i < rows.length; i++) deviceModel.append(rows[i])
+        for (let i = 0; i < deviceModel.count; i++) if (deviceModel.get(i).mac === keep) list.currentIndex = i
+    }
+    function counts() {
+        let m = 0, c = 0
+        for (let i = 0; i < results.length; i++) {
+            if (isMuninn(results[i])) m++
+            if (stateOf(results[i]) === "checking") c++
+        }
+        return { muninn: m, checking: c }
     }
 
-    // Scale-in animation on open
-    property real _scale: _open ? 1.0 : 0.92
-    Behavior on _scale {
-        NumberAnimation { duration: 200; easing.type: Easing.OutBack }
-    }
-
-    MouseArea {
-        anchors.fill: parent
-        onClicked: root.close()
+    Timer {   // probes resolve after the scan returns: refresh states live
+        interval: 900; repeat: true; running: root._open && root.results.length > 0
+        onTriggered: {
+            root.states = bridge.deviceStates(root.results.map(d => d.mac))
+            root.rebuild()
+        }
     }
 
     Rectangle {
         id: panel
         anchors.centerIn: parent
-        width: Math.min(480, parent.width - 40)
-        height: Math.min(420, parent.height - 40)
+        width: Math.min(560, parent.width - 40)
+        height: Math.min(520, parent.height - 40)
         color: Theme.surfaceRaised
-        radius: 10
-        border.color: Theme.accent
+        radius: 12
+        border.color: Theme.accentSoft
         border.width: 1
         transform: Scale { origin.x: panel.width / 2; origin.y: panel.height / 2; xScale: root._scale; yScale: root._scale }
-
-        MouseArea { anchors.fill: parent }  // block clicks reaching background
+        MouseArea { anchors.fill: parent }
 
         ColumnLayout {
             anchors.fill: parent
-            anchors.margins: 16
+            anchors.margins: 18
             spacing: 10
 
             RowLayout {
-                Text {
-                    text: "Bluetooth Scan"
-                    color: Theme.textPrimary
-                    font.pixelSize: 16
-                    font.bold: true
-                    Layout.fillWidth: true
-                }
-                Button {
-                    id: closeBtn
-                    text: "✕"
-                    flat: true
-                    activeFocusOnTab: true
-                    Keys.onReturnPressed: root.close()
-                    Keys.onEnterPressed: root.close()
-                    onClicked: root.close()
-                    contentItem: Text {
-                        text: closeBtn.text
-                        color: closeBtn.activeFocus ? Theme.textPrimary : Theme.textMuted
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Rectangle {
-                        color: closeBtn.activeFocus ? Theme.bg : "transparent"
-                        radius: 4
-                    }
-                }
+                Layout.fillWidth: true
+                Text { text: "People nearby"; color: Theme.textPrimary; font.pixelSize: 17; font.bold: true }
+                Item { Layout.fillWidth: true }
+                Pill { text: root.showAll ? "Muninn only (a)" : "Show all (a)"; onClicked: { root.showAll = !root.showAll; root.rebuild() } }
+                Pill { text: root.scanning ? "Looking…" : "⟳ Look again (s)"; accent: true; enabled: !root.scanning
+                       onClicked: root.startScan() }
+                Pill { text: "✕"; onClicked: root.close() }
             }
 
-            // Scan button + status
             RowLayout {
-                Button {
-                    id: scanBtn
-                    property bool scanning: false
-                    text: scanning ? "Scanning…" : "Scan (5 s)  [Enter / s]"
-                    enabled: !scanning
-                    focus: true
-                    activeFocusOnTab: true
-                    Keys.onReturnPressed: root.startScan()
-                    Keys.onEnterPressed: root.startScan()
-                    onClicked: root.startScan()
-                    contentItem: Text {
-                        text: scanBtn.text
-                        color: Theme.textPrimary
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Rectangle {
-                        color: scanBtn.enabled ? Theme.accent : Theme.textMuted
-                        radius: 6
-                        opacity: scanBtn.enabled ? 1.0 : 0.5
-                        border.color: scanBtn.activeFocus ? "white" : "transparent"
-                        border.width: 1
-                        Behavior on color {
-                            ColorAnimation { duration: 140; easing.type: Easing.OutQuad }
-                        }
-                    }
-                }
+                Layout.fillWidth: true
+                spacing: 8
+                BusyIndicator { running: root.scanning; visible: running; implicitWidth: 18; implicitHeight: 18 }
                 Text {
-                    id: statusText
-                    color: Theme.textMuted
-                    font.pixelSize: 12
                     Layout.fillWidth: true
+                    color: Theme.textMuted; font.pixelSize: 12; wrapMode: Text.Wrap
+                    text: {
+                        if (root.scanning) return "Looking around (about 6 s)…"
+                        if (!root.scans) return ""
+                        const c = root.counts()
+                        return "Saw " + root.results.length + " Bluetooth device" + (root.results.length === 1 ? "" : "s")
+                            + " · " + c.muninn + " running Muninn"
+                            + (c.checking ? " · checking " + c.checking + "…" : "")
+                    }
                 }
             }
 
-            // Device list — keyboard navigable. j/k or Up/Down moves selection,
-            // Enter pairs the highlighted device.
+            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.bg }
+
             ListView {
-                id: deviceList
+                id: list
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 model: ListModel { id: deviceModel }
                 clip: true
                 spacing: 2
-                activeFocusOnTab: true
                 currentIndex: 0
+                focus: true
                 keyNavigationEnabled: true
-                highlightMoveDuration: 120
-                Keys.onPressed: (event) => {
-                    if (event.key === Qt.Key_J) {
-                        if (currentIndex + 1 < count) currentIndex++
-                        event.accepted = true
-                    } else if (event.key === Qt.Key_K) {
-                        if (currentIndex > 0) currentIndex--
-                        event.accepted = true
-                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                        if (currentIndex >= 0) {
-                            const item = deviceModel.get(currentIndex)
-                            if (item && (item.muninn || item.maybe)) {
-                                statusText.text = "Connecting to " + (item.name || item.mac) + "…"
-                                bridge.pairDevice(item.mac)
-                            }
-                        }
-                        event.accepted = true
-                    }
-                }
+                highlightMoveDuration: 100
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-                delegate: ItemDelegate {
-                    id: devDel
-                    width: deviceList.width
-                    height: 44
-                    highlighted: ListView.isCurrentItem
-                    contentItem: RowLayout {
-                        spacing: 8
+                delegate: Rectangle {
+                    id: dev
+                    width: list.width
+                    height: 54
+                    radius: 8
+                    readonly property string st: root.stateOf(model)
+                    readonly property bool mun: root.isMuninn(model)
+                    readonly property bool busy: !!root.connecting[model.mac] || st === "checking"
+                    color: ListView.isCurrentItem ? Theme.accentSoft : rowMouse.containsMouse ? Theme.surface : "transparent"
+                    MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: list.currentIndex = index
+                                onDoubleClicked: root.connectTo(model) }
+                    RowLayout {
+                        anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                        spacing: 10
+                        Rectangle {
+                            width: 34; height: 34; radius: 17
+                            color: dev.mun ? Theme.accent : Theme.surface
+                            Text { anchors.centerIn: parent; color: "white"; font.pixelSize: 14; font.bold: true
+                                   text: (model.name || "?").charAt(0).toUpperCase() }
+                            Rectangle { visible: dev.st === "connected"; width: 10; height: 10; radius: 5
+                                        color: Theme.success; border.color: Theme.surfaceRaised; border.width: 2
+                                        anchors.right: parent.right; anchors.bottom: parent.bottom }
+                        }
                         Column {
+                            Layout.fillWidth: true
                             spacing: 2
+                            Text { text: model.name + (model.known ? "  · talked before" : ""); color: Theme.textPrimary
+                                   font.pixelSize: 13; elide: Text.ElideRight; width: parent.width }
                             Text {
-                                text: (model.muninn ? "★ " : "") + (model.name || model.mac)
-                                      + (model.known ? "  · known" : "")
-                                color: model.muninn ? Theme.textPrimary : Theme.textMuted
-                                font.pixelSize: 13
-                            }
-                            Text {
-                                text: model.mac
-                                color: Theme.textMuted
-                                font.pixelSize: 11
-                                visible: model.name !== model.mac
+                                text: (root.stateLabel[dev.st] || model.kind) + "  ·  " + model.mac
+                                color: dev.mun ? Theme.accent : Theme.textMuted
+                                font.pixelSize: 11; elide: Text.ElideRight; width: parent.width
                             }
                         }
-                        Item { Layout.fillWidth: true }
-                        Button {
-                            id: pairBtn
-                            text: model.muninn ? "Connect" : (model.maybe ? "Try" : model.kind)
-                            enabled: model.muninn || model.maybe
-                            activeFocusOnTab: true
-                            Keys.onReturnPressed: clicked()
-                            Keys.onEnterPressed: clicked()
-                            onClicked: {
-                                statusText.text = "Connecting to " + (model.name || model.mac) + "…"
-                                bridge.pairDevice(model.mac)
-                            }
-                            contentItem: Text {
-                                text: pairBtn.text
-                                color: "white"
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            background: Rectangle {
-                                color: pairBtn.enabled ? Theme.accent : Theme.surfaceRaised; radius: 5
-                                opacity: pairBtn.hovered ? 0.85 : 1.0
-                                border.color: pairBtn.activeFocus ? "white" : "transparent"
-                                border.width: 1
-                            }
+                        BusyIndicator { visible: dev.busy; running: visible; implicitWidth: 22; implicitHeight: 22 }
+                        Pill {
+                            visible: !dev.busy && dev.st !== "connected" && dev.st !== "ignored"
+                            text: dev.mun ? "Connect" : "Try"
+                            accent: dev.mun
+                            onClicked: root.connectTo(model)
                         }
                     }
-                    background: Rectangle {
-                        color: devDel.highlighted ? Qt.lighter(Theme.bg, 1.2)
-                             : devDel.hovered     ? Theme.bg
-                                                  : "transparent"
-                        radius: 4
-                        Behavior on color {
-                            ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
-                        }
-                    }
-                    onClicked: deviceList.currentIndex = index
                 }
             }
 
             Text {
-                visible: deviceModel.count === 0 && !scanBtn.scanning
-                text: "No devices found. Make sure remote is discoverable."
-                color: Theme.textMuted
-                font.pixelSize: 12
-                wrapMode: Text.Wrap
+                visible: deviceModel.count === 0 && !root.scanning && root.scans > 0
                 Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: Theme.textMuted; font.pixelSize: 12
+                text: root.results.length && !root.showAll
+                    ? "No Muninn devices in sight yet (press a to see everything nearby). "
+                      + "Phones only show up while visible: on the phone open Muninn → Nearby → “Make me visible”, then press s here."
+                    : "Nothing nearby answered. Is Bluetooth on? Phones must be made visible from Muninn's Nearby screen."
+            }
+
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: Theme.textMuted; font.pixelSize: 10; opacity: 0.8
+                text: "j/k move · Enter connect · s look again · a all devices · Esc close — "
+                      + "this computer stays visible to nearby phones while Muninn runs; strangers' headsets and watches are never contacted."
             }
         }
     }
 
+    component Pill: Rectangle {
+        id: pill
+        property alias text: lbl.text
+        property bool accent: false
+        signal clicked()
+        implicitHeight: 28; radius: 14
+        implicitWidth: lbl.implicitWidth + 22
+        opacity: enabled ? 1 : 0.5
+        color: accent ? (pm.containsMouse ? Qt.lighter(Theme.accent, 1.15) : Theme.accent)
+                      : (pm.containsMouse ? Theme.surface : "transparent")
+        border.color: accent ? "transparent" : Theme.accentSoft
+        Text { id: lbl; anchors.centerIn: parent; color: pill.accent ? "white" : Theme.textPrimary; font.pixelSize: 12 }
+        MouseArea { id: pm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    enabled: pill.enabled; onClicked: pill.clicked() }
+    }
+
+    function connectTo(d) {
+        if (!d || !d.mac) return
+        const c = Object.assign({}, connecting); c[d.mac] = true; connecting = c
+        bridge.pairDevice(d.mac)
+    }
     function open() {
         root._open = true
         root.opacity = 1
-        // Claim focus immediately *and* via Qt.callLater. The synchronous
-        // call wins when no other handler is competing; the deferred call
-        // wins when (e.g.) the palette's onVisibleChanged tries to bounce
-        // focus back to the chat pane while we're still opening.
-        scanBtn.forceActiveFocus()
-        Qt.callLater(function() { scanBtn.forceActiveFocus() })
+        list.forceActiveFocus()
+        if (!scanning) startScan()
     }
-    function close() {
-        root._open = false
-        root.opacity = 0
-    }
+    function grabFocus() { list.forceActiveFocus() }
+    function close() { root._open = false; root.opacity = 0 }
     function startScan() {
-        if (!scanBtn.enabled) return
-        scanBtn.scanning = true
-        statusText.text = ""
-        deviceModel.clear()
+        if (scanning) return
+        scanning = true
         bridge.startScan()
     }
 
     Connections {
         target: bridge
-        function onScanResultsReady(results) {
-            deviceModel.clear()
-            for (let i = 0; i < results.length; i++)
-                deviceModel.append(results[i])
-            // reset scanning flag on scan button — find it via parent chain
-            scanBtn.scanning = false
-            let n = 0
-            for (let i = 0; i < results.length; i++) if (results[i].muninn) n++
-            statusText.text = n + " Muninn device(s) nearby · " + (results.length - n) + " other"
+        function onScanResultsReady(res) {
+            root.results = res
+            root.states = ({})
+            root.scanning = false
+            root.scans++
+            root.rebuild()
         }
+        // a dial finished (either way): stop that row's spinner
+        function onNotify(_m) { root.connecting = ({}) }
+        function onErrorOccurred(_m) { root.connecting = ({}) }
     }
 
-    // Keyboard: Esc closes; `s` triggers a (re-)scan from anywhere in the
-    // dialog, so the user never has to tab back to the Scan button.
-    // Enter/Return is also handled here as a fallback when focus has moved
-    // to the device list (where Enter normally pairs the highlighted item):
-    // if there are no devices yet, route Enter to the scan button.
     Keys.onEscapePressed: root.close()
-    Keys.onPressed: (event) => {
-        if (event.modifiers & Qt.ControlModifier) return
-        if (event.key === Qt.Key_S) {
-            root.startScan()
-            event.accepted = true
-            return
-        }
-        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            if (deviceModel.count === 0) {
-                root.startScan()
-                event.accepted = true
-            }
+    Keys.onPressed: (e) => {
+        if (e.modifiers & Qt.ControlModifier) return
+        if (e.key === Qt.Key_S) { startScan(); e.accepted = true }
+        else if (e.key === Qt.Key_A) { showAll = !showAll; rebuild(); e.accepted = true }
+        else if (e.key === Qt.Key_J) { list.incrementCurrentIndex(); e.accepted = true }
+        else if (e.key === Qt.Key_K) { list.decrementCurrentIndex(); e.accepted = true }
+        else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
+            if (deviceModel.count) connectTo(deviceModel.get(list.currentIndex))
+            else startScan()
+            e.accepted = true
         }
     }
     focus: _open

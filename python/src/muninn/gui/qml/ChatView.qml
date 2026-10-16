@@ -70,18 +70,27 @@ Item {
             z: 1
             cacheBuffer: 2000
 
-            property bool _atBottom: true
-            onContentYChanged: _atBottom = visibleArea.heightRatio >= 1.0
-                || (contentY + height) >= (contentHeight - 40)
-            onCountChanged: if (_atBottom) Qt.callLater(positionViewAtEnd)
-            Component.onCompleted: Qt.callLater(positionViewAtEnd)
+            // Stick to the newest message unless the user scrolled up. Re-pin
+            // whenever the content grows (new bubble, an image finishing
+            // loading, reactions) — positioning once on insert isn't enough
+            // because the delegate's real height arrives a frame later.
+            property bool stick: true
+            property bool _pinning: false
+            function pin() {
+                if (!stick) return
+                _pinning = true; positionViewAtEnd(); _pinning = false
+            }
+            // any scroll that isn't ours (wheel, drag, keys) decides stickiness
+            onContentYChanged: if (!_pinning) stick = atYEnd || contentHeight <= height
+            onContentHeightChanged: Qt.callLater(pin)
+            onHeightChanged: Qt.callLater(pin)
+            onCountChanged: Qt.callLater(pin)
+            Component.onCompleted: Qt.callLater(pin)
 
             Connections {
                 target: bridge
-                function onActiveConvChanged(_c) {
-                    msgList._atBottom = true
-                    Qt.callLater(msgList.positionViewAtEnd)
-                }
+                function onActiveConvChanged(_c) { msgList.stick = true; Qt.callLater(msgList.pin) }
+                function onMessageSent() { msgList.stick = true; Qt.callLater(msgList.pin) }
                 function onSelectionChanged(row) {
                     if (row >= 0) msgList.positionViewAtIndex(row, ListView.Contain)
                 }
@@ -96,6 +105,28 @@ Item {
             }
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+            // empty states
+            Column {
+                anchors.centerIn: parent
+                spacing: 8
+                visible: root.convId === "" || msgList.count === 0
+                width: Math.min(parent.width - 60, 420)
+                Text { anchors.horizontalCenter: parent.horizontalCenter; font.pixelSize: 34
+                       text: root.convId === "" ? "🐦‍⬛" : "👋"; color: Theme.textMuted }
+                Text {
+                    width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
+                    color: Theme.textPrimary; font.pixelSize: 14
+                    text: root.convId === "" ? "No conversation open" : "Say hi to " + bridge.activeTitle
+                }
+                Text {
+                    width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap
+                    color: Theme.textMuted; font.pixelSize: 12
+                    text: root.convId === ""
+                        ? "Pick someone on the left, or press Space then s to find people nearby. Ctrl+N / Ctrl+P switch chats, Space f opens the palette."
+                        : "Messages are end-to-end encrypted and are delivered as soon as they're in range — directly or through other people's devices."
+                }
+            }
+
             delegate: Item {
                 id: row
                 width: msgList.width
@@ -103,6 +134,9 @@ Item {
                 property bool outbound: model.isOutbound
                 property bool system: model.kind === "system"
                 property real maxW: Math.min(msgList.width * 0.72, 560)
+                // the whole row (bubble, gap, action bar) counts as "hovered",
+                // so the bar doesn't vanish on the way to it
+                HoverHandler { id: rowHover }
 
                 Column {
                     id: col
@@ -356,12 +390,11 @@ Item {
                         Row {
                             id: actions
                             spacing: 2
-                            visible: (bubbleMouse.containsMouse || barHover.hovered) && !model.deleted
+                            visible: rowHover.hovered && !model.deleted && !row.system
                             anchors.verticalCenter: bubble.verticalCenter
                             anchors.right: row.outbound ? bubble.left : undefined
                             anchors.left: row.outbound ? undefined : bubble.right
                             anchors.margins: 6
-                            HoverHandler { id: barHover }
                             Repeater {
                                 model: ["👍", "❤️", "😂"]
                                 ActionChip { label: modelData; onClicked: bridge.toggleReaction(model.msgId, modelData) }
@@ -372,35 +405,33 @@ Item {
 
                         Menu {
                             id: ctx
-                            MenuItem { text: "Reply"; onTriggered: bridge.replyTo(model.msgId) }
-                            MenuItem { text: "React…"; onTriggered: root.reactRequested(model.msgId) }
-                            MenuItem { text: "Copy text"; enabled: model.text !== ""; onTriggered: bridge.copyText(model.msgId) }
-                            MenuItem { text: "Edit"; visible: row.outbound && model.kind === "text"; height: visible ? implicitHeight : 0
-                                       onTriggered: bridge.startEdit(model.msgId) }
-                            MenuItem { text: "Delete for everyone"; visible: row.outbound; height: visible ? implicitHeight : 0
-                                       onTriggered: bridge.deleteMessage(model.msgId) }
-                            MenuItem { text: model.fileState === "complete" ? "Open file" : "Download"
-                                       visible: model.kind === "file"; height: visible ? implicitHeight : 0
-                                       onTriggered: bridge.openFile(model.msgId) }
-                            MenuItem { text: "Show in folder"; visible: model.fileState === "complete"
-                                       height: visible ? implicitHeight : 0; onTriggered: bridge.openFolder(model.msgId) }
-                            MenuItem { text: "Save to my stickers"; visible: model.fileState === "complete" && model.isImage
-                                       height: visible ? implicitHeight : 0; onTriggered: bridge.saveSticker(model.msgId) }
-                            MenuItem { text: "Install game"; visible: model.fileState === "complete" && model.fileName.endsWith(".js")
-                                       height: visible ? implicitHeight : 0; onTriggered: bridge.installGame(model.msgId) }
+                            padding: 6
+                            background: Rectangle {
+                                implicitWidth: 230
+                                color: Theme.surfaceRaised; radius: 10
+                                border.color: Theme.accentSoft; border.width: 1
+                            }
+                            CtxItem { text: "Reply"; hint: "r"; onTriggered: bridge.replyTo(model.msgId) }
+                            CtxItem { text: "React…"; hint: "+"; onTriggered: { bridge.selectMessage(model.msgId); root.reactRequested(model.msgId) } }
+                            CtxItem { text: "Copy text"; hint: "y"; shown: model.text !== ""; onTriggered: bridge.copyText(model.msgId) }
+                            CtxItem { text: "Edit"; hint: "e"; shown: row.outbound && model.kind === "text" && !model.deleted
+                                      onTriggered: bridge.startEdit(model.msgId) }
+                            CtxItem { text: model.fileState === "complete" ? "Open file" : "Download"; hint: "o"
+                                      shown: model.kind === "file"; onTriggered: bridge.openFile(model.msgId) }
+                            CtxItem { text: "Show in folder"; shown: model.fileState === "complete"
+                                      onTriggered: bridge.openFolder(model.msgId) }
+                            CtxItem { text: "Save to my stickers"; shown: model.fileState === "complete" && model.isImage
+                                      onTriggered: bridge.saveSticker(model.msgId) }
+                            CtxItem { text: "Install game"; shown: model.fileState === "complete" && model.fileName.endsWith(".js")
+                                      onTriggered: bridge.installGame(model.msgId) }
+                            CtxItem { text: "Delete for everyone"; hint: "dd"; danger: true
+                                      shown: row.outbound && !model.deleted; onTriggered: bridge.deleteMessage(model.msgId) }
                         }
                     }
                 }
             }
         }
 
-        // empty state
-        Text {
-            visible: root.convId === ""
-            Layout.alignment: Qt.AlignHCenter
-            text: "Pick a conversation on the left, or press <space>s to find people nearby."
-            color: Theme.textMuted; font.pixelSize: 12
-        }
 
         // reply / edit banner
         Rectangle {
@@ -426,7 +457,8 @@ Item {
         Composer {
             id: composer
             Layout.fillWidth: true
-            Layout.preferredHeight: height
+            Layout.preferredHeight: root.convId !== "" ? height : 0
+            visible: root.convId !== ""
             convId: root.convId
             z: 2
             onActiveFocusChanged: if (activeFocus) forceActiveFocus()
@@ -443,6 +475,29 @@ Item {
         ToolTip.visible: hb.containsMouse && tip !== ""
         ToolTip.text: tip
         MouseArea { id: hb; anchors.fill: parent; hoverEnabled: true; onClicked: parent.clicked() }
+    }
+
+    // Dark context-menu row with an optional vim key hint. `shown: false`
+    // collapses it (Menu has no per-item visibility).
+    component CtxItem: MenuItem {
+        id: ci
+        property string hint
+        property bool danger: false
+        property bool shown: true
+        visible: shown
+        height: shown ? 30 : 0
+        leftPadding: 10; rightPadding: 10
+        contentItem: Item {
+            implicitHeight: 30
+            Text { anchors.verticalCenter: parent.verticalCenter; text: ci.text; font.pixelSize: 13
+                   color: !ci.enabled ? Theme.textMuted : ci.danger ? Theme.error : Theme.textPrimary }
+            Text { anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right
+                   text: ci.hint; color: Theme.textMuted; font.pixelSize: 11 }
+        }
+        background: Rectangle {
+            radius: 6
+            color: ci.highlighted ? (ci.danger ? "#3f1d24" : Theme.accentSoft) : "transparent"
+        }
     }
 
     component ActionChip: Rectangle {

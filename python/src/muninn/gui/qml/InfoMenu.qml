@@ -33,10 +33,11 @@ Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.topMargin: 80
         width: Math.min(560, parent.width - 40)
-        height: Math.min(440, parent.height - 160)
+        // fit the content; scroll only when it really doesn't fit
+        height: Math.min(header.height + 1 + itemList.contentHeight + 44, parent.height - 120)
         color: Theme.surfaceRaised
-        radius: 10
-        border.color: Theme.accent
+        radius: 12
+        border.color: Theme.accentSoft
         border.width: 1
         transform: Scale {
             origin.x: panel.width / 2; origin.y: panel.height / 2
@@ -69,7 +70,7 @@ Rectangle {
             ListView {
                 id: itemList
                 width: parent.width
-                height: parent.height - header.height - 16
+                height: parent.height - header.height - 9
                 model: ListModel { id: itemModel; dynamicRoles: true }
                 currentIndex: 0
                 clip: true
@@ -102,32 +103,39 @@ Rectangle {
                 delegate: ItemDelegate {
                     id: rowDel
                     width: itemList.width
-                    height: 44
+                    height: (model.sub || "") !== "" ? 46 : 34
+                    padding: 0; leftPadding: 14; rightPadding: 10
                     highlighted: itemList.currentIndex === index
                     background: Rectangle {
-                        color: rowDel.highlighted ? Theme.accent
-                             : rowDel.hovered     ? Theme.bg
+                        color: rowDel.highlighted ? Theme.accentSoft
+                             : rowDel.hovered     ? Theme.surface
                                                   : "transparent"
-                        radius: 5
-                        opacity: rowDel.highlighted ? 0.65 : 1.0
+                        radius: 6
+                        Rectangle { visible: rowDel.highlighted; width: 3; radius: 2; color: Theme.accent
+                                    anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+                                    anchors.margins: 6 }
                         Behavior on color {
-                            ColorAnimation { duration: 120; easing.type: Easing.OutQuad }
+                            ColorAnimation { duration: 100; easing.type: Easing.OutQuad }
                         }
                     }
-                    contentItem: Column {
-                        spacing: 2
-                        anchors.verticalCenter: parent.verticalCenter
-                        Text {
-                            text: model.label
-                            color: Theme.textPrimary
-                            font.pixelSize: 13
-                            font.bold: rowDel.highlighted
-                        }
-                        Text {
-                            text: model.sub || ""
-                            color: Theme.textMuted
-                            font.pixelSize: 11
-                            visible: text.length > 0
+                    contentItem: Item {
+                        Column {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width
+                            spacing: 2
+                            Text {
+                                width: parent.width; elide: Text.ElideRight
+                                text: model.label
+                                color: Theme.textPrimary
+                                font.pixelSize: 13
+                            }
+                            Text {
+                                width: parent.width; elide: Text.ElideRight
+                                text: model.sub || ""
+                                color: Theme.textMuted
+                                font.pixelSize: 11
+                                visible: text.length > 0
+                            }
                         }
                     }
                     onClicked: { itemList.currentIndex = index; root.activate() }
@@ -147,6 +155,7 @@ Rectangle {
         itemList.forceActiveFocus()
     }
 
+    function grabFocus() { itemList.forceActiveFocus() }
     function close() {
         root._open = false
         root.opacity = 0

@@ -27,6 +27,7 @@ Item {
         opacity = 1
         search.forceActiveFocus()
     }
+    function grabFocus() { search.forceActiveFocus() }
     function close() { opacity = 0 }
     function pick(e) {
         if (mode === "react") bridge.toggleReaction(targetMsg, e)

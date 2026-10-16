@@ -9,6 +9,7 @@ Rectangle {
     visible: opacity > 0
     opacity: bridge.localName === "" ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 160 } }
+    function grabFocus() { nameField.forceActiveFocus() }
     onVisibleChanged: if (visible) nameField.forceActiveFocus()
     Component.onCompleted: if (visible) nameField.forceActiveFocus()
 

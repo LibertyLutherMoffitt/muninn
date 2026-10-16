@@ -42,6 +42,7 @@ Rectangle {
                 case "VISUAL":
                 case "VISUAL_LINE": return Theme.success
                 case "CMDLINE":     return "#f59e0b"
+                case "MESSAGES":    return "#0ea5e9"
                 default:            return "transparent"
             }
         }
@@ -62,6 +63,7 @@ Rectangle {
                 case "VISUAL":
                 case "VISUAL_LINE": return Theme.success
                 case "CMDLINE":     return "#f59e0b"
+                case "MESSAGES":    return "#0ea5e9"
                 default:            return "transparent"
             }
         }
@@ -79,7 +81,9 @@ Rectangle {
         Text {
             id: modeLabel
             anchors.centerIn: parent
-            text: vimEditor ? "-- " + vimEditor.mode + " --" : ""
+            text: !vimEditor ? ""
+                : vimEditor.mode === "MESSAGES" ? "MESSAGES  j/k ↵reply e edit + react 1-8 dd y o  Esc"
+                : "-- " + vimEditor.mode + " --"
             color: "white"
             font.pixelSize: 12
             font.bold: true
@@ -139,7 +143,8 @@ Rectangle {
 
             Text {
                 visible: edit.text === "" && vimEditor && vimEditor.mode === "NORMAL"
-                text: root.convId ? "Press 'i' to type…  (:help for commands)" : ""
+                x: 14
+                text: root.convId ? "Press i to type · k to pick a message · : for commands" : ""
                 color: Theme.textMuted; font: edit.font; opacity: 0.5
             }
 

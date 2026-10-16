@@ -11,6 +11,7 @@ Rectangle {
     Behavior on opacity { NumberAnimation { duration: 120 } }
 
     function open(url) { source = url; opacity = 1; forceActiveFocus() }
+    function grabFocus() { forceActiveFocus() }
     function close() { opacity = 0; source = "" }
 
     AnimatedImage {

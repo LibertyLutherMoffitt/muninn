@@ -6,7 +6,7 @@ import QtQuick.Layouts
 // code comes from the session's invite, so all players run identical rules.
 Rectangle {
     id: root
-    color: "#ee0f1115"
+    color: Theme.bg
     visible: opacity > 0
     opacity: 0
     focus: visible
@@ -50,6 +50,7 @@ Rectangle {
         opacity = 1
         forceActiveFocus()
     }
+    function grabFocus() { forceActiveFocus() }
     function close() { opacity = 0; rtTimer.running = false }
 
     function view() {
@@ -133,11 +134,12 @@ Rectangle {
             Text { text: (root.info.icon || "🎮") + "  " + (root.info.name || "Game")
                    color: Theme.textPrimary; font.pixelSize: 18; font.bold: true }
             Item { Layout.fillWidth: true }
-            Button { text: "Resign"; visible: !!(root.info.started && !root.info.ended && root.info.amPlayer && !root.st.over)
-                     onClicked: bridge.gameAction(root.session, "resign", {}) }
-            Button { text: "⤢ Fit (0)"; visible: root.zoom > 1
-                     onClicked: { root.zoom = 1; root.clampPan(); board.requestPaint() } }
-            Button { text: "Close (Esc)"; onClicked: root.close() }
+            GButton { text: "⤢ Fit (0)"; visible: root.zoom > 1
+                      onClicked: { root.zoom = 1; root.clampPan(); board.requestPaint() } }
+            GButton { text: "Resign"; danger: true
+                      visible: !!(root.info.started && !root.info.ended && root.info.amPlayer && !root.st.over)
+                      onClicked: bridge.gameAction(root.session, "resign", {}) }
+            GButton { text: "Close  Esc"; onClicked: root.close() }
         }
 
         Text {
@@ -156,13 +158,13 @@ Rectangle {
         RowLayout {
             visible: !!root.info.session && !root.info.started && !root.info.ended
             spacing: 8
-            Button { text: "Join"; visible: !!(root.info.invitedMe === true)
-                     onClicked: bridge.gameAction(root.session, "join", {}) }
-            Button { text: "Decline"; visible: !!(root.info.invitedMe === true)
-                     onClicked: { bridge.gameAction(root.session, "decline", {}); root.close() } }
-            Button { text: "Start now"
-                     visible: !!(root.info.creator === root.info.me && (root.info.joined || []).length >= (root.info.min || 2))
-                     onClicked: bridge.gameAction(root.session, "start", { players: root.info.joined }) }
+            GButton { text: "Join"; accent: true; visible: !!(root.info.invitedMe === true)
+                      onClicked: bridge.gameAction(root.session, "join", {}) }
+            GButton { text: "Decline"; visible: !!(root.info.invitedMe === true)
+                      onClicked: { bridge.gameAction(root.session, "decline", {}); root.close() } }
+            GButton { text: "Start now"; accent: true
+                      visible: !!(root.info.creator === root.info.me && (root.info.joined || []).length >= (root.info.min || 2))
+                      onClicked: bridge.gameAction(root.session, "start", { players: root.info.joined }) }
         }
 
         Item {
@@ -207,6 +209,22 @@ Rectangle {
                 }
             }
         }
+    }
+
+    component GButton: Rectangle {
+        id: gb
+        property alias text: gbl.text
+        property bool accent: false
+        property bool danger: false
+        signal clicked()
+        implicitHeight: 30; radius: 15; implicitWidth: gbl.implicitWidth + 26
+        color: accent ? (gbm.containsMouse ? Qt.lighter(Theme.accent, 1.15) : Theme.accent)
+                      : gbm.containsMouse ? Theme.surfaceRaised : "transparent"
+        border.color: accent ? "transparent" : danger ? Theme.error : Theme.accentSoft
+        Text { id: gbl; anchors.centerIn: parent; font.pixelSize: 12
+               color: gb.accent ? "white" : gb.danger ? Theme.error : Theme.textPrimary }
+        MouseArea { id: gbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: gb.clicked() }
     }
 
     Keys.onEscapePressed: root.close()

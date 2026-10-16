@@ -6,8 +6,8 @@ import QtQuick.Dialogs
 ApplicationWindow {
     id: root
     title: "Muninn"
-    width: 960
-    height: 640
+    width: 1120
+    height: 740
     minimumWidth: 800
     minimumHeight: 500
     visible: true
@@ -19,7 +19,8 @@ ApplicationWindow {
 
     // Initial focus on the chat pane so Vim commands work immediately
     Component.onCompleted: {
-        chatPane.forceActiveFocus()
+        if (welcome.visible) overlayVisibility(welcome)  // first run: name prompt
+        else chatPane.forceActiveFocus()
     }
 
     // ------------------------------------------------------------------
@@ -43,7 +44,7 @@ ApplicationWindow {
                 onConvSelected: (cid) => {
                     const prev = bridge.activeConvId
                     bridge.setActiveConv(cid)
-                    chatPane.forceActiveFocus()
+                    root.refocus()
                     if (prev !== cid) root._trailConvCycle(prev, cid)
                 }
             }
@@ -90,8 +91,10 @@ ApplicationWindow {
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "● " + bridge.connectedPeerCount + " nearby · "
-                          + bridge.reachablePeerCount + " reachable"
+                    // same wording as the terminal client
+                    text: "● " + bridge.connectedPeerCount + " connected"
+                          + (bridge.reachablePeerCount > bridge.connectedPeerCount
+                             ? " · " + (bridge.reachablePeerCount - bridge.connectedPeerCount) + " via relay" : "")
                     color: bridge.connectedPeerCount > 0 ? Theme.success : Theme.textMuted
                     font.pixelSize: 11
                 }
@@ -271,16 +274,36 @@ ApplicationWindow {
         onAccepted: bridge.sendFiles(selectedFiles)
     }
 
-    Welcome { anchors.fill: parent; z: 50
-        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
-    EmojiPicker { id: emojiPicker; anchors.fill: parent; z: 12
-        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
-    ImageViewer { id: imageViewer; anchors.fill: parent; z: 13
-        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
-    GameView { id: gameView; anchors.fill: parent; z: 11
-        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
+    // ---- focus: the most recently opened overlay that is still visible owns
+    // the keyboard; with none open, the chat (composer) does. Overlays never
+    // hand focus back to the chat themselves — that used to steal it from an
+    // overlay opened by another one (e.g. a game launched from a menu).
+    property var focusStack: []
+    function overlayVisibility(o) {
+        const st = focusStack.filter(x => x !== o)
+        if (o.visible) st.push(o)
+        focusStack = st
+        Qt.callLater(refocus)
+    }
+    function refocus() {
+        for (let i = focusStack.length - 1; i >= 0; i--) {
+            const o = focusStack[i]
+            if (o.visible) { o.grabFocus(); return }
+        }
+        chatPane.forceActiveFocus()
+    }
 
-    ScanDialog { id: scanDialog; anchors.fill: parent; z: 10 }
+    Welcome { id: welcome; anchors.fill: parent; z: 50
+        onVisibleChanged: root.overlayVisibility(welcome) }
+    EmojiPicker { id: emojiPicker; anchors.fill: parent; z: 12
+        onVisibleChanged: root.overlayVisibility(emojiPicker) }
+    ImageViewer { id: imageViewer; anchors.fill: parent; z: 13
+        onVisibleChanged: root.overlayVisibility(imageViewer) }
+    GameView { id: gameView; anchors.fill: parent; z: 11
+        onVisibleChanged: root.overlayVisibility(gameView) }
+
+    ScanDialog { id: scanDialog; anchors.fill: parent; z: 10
+        onVisibleChanged: root.overlayVisibility(scanDialog) }
 
     CommandPalette {
         id: cmdPalette
@@ -288,8 +311,9 @@ ApplicationWindow {
         z: 10
         onConvSelected: (convId) => {
             bridge.setActiveConv(convId)
-            chatPane.forceActiveFocus()
+            root.refocus()
         }
+        onVisibleChanged: root.overlayVisibility(cmdPalette)
     }
 
     InfoMenu {
@@ -298,9 +322,10 @@ ApplicationWindow {
         z: 11
         onConvSelected: (convId) => {
             bridge.setActiveConv(convId)
-            chatPane.forceActiveFocus()
+            root.refocus()
         }
         onGameSelected: (sid) => gameView.open(sid)
+        onVisibleChanged: root.overlayVisibility(infoMenu)
     }
 
     // Top-most overlay: animated dots that fly along a polyline whenever
@@ -393,7 +418,7 @@ ApplicationWindow {
             // drafts let the user start a message in DM A, switch to DM B,
             // then return to DM A and finish without losing anything.
             vimEditor.swapDraft(convId)
-            chatPane.forceActiveFocus()
+            root.refocus()
         }
         function onQuitRequested() { Qt.quit() }
         function onScanRequested() { scanDialog.open() }
@@ -419,6 +444,8 @@ ApplicationWindow {
         function onPaletteRequested(initial) { cmdPalette.open(initial) }
         function onScanRequested() { scanDialog.open() }
         function onCommandRequested(cmd) { bridge.runCommand(cmd) }
+        function onMessageNav(d) { if (!bridge.moveSelection(d)) vimEditor.leaveMessages() }
+        function onMessageAction(a) { bridge.messageAction(a) }
     }
 
     // Restore focus to the chat pane whenever an overlay closes, and fire
@@ -429,25 +456,9 @@ ApplicationWindow {
             if (cmdPalette.visible) {
                 root._trailComposerToPalette()
             } else {
-                // Don't yank focus back to chat if the palette closed because
-                // a different overlay (scan / info menu) just opened — that
-                // overlay needs to keep focus to receive Enter.
-                if (!infoMenu.visible && !scanDialog.visible)
-                    chatPane.forceActiveFocus()
                 root._trailPaletteToComposer()
             }
         }
     }
-    Connections {
-        target: scanDialog
-        function onVisibleChanged() {
-            if (!scanDialog.visible) chatPane.forceActiveFocus()
-        }
-    }
-    Connections {
-        target: infoMenu
-        function onVisibleChanged() {
-            if (!infoMenu.visible) chatPane.forceActiveFocus()
-        }
-    }
+
 }

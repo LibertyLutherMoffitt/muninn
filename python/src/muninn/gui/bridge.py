@@ -62,6 +62,7 @@ class ChatBridge(QObject):
     replyTargetChanged = Signal()
     editTargetChanged = Signal(str)  # text to load into composer
     selectionChanged = Signal(int)  # row index to scroll to
+    messageSent = Signal()  # the chat view jumps to the bottom
     typingChanged = Signal()
     filePickRequested = Signal()
     emojiPickerRequested = Signal(str)  # mode: "insert" | "react"
@@ -120,6 +121,8 @@ class ChatBridge(QObject):
         self._peers.update_conv(m.conv)
         if m.conv == self._active:
             self._msgs.append(m)
+            if m.sender == self.mesh.node_id:  # text, file or sticker we sent
+                self.messageSent.emit()
             if m.sender != self.mesh.node_id and self._window_focused():
                 self.mesh.mark_read(m.conv)
                 self._peers.update_conv(m.conv)
@@ -347,15 +350,54 @@ class ChatBridge(QObject):
         self._msgs.select(msg_id)
         self.selectionChanged.emit(self._msgs.row_of(msg_id))
 
-    @Slot(int)
-    def moveSelection(self, delta: int) -> None:
+    @Slot(int, result=bool)
+    def moveSelection(self, delta: int) -> bool:
+        """Move the message selection; delta 0 = newest. False when moving
+        down past the newest message (the caller returns to the composer)."""
         ids = self._msgs.ids()
         if not ids:
-            return
+            return False
         cur = self._msgs.selected
-        i = ids.index(cur) if cur in ids else (len(ids) if delta < 0 else -1)
-        i = max(0, min(len(ids) - 1, i + delta))
+        if delta == 0 or cur not in ids:
+            i = len(ids) - 1
+        else:
+            i = ids.index(cur) + delta
+            if i >= len(ids):
+                self.selectMessage("")
+                return False
+            i = max(0, i)
         self.selectMessage(ids[i])
+        return True
+
+    @Slot(str)
+    def messageAction(self, action: str) -> None:
+        """Vim MESSAGES-mode verbs on the selected message."""
+        mid = self._msgs.selected
+        ids = self._msgs.ids()
+        if action == "clear":
+            if not (self._reply_to or self._edit_id):
+                self.selectMessage("")
+            return
+        if action in ("first", "last") and ids:
+            self.selectMessage(ids[0] if action == "first" else ids[-1])
+            return
+        if not mid:
+            return
+        if action == "reply":
+            self.replyTo(mid)
+        elif action == "react":
+            self.emojiPickerRequested.emit("react")
+        elif action.startswith("quick:"):
+            self.toggleReaction(mid, emoji.QUICK_REACTIONS[int(action[6:]) - 1])
+        elif action == "edit":
+            self.startEdit(mid)
+        elif action == "delete":
+            self.deleteMessage(mid)
+        elif action == "copy":
+            self.copyText(mid)
+            self.notify.emit("copied")
+        elif action == "open":
+            self.openFile(mid)
 
     def _target(self) -> str:
         """Selected message, or the newest message from someone else."""
@@ -570,6 +612,8 @@ class ChatBridge(QObject):
                             "maybe": r.probeable,
                             "kind": r.kind,
                             "known": r.addr in known,
+                            "rssi": r.rssi if r.rssi is not None else -127,
+                            "state": self.node.device_state(r.addr),
                         }
                         for r in res
                     ),
@@ -581,6 +625,11 @@ class ChatBridge(QObject):
                 self.scanResultsReady.emit([])
 
         threading.Thread(target=run, daemon=True).start()
+
+    @Slot(list, result=dict)
+    def deviceStates(self, addrs: list) -> dict:
+        """Live per-device state for the scan dialog (probes finish later)."""
+        return {a: self.node.device_state(a) for a in addrs}
 
     @Slot(str)
     def pairDevice(self, addr: str) -> None:
@@ -726,7 +775,11 @@ class ChatBridge(QObject):
         (":search <words>", "find messages in all chats"),
         (":nick <name>", "set your display name"),
         (":nick <peer> <name>", 'local nickname for a peer ("" clears)'),
-        (":reply [text]", "reply to selected message (Alt+↑/↓ selects, Alt+R)"),
+        (
+            "k  (normal mode)",
+            "pick a message: j/k move, Enter/r reply, e edit, + react, 1-8 quick react, dd delete, y copy, o open, Esc back",
+        ),
+        (":reply [text]", "reply to selected message (or Alt+↑/↓ then Alt+R)"),
         (":react <emoji>", "react to selected message, e.g. :react :fire: (Alt+E)"),
         (":edit / :delete", "edit or delete your selected/last message"),
         (":file [path]", "send a file or picture (or drag & drop)"),

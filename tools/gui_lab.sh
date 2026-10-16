@@ -19,7 +19,7 @@ start)
   "$0" stop >/dev/null 2>&1
   rm -rf "$S/gl"; mkdir -p "$S/gl"
   Xvfb "$DISPLAY" -screen 0 "${MUNINN_LAB_SIZE:-1280x800}x24" >/dev/null 2>&1 & echo $! >> "$S/gl/pids"
-  python -m muninn.sim.hub --port 7440 > "$S/gl/hub.log" 2>&1 & echo $! >> "$S/gl/pids"
+  python -m muninn.sim.hub --port 7440 --decoys 30 > "$S/gl/hub.log" 2>&1 & echo $! >> "$S/gl/pids"
   sleep 1.5
   MUNINN_SIM=127.0.0.1:7440 python -m muninn.bot --name bob --pos 1,0 --echo --react --play \
     --control 7541 --data "$S/gl/bob" > "$S/gl/bob.log" 2>&1 & echo $! >> "$S/gl/pids"
