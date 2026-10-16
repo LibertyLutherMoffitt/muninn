@@ -79,6 +79,7 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/vim [on|off]              vim keys in the full-screen client (default on)
 /search <words>            find messages in all chats
 /quit
 Text supports :shortcodes: like :thumbsup: :airplane: :joy:"""

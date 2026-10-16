@@ -7,10 +7,13 @@
     └───────────────┘└────────────────────────────────────────────────┘
      > message, or /command                     me · 2 connected · balanced
 
-Keys: Enter send · Tab / Ctrl-N, Shift-Tab / Ctrl-P switch conversation ·
-PgUp/PgDn scroll · Esc message mode (↑↓ select, r reply, e edit, d delete,
-1-8 quick react, + react with :shortcode:, o open/download, y copy text, Esc
-back) · Ctrl-L redraw · /help for commands · /quit.
+Vim keys by default (the same engine as the desktop GUI; `/vim off` for a
+plain line editor): you start in INSERT, Esc → NORMAL with motions, operators,
+text objects, registers, undo/redo, visual mode; `:` runs a command (`:q`,
+`:dm bob`, `:help`); `k` on the top line walks up into the messages (j/k,
+Enter/r reply, e edit, + react, 1-8 quick react, dd delete, y copy, o open,
+Esc back). Always: Enter sends · Tab / Ctrl-N, Shift-Tab / Ctrl-P switch
+conversation · PgUp/PgDn (NORMAL: Ctrl-U/Ctrl-D) scroll · Ctrl-L redraw.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ import unicodedata
 
 from muninn import emoji
 from muninn.cli import ChatUI
+from muninn.gui import vim as vimcore
 from muninn.instance import AlreadyRunning
 from muninn.mesh import conv_group_id, dm_conv
 from muninn.node import Node, default_transport
@@ -85,7 +89,29 @@ class Tui(ChatUI):
         self.panel_scroll = 0
         self._capture: list[str] | None = None
         self._full_redraw = False
+        self._quit = False
+        self.cmdline = ""
         super().__init__(node)
+        self.vim_on = self.mesh.storage.get_setting("tui_vim") != "off"
+        self.vim = vimcore.VimEditor()
+        v = self.vim
+        v.bufferUpdated.connect(self._vim_buffer)
+        v.sendRequested.connect(self._vim_send)
+        v.commandRequested.connect(self._vim_command)
+        v.cmdLineChanged.connect(self._vim_cmdline)
+        v.quitRequested.connect(self._vim_quit)
+        v.scrollRequested.connect(self._vim_scroll)
+        v.convCycleRequested.connect(self.cycle)
+        v.paletteRequested.connect(
+            lambda i: (
+                v.openCmdline() if i.startswith(":") else self._vim_command("list")
+            )
+        )
+        v.scanRequested.connect(lambda: self._vim_command("scan"))
+        v.messageNav.connect(self._vim_msg_nav)
+        v.messageAction.connect(self._vim_msg_action)
+        v.handleKey("i", 0x49, False, False, False)  # start typing right away
+        vimcore.clipboard_setter = _copy_to_clipboard
 
     # --- ChatUI hooks: route output into the TUI ---------------------------
 
@@ -395,8 +421,13 @@ class Tui(ChatUI):
         if relayed:
             status += f" · {relayed} via relay"
         status += f" · {self.node.policy.name} "
+        vm = str(self.vim.mode) if self.vim_on else ""
         if self.panel:
             prompt = " ↑↓ scroll · Esc/q/Enter close "
+        elif vm == "CMDLINE":
+            prompt = " :"
+        elif vm == "MESSAGES":
+            prompt = " MESSAGES j/k ↵reply e edit + react 1-8 dd y o Esc "
         elif self.mode == "select":
             prompt = (
                 " [msg] ↑↓ r:reply e:edit d:delete 1-8/+:react o:open y:copy Esc:back "
@@ -407,7 +438,11 @@ class Tui(ChatUI):
             o = self.mesh.storage.get_message(self.reply_to)
             prompt = f" ↪ {clip(o.text if o else '', 18)} > "
         else:
-            prompt = " > "
+            prompt = {"NORMAL": " ▪ ", "VISUAL": " v ", "VISUAL_LINE": " V "}.get(
+                vm, " > "
+            )
+        if vm in ("NORMAL", "VISUAL", "VISUAL_LINE", "INSERT"):
+            status = f" {vm.lower().replace('_', ' ')} ·" + status
         scr.addstr(h - 2, 0, "─" * (w - 1), C(4))
         status = clip(status, w - 4)
         scr.addstr(h - 2, max(0, w - cwidth(status) - 2), status, C(4))
@@ -416,15 +451,20 @@ class Tui(ChatUI):
             curses.curs_set(0)
             return
         avail = w - cwidth(prompt) - 2
-        text = self.input
+        text = self.cmdline.lstrip(":") if vm == "CMDLINE" else self.input
+        if vm == "CMDLINE":
+            self.cursor = len(text)
+        elif vm == "MESSAGES":
+            text = ""
+        text = text.replace("\n", "⏎")
         start = 0
         while cwidth(text[start : self.cursor]) > avail:
             start += 1
         shown = clip(text[start:], avail)
         scr.addstr(h - 1, cwidth(prompt), shown)
-        if self.mode == "type":
+        if self.mode == "type" or vm == "CMDLINE":
             try:
-                curses.curs_set(1)
+                curses.curs_set(2 if vm in ("NORMAL", "VISUAL", "VISUAL_LINE") else 1)
                 scr.move(h - 1, cwidth(prompt) + cwidth(text[start : self.cursor]))
             except curses.error:
                 pass
@@ -436,10 +476,20 @@ class Tui(ChatUI):
     def submit(self) -> bool:
         line = self.input.strip()
         self.input, self.cursor = "", 0
+        return self.run_line(line)
+
+    def run_line(self, line: str) -> bool:
         if not line:
             return True
         self.history.append(line)
         self.hist_i = len(self.history)
+        if line.split()[0] in ("/vim",):
+            arg = (line.split() + [""])[1]
+            self.vim_on = arg != "off" if arg else not self.vim_on
+            self.mesh.storage.set_setting("tui_vim", "on" if self.vim_on else "off")
+            self.mode, self.sel = "type", -1
+            self.out(f"  vim keys {'on' if self.vim_on else 'off'}")
+            return True
         if line.startswith("/"):
             self._capture = []
             try:
@@ -529,6 +579,112 @@ class Tui(ChatUI):
                 self.out("  downloading…")
         elif k == "y":
             self.out("  " + m.text)
+
+    # --- vim front end ---------------------------------------------------------
+
+    def _vim_buffer(self, text: str, pos: int) -> None:
+        if text != self.input and text and self.vim.mode == "INSERT":
+            now = time.monotonic()
+            if self.conv and not text.startswith("/") and now - self.last_typing > 3:
+                self.last_typing = now
+                try:
+                    self.mesh.send_typing(self.conv)
+                except Exception:
+                    pass
+        self.input, self.cursor = text, pos
+
+    def _vim_send(self, text: str) -> None:
+        if not self.run_line(text):
+            self._quit = True
+        if text.strip():
+            self.history.append(text.strip())
+            self.hist_i = len(self.history)
+
+    def _vim_command(self, cmd: str) -> None:
+        head = cmd.split()[0] if cmd.split() else ""
+        if head in ("q", "q!", "qa", "quit", "wq", "x"):
+            self._quit = True
+            return
+        if not self.run_line("/" + cmd):
+            self._quit = True
+
+    def _vim_cmdline(self, text: str) -> None:
+        self.cmdline = text
+
+    def _vim_quit(self) -> None:
+        self._quit = True
+
+    def _vim_scroll(self, fraction: float) -> None:
+        self.scroll = max(0, self.scroll - int(fraction * 20))
+
+    def _vim_msg_nav(self, d: int) -> None:
+        msgs = getattr(self, "_visible_msgs", [])
+        if not msgs:
+            self.vim.leaveMessages()
+            return
+        if d == 0 or self.mode != "select":
+            self.mode, self.sel = "select", len(msgs) - 1
+            return
+        self.sel += d
+        if self.sel >= len(msgs):
+            self.mode, self.sel = "type", -1
+            self.vim.leaveMessages()
+        self.sel = max(0, self.sel) if self.mode == "select" else -1
+
+    def _vim_msg_action(self, a: str) -> None:
+        msgs = getattr(self, "_visible_msgs", [])
+        if a == "clear":
+            self.mode, self.sel = "type", -1
+            return
+        if a in ("first", "last") and msgs:
+            self.sel = 0 if a == "first" else len(msgs) - 1
+            return
+        keys: dict[str, str] = {
+            "reply": "r",
+            "edit": "e",
+            "react": "+",
+            "copy": "y",
+            "open": "o",
+            "delete": "d",
+        }
+        key = a[6:] if a.startswith("quick:") else keys.get(a, "")
+        if not key:
+            return
+        self.key_select(key)
+        if a in ("reply", "edit", "react"):
+            self.mode, self.sel = "type", -1
+            self.vim.setBuffer(self.input)  # edit text / "/react #n :" prefill
+            if self.vim.mode != "INSERT":
+                self.vim.handleKey("A", 0x41, False, True, False)
+
+    def key_vim(self, k) -> bool:
+        # Chat-level keys first; everything else is the editor's.
+        if k in ("\t", curses.KEY_BTAB, "\x0e", "\x10"):
+            self.cycle(-1 if k in (curses.KEY_BTAB, "\x10") else 1)
+            return True
+        if k == curses.KEY_PPAGE:
+            self.scroll += 10
+            return True
+        if k == curses.KEY_NPAGE:
+            self.scroll = max(0, self.scroll - 10)
+            return True
+        single = "\n" not in self.input
+        if (
+            self.vim.mode == "INSERT"
+            and single
+            and k in (curses.KEY_UP, curses.KEY_DOWN)
+        ):
+            if self.history:  # history, like a shell
+                step = -1 if k == curses.KEY_UP else 1
+                self.hist_i = max(0, min(len(self.history), self.hist_i + step))
+                self.vim.setBuffer(
+                    self.history[self.hist_i] if self.hist_i < len(self.history) else ""
+                )
+            return True
+        ev = _qt_key(k)
+        if ev is not None:
+            self.vim.handleKey(*ev)
+        return not self._quit
 
     def key_type(self, k) -> bool:
         if k in ("\n", "\r", curses.KEY_ENTER, 10, 13):
@@ -639,11 +795,57 @@ class Tui(ChatUI):
                 continue
             if self.panel:
                 self.key_panel(k)
+            elif self.vim_on:
+                if not self.key_vim(k):
+                    return
             elif self.mode == "select":
                 self.key_select(k)
             elif not self.key_type(k):
                 return
             dirty = True
+
+
+_CURSES_KEYS = {
+    curses.KEY_LEFT: "Left",
+    curses.KEY_RIGHT: "Right",
+    curses.KEY_UP: "Up",
+    curses.KEY_DOWN: "Down",
+    curses.KEY_HOME: "Home",
+    curses.KEY_END: "End",
+    curses.KEY_DC: "Delete",
+    curses.KEY_BACKSPACE: "Backspace",
+    curses.KEY_ENTER: "Return",
+}
+
+
+def _qt_key(k) -> tuple[str, int, bool, bool, bool] | None:
+    """curses key → VimEditor.handleKey(text, qt_code, ctrl, shift, alt)."""
+    K = vimcore._K
+    if isinstance(k, int):
+        name = _CURSES_KEYS.get(k)
+        return ("", K[name], False, False, False) if name else None
+    if k in ("\n", "\r"):
+        return ("", K["Return"], False, False, False)
+    if k == "\x1b":
+        return ("", K["Escape"], False, False, False)
+    if k in ("\x7f", "\b"):
+        return ("", K["Backspace"], False, False, False)
+    if len(k) == 1 and 1 <= ord(k) <= 26:  # Ctrl-A … Ctrl-Z
+        letter = chr(ord(k) + 96)
+        return (letter, 0x40 + ord(k), True, False, False)
+    if len(k) == 1 and k.isprintable():
+        code = ord(k.upper()) if k.isalpha() else ord(k)
+        return (k, code, False, k.isupper(), False)
+    return None
+
+
+def _copy_to_clipboard(text: str) -> None:
+    for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["pbcopy"]):
+        try:
+            subprocess.run(cmd, input=text.encode(), timeout=2, check=True)
+            return
+        except (OSError, subprocess.SubprocessError):
+            continue
 
 
 def _size(n: float) -> str:

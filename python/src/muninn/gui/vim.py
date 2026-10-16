@@ -9,8 +9,23 @@ from __future__ import annotations
 import enum
 import os
 import sys
-from PySide6.QtCore import Property, QObject, Signal, Slot
-from PySide6.QtGui import QClipboard, QGuiApplication
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PySide6 import QtGui as _QtGui
+    from PySide6.QtCore import Property, QObject, Signal, Slot
+else:
+    try:
+        from PySide6 import QtGui as _QtGui
+        from PySide6.QtCore import Property, QObject, Signal, Slot
+    except ImportError:  # terminal client without Qt: same engine, plain signals
+        from muninn.qtshim import Property, QObject, Signal, Slot
+
+        _QtGui = None
+
+# Set by front ends without a Qt clipboard (the terminal client).
+clipboard_setter: Callable[[str], None] | None = None
 
 _VIM_DEBUG = bool(os.environ.get("MUNINN_VIM_DEBUG"))
 
@@ -164,6 +179,9 @@ class VimEditor(QObject):
             self.messageNav.emit(0)
             return
 
+        if key_code in (_K["Return"], _K["Enter"]) and self._mode == VimMode.CMDLINE:
+            self._handle_cmdline(key_text, key_code, ctrl)  # run, don't send
+            return
         if key_code in (_K["Return"], _K["Enter"]):
             if shift and self._mode == VimMode.INSERT:
                 # Shift+Enter = newline in insert mode
@@ -255,6 +273,12 @@ class VimEditor(QObject):
         ):
             self._enter_mode(VimMode.INSERT)  # now type the reply / edit
             self._emit()
+
+    def openCmdline(self) -> None:
+        """Front ends without a palette (terminal): `:` edits a command line
+        inside the editor instead."""
+        self._enter_cmdline(":")
+        self._emit()
 
     @Slot()
     def leaveMessages(self) -> None:
@@ -1021,6 +1045,12 @@ class VimEditor(QObject):
                 self._emit()
             return
 
+        # Vim quirk users rely on: `cw`/`cW` on a word changes to the end of
+        # the word (like `ce`), keeping the space after it.
+        if op == "c" and motion in ("w", "W") and self._pos < len(self._buf):
+            if not self._buf[self._pos].isspace():
+                motion = "e" if motion == "w" else "E"
+
         # Compute motion range
         result = self._motion_range(motion, count)
         if result[0] is None or result[1] is None:
@@ -1563,9 +1593,12 @@ class VimEditor(QObject):
             self._reg_linewise['"'] = linewise
         self._reg = '"'
         if clipboard:
-            cb = QGuiApplication.clipboard()
-            if cb is not None:
-                cb.setText(text, QClipboard.Mode.Clipboard)
+            if clipboard_setter is not None:
+                clipboard_setter(text)
+            elif _QtGui is not None and _QtGui.QGuiApplication.instance():
+                cb = _QtGui.QGuiApplication.clipboard()
+                if cb is not None:
+                    cb.setText(text, _QtGui.QClipboard.Mode.Clipboard)
 
     def _get_reg(self) -> tuple[str, bool]:
         txt = self._registers.get(self._reg, "")
