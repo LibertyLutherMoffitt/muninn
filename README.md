@@ -50,7 +50,21 @@ for the JVM so the two implementations are tested against each other.
 
 ---
 
-## Quick start
+## Install
+
+Download from the [latest release](https://github.com/LibertyLutherMoffitt/muninn/releases/latest):
+
+| | File | Notes |
+|---|---|---|
+| Android 12+ | `muninn-android.apk` | install once (allow "install unknown apps"); after that Muninn updates itself — *Settings → Updates* |
+| Linux | `muninn-gui-linux-x86_64`, `muninn-linux-x86_64` | `chmod +x`, run; GUI and terminal client, no Python needed (glibc 2.35+, BlueZ) |
+| Windows | `muninn-gui-windows-x86_64.exe`, `muninn-windows-x86_64.exe` | Bluetooth backend not yet tested on hardware |
+| Nix | `nix run github:LibertyLutherMoffitt/muninn#muninn-gui` | or `#muninn-linux` for the terminal |
+
+Releases are cut with `tools/release.sh X.Y.Z "notes"` (signed APK + tag +
+GitHub release; CI attaches the desktop builds).
+
+## Quick start (from source)
 
 ```bash
 nix run .#muninn-gui              # desktop GUI

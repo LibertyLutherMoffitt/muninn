@@ -47,13 +47,24 @@ jobs:
           pip install "./python[gui]" pyinstaller
       - name: build
         run: |
+          # C extensions PyInstaller can't see through imports: PyNaCl's cffi
+          # backend, dbus-python's bindings (BlueZ), the WinRT projections.
+          common="--collect-all muninn --collect-submodules muninn --collect-all nacl --hidden-import _cffi_backend"
+          if [ "$RUNNER_OS" = Linux ]; then
+            common="$common --hidden-import _dbus_bindings --hidden-import _dbus_glib_bindings --hidden-import dbus.mainloop.glib --collect-submodules gi"
+          else
+            common="$common --collect-submodules winrt"
+          fi
+          common="$common --paths packaging --hidden-import selftest"
           pyinstaller --noconfirm --onefile --name "muninn-gui-${{ matrix.suffix }}" \
-            --windowed --collect-all muninn --collect-submodules muninn \
-            packaging/muninn_gui.py
+            --windowed $common packaging/muninn_gui.py
           pyinstaller --noconfirm --onefile --name "muninn-${{ matrix.suffix }}" \
-            --collect-all muninn --collect-submodules muninn --exclude-module PySide6 \
-            packaging/muninn_cli.py
+            $common --exclude-module PySide6 packaging/muninn_cli.py
           ls -la dist
+      - name: smoke test (imports everything, no Bluetooth needed)
+        run: |
+          MUNINN_SELFTEST=1 ./dist/muninn-${{ matrix.suffix }}${{ matrix.exe }}
+          MUNINN_SELFTEST=1 QT_QPA_PLATFORM=offscreen ./dist/muninn-gui-${{ matrix.suffix }}${{ matrix.exe }}
       - uses: actions/upload-artifact@v4
         with:
           name: muninn-${{ matrix.suffix }}

@@ -23,7 +23,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 | emoji picker / `:shortcodes:`              | ✅ / ✅ | search / ✅ | keyboard / ✅ |
 | files, images, GIFs (resumable, relayed)   | ✅ inline | ✅ open externally | ✅ inline |
 | offline sticker pack + save GIFs           | ✅ | send only | ✅ |
-| games (7 bundled, JS plugins, share code)  | ✅ | invites only | ✅ |
+| games (11 bundled incl. ultimate², unlimited, 4-player chess; options; zoom) | ✅ | invites only | ✅ |
 | real-time game channel (pong)              | ✅ | — | ✅ |
 | group create / add / remove / rename / leave / members | ✅ | ✅ | ✅ |
 | presence: connected / via relay / nearby / last seen | ✅ | ✅ | ✅ |
@@ -32,6 +32,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 | search                                     | ✅ | ✅ | ✅ |
 | scan modes, polite discovery, /whoami      | ✅ | ✅ | ✅ |
 | first-run name onboarding                  | ✅ | ✅ | ✅ |
+| vim keys (shared engine), pick messages with k | ✅ | ✅ (default, `/vim off`) | — |
+| swipe / hover / menu to reply              | hover bar + menu | k-mode | swipe right |
+| app icon, self-update from GitHub releases  | — | — | ✅ |
+| standalone builds (no Python/Nix)          | Linux + Windows (CI) | Linux + Windows (CI) | signed APK |
 | background / boot / battery                | — | — | ✅ (verified in Doze) |
 
 ### 1.2 Verified
@@ -200,6 +204,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   scrollable pane, Ctrl-L full repaint); GUI died on NixOS when the flake's
   Mesa ≠ system driver (→ software-renderer fallback); a second front end
   fought the first over BlueZ (→ single-instance lock in Node, clear error).
+- 2026-10-16: GUI audit with tools/gui_lab.sh (focus stack, vim MESSAGES
+  mode, hover bar, dark context menu, sticky scroll, People-nearby dialog,
+  restyled menus/palette/game overlay); four new games + game options +
+  host zoom; TUI on the GUI's vim engine (Qt-optional); Android raven icon,
+  swipe-to-reply, self-update; signed releases + desktop CI builds.
 - Next: more games (chess, checkers, connect4, reversi, real-time demo),
   BT good-citizen audit (bluez agent), Python scan policy, Windows check,
   Android notification/background testing, netsim real-BT test of new app,
