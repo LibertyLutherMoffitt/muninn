@@ -53,7 +53,9 @@ object Runtime {
         val p = prefs(app)
         val sim = p.getString("sim_hub", "")!!
         val name = p.getString("name", null)?.takeIf { it.isNotEmpty() }
-        val t: Transport = if (sim.isNotEmpty()) SimTransport(sim, name ?: Build.MODEL) else BtTransport(app)
+        val pos = p.getString("sim_pos", "")!!.split(",").mapNotNull { it.trim().toDoubleOrNull() }
+            .takeIf { it.size == 2 }?.let { it[0] to it[1] }
+        val t: Transport = if (sim.isNotEmpty()) SimTransport(sim, name ?: Build.MODEL, pos = pos) else BtTransport(app)
         transport = t
         val n = Node(t, AndroidStorage(app), name, log = { Log.d(TAG, it) })
         val gh = GameHost(n.mesh, { bundledGames(app) }, File(app.filesDir, "games"))

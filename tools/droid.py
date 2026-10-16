@@ -117,7 +117,13 @@ class Droid:
     def install(self, apk: str = APK) -> None:
         print(self.adb("install", "-r", "-g", apk).strip().splitlines()[-1:])
 
-    def sim(self, name: str, hub: str = "127.0.0.1:7420", clear: bool = True) -> None:
+    def sim(
+        self,
+        name: str,
+        hub: str = "127.0.0.1:7420",
+        clear: bool = True,
+        pos: str | None = None,
+    ) -> None:
         port = hub.rsplit(":", 1)[1]
         self.adb("reverse", f"tcp:{port}", f"tcp:{port}")
         if clear:
@@ -171,8 +177,12 @@ def main() -> None:
         print("\n".join(d.texts()))
     elif c == "install":
         d.install()
-    elif c == "sim":
-        d.sim(args[0], *(args[1:2]))
+    elif c == "sim":  # sim NAME [HUB] [ROW,SEAT]
+        d.sim(
+            args[0],
+            args[1] if len(args) > 1 else "127.0.0.1:7420",
+            pos=args[2] if len(args) > 2 else None,
+        )
     elif c == "xy":
         d.tap_xy(int(args[0]), int(args[1]))
     else:

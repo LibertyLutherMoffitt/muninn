@@ -85,6 +85,7 @@ class MainActivity : ComponentActivity() {
         val p = Runtime.prefs(this)
         var restart = false
         i.getStringExtra("sim")?.let { p.edit().putString("sim_hub", it).apply(); restart = true }
+        i.getStringExtra("pos")?.let { p.edit().putString("sim_pos", it).apply(); restart = true }
         i.getStringExtra("name")?.let { n -> p.edit().putString("name", n).apply(); Runtime.node?.mesh?.setName(n) }
         if (restart) {
             stopService(Intent(this, MuninnService::class.java))

@@ -341,6 +341,7 @@ Rectangle {
         { icon: "👤", label: ":whoami",    sub: "your name, id and radio",          action: "cmd", convId: "", cmd: "whoami" },
         { icon: "⟳",  label: ":reconnect", sub: "retry all known devices now",     action: "cmd", convId: "", cmd: "reconnect" },
         { icon: "+",  label: ":add",      sub: "add people to this group",         action: "cmd", convId: "", cmd: "add " },
+        { icon: "👥", label: ":members",  sub: "group members and who's in range", action: "cmd", convId: "", cmd: "members" },
         { icon: "⎋",  label: ":leave",    sub: "leave this group",                 action: "cmd", convId: "", cmd: "leave" },
         { icon: "+",  label: ":new",      sub: "create group",                     action: "cmd", convId: "", cmd: "new " },
         { icon: "↺",  label: ":history",  sub: "reload last N messages",           action: "cmd", convId: "", cmd: "history " },

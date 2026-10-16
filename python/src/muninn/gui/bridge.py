@@ -683,6 +683,7 @@ class ChatBridge(QObject):
         "sharegame",
         "scanmode",
         "whoami",
+        "members",
         "clear",
         "help",
         "about",
@@ -704,6 +705,7 @@ class ChatBridge(QObject):
         (":new <name> <peer1> [peer2…]", "create a group"),
         (":add <peer…> / :kick <peer>", "change members of this group"),
         (":rename <name> / :leave", "rename or leave this group"),
+        (":members", "who's in this group and who's in range"),
         (":nick <name>", "set your display name"),
         (":nick <peer> <name>", 'local nickname for a peer ("" clears)'),
         (":reply [text]", "reply to selected message (Alt+↑/↓ selects, Alt+R)"),
@@ -1012,6 +1014,26 @@ class ChatBridge(QObject):
                         for p in scanpolicy.POLICIES.values()
                     ],
                 )
+        elif head == "members":
+            if gid is None or gid not in mesh.groups:
+                return self.errorOccurred.emit("open a group first")
+            g = mesh.groups[gid]
+            rows = []
+            for nid in sorted(g.members, key=lambda n: mesh.display_name(n).lower()):
+                if nid == mesh.node_id:
+                    rows.append(("you", "member", ""))
+                    continue
+                rows.append(
+                    (
+                        mesh.display_name(nid),
+                        self.node.presence(nid)["text"],
+                        dm_conv(nid),
+                    )
+                )
+            rows.append(
+                self._item("+ add people", ":add <name…>", action="cmd", cmd="add ")
+            )
+            self._info(f"{g.name} — {len(g.members)} members", rows)
         elif head == "whoami":
             st = self.node.status()
             self._info(

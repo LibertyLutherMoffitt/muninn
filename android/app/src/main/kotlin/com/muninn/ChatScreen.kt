@@ -505,6 +505,22 @@ private fun GamesSheet(conv: String, onDone: () -> Unit) {
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        if (convGroupId(conv) == null && catalog.isEmpty()) Text("No games installed", Modifier.padding(20.dp))
+        if (catalog.isEmpty()) Text("No games installed", Modifier.padding(20.dp))
+        HorizontalDivider()
+        Text("Share a game's code (they can install it)", style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(16.dp, 8.dp))
+        val ctx = LocalContext.current
+        catalog.forEach { g ->
+            Text("${g.icon}  ${g.id}.js", modifier = Modifier.fillMaxWidth().clickable {
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        val src = Runtime.games!!.sources()[g.id]!!
+                        val f = File(ctx.cacheDir, "${g.id}.js").apply { writeText(src) }
+                        Runtime.node!!.mesh.sendFile(conv, f, "application/x-muninn-game", f.name)
+                    }.onSuccess { withContext(Dispatchers.Main) { onDone() } }
+                        .onFailure { Runtime.toast(it.message ?: "couldn't share") }
+                }
+            }.padding(horizontal = 20.dp, vertical = 10.dp), style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }

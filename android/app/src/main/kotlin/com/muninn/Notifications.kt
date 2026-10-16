@@ -70,8 +70,16 @@ object Notifications {
         val readIntent = PendingIntent.getBroadcast(ctx, conv.hashCode() + 1,
             Intent(ctx, ReplyReceiver::class.java).putExtra("conv", conv).putExtra("read", true),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        // Lock screen shows only "New message" unless the user opts in.
+        val public = Notification.Builder(ctx, CH_MSG)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle("Muninn")
+            .setContentText(if (unread.size == 1) "New message" else "${unread.size} new messages")
+            .build()
         val n = Notification.Builder(ctx, CH_MSG)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(public)
             .setStyle(style)
             .setContentIntent(openIntent(ctx, conv))
             .setAutoCancel(true)

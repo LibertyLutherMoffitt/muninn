@@ -25,6 +25,12 @@ Item {
             Layout.preferredHeight: 52
             color: Theme.surfaceRaised
             z: 2
+            MouseArea {
+                anchors.fill: parent
+                enabled: root.convId.startsWith("group:")
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: bridge.runCommand("members")
+            }
             Column {
                 anchors.left: parent.left; anchors.leftMargin: 16
                 anchors.verticalCenter: parent.verticalCenter

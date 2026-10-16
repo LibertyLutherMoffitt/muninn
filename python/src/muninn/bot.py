@@ -134,10 +134,11 @@ def main() -> None:
     )
     os.makedirs(data, exist_ok=True)
     transport = default_transport()
-    if a.pos:
-        from muninn.sim.transport import SimTransport
+    from muninn.sim.transport import SimTransport
 
-        if isinstance(transport, SimTransport):
+    if isinstance(transport, SimTransport):
+        transport.name = a.name
+        if a.pos:
             r, s = (float(x) for x in a.pos.split(","))
             transport.pos = (r, s)
     log = print if a.verbose else None
