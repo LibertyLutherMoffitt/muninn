@@ -60,6 +60,12 @@ MUNINN_SIM=127.0.0.1:7420 MUNINN_DATA=/tmp/me MUNINN_NAME=me PYTHONPATH=src \
 echo '{"cmd":"send","to":"me","text":"hi"}' | nc 127.0.0.1 7501
 ```
 
+### Terminal client
+
+`tools/tui_lab.sh start` runs a hub, two bots and the TUI in a detached tmux
+session; `tools/tui_lab.sh keys 'hello' Enter` types, `tools/tui_lab.sh shot`
+prints the screen.
+
 ### Android emulator on the sim
 
 ```bash

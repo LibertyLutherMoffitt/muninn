@@ -463,6 +463,14 @@ def _human(n: float) -> str:
 
 
 def main() -> None:
+    plain = "--plain" in sys.argv[1:]
+    if not plain and sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from muninn import tui
+        except ImportError:  # no curses (e.g. Windows without windows-curses)
+            pass
+        else:
+            return tui.main()
     name = os.environ.get("MUNINN_NAME") or None
     node = Node(default_transport(), name=name)
     print(

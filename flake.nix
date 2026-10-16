@@ -180,6 +180,7 @@
             pkgs.xvfb
             pkgs.xvfb-run
             pkgs.xdotool
+            pkgs.tmux
             pkgs.imagemagick
 
             # Tooling

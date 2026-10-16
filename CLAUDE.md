@@ -85,7 +85,7 @@ Python (`python/src/muninn/`) — shared by CLI, GUI, bot, tests:
 - `gamehost.py` + `games/*.js` — generic game sessions + plugins (API in games/README.md)
 - `emoji.py` + `assets/emoji.json`, `assets/stickers/*.gif` — shared with Android
 - `sim/hub.py`, `sim/transport.py`, `sim/lab.py` — radio simulator; `bot.py` — headless node
-- `cli.py`; `gui/` (`bridge.py` command dispatcher, `models.py`, `vim.py`, `qml/`)
+- `cli.py` (line mode + shared `/command` handling), `tui.py` (curses full-screen, default on a TTY); `gui/` (`bridge.py` command dispatcher, `models.py`, `vim.py`, `qml/`)
 
 Kotlin:
 - `android/core/` — pure-JVM port of the core (`Nacl.kt` TweetNaCl, `Protocol.kt`,

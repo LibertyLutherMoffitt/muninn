@@ -40,7 +40,7 @@ appears. Everything is end-to-end encrypted.
 | Client | Platform | UI | Status |
 |--------|----------|----|--------|
 | Desktop GUI | Linux (Windows backend untested) | Qt 6 / QML, Vim-modal composer | working |
-| Desktop CLI | Linux (Windows) | readline, `/commands` | working |
+| Terminal | Linux (Windows) | full-screen TUI (curses), `/commands`; `--plain` line mode | working |
 | Android | Android 12+ | Jetpack Compose | working |
 | Headless bot | anywhere | JSON control port | testing tool |
 
@@ -54,7 +54,7 @@ for the JVM so the two implementations are tested against each other.
 
 ```bash
 nix run .#muninn-gui              # desktop GUI
-nix run .#muninn-linux            # terminal client
+nix run .#muninn-linux            # terminal client (TUI; --plain for line mode)
 ```
 
 Android: `nix develop`, then `cd android && ./gradlew :app:assembleDebug` and
