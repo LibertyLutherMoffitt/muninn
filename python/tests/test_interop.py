@@ -197,3 +197,83 @@ def test_flapping_kotlin_relay(lab, jvm):
     wait_until(lambda: len(py_texts(c, dm_conv(a.node_id))) == 20, 120)
     wait_until(lambda: all(a.storage.get_message(i).state != "sent" for i in ids), 60)
     assert k.node_id
+
+
+def test_mixed_cabin_soak(lab, jvm):
+    """Python and Kotlin seats interleaved in a line; a group spanning both;
+    random DMs, moves and flapping links for 40 s; all delivered once."""
+    import random
+
+    rng = random.Random(9)
+    py = {
+        "p0": lab.node("p0", (0, 0)),
+        "p2": lab.node("p2", (8, 0)),
+        "p4": lab.node("p4", (16, 0)),
+    }
+    kt = {"k1": jvm("k1", (4, 0)), "k3": jvm("k3", (12, 0)), "k5": jvm("k5", (20, 0))}
+    ids = {
+        **{n: v.node_id for n, v in py.items()},
+        **{n: v.node_id for n, v in kt.items()},
+    }
+    wait_until(
+        lambda: all(py["p0"].mesh.reachable(ids[n]) for n in ids if n != "p0"),
+        120,
+        msg="mixed chain converged",
+    )
+    gid = py["p0"].mesh.create_group("mixed", [ids[n] for n in ids if n != "p0"])
+    wait_until(
+        lambda: all("mixed" in kt[k]("status")["groups"].values() for k in kt), 60
+    )
+    sent = []
+    addr = {d["name"]: d["addr"] for d in lab.admin("state")["devices"]}
+    stop = time.time() + 40
+    i = 0
+    while time.time() < stop:
+        x, y = rng.sample(list(ids), 2)
+        r = rng.random()
+        t = f"{x}>{y}#{i}"
+        if r < 0.4:
+            if x in py:
+                py[x].mesh.send_text(dm_conv(ids[y]), t)
+            else:
+                kt[x]("send", to=ids[y], text=t)
+            sent.append(("dm", x, y, t))
+        elif r < 0.6:
+            if x in py:
+                py[x].mesh.send_text(group_conv(gid), t)
+            else:
+                kt[x]("gsend", group="mixed", text=t)
+            sent.append(("g", x, None, t))
+        elif r < 0.8:
+            lab.admin(
+                "flap",
+                a=addr[x],
+                b=addr[y],
+                up=rng.uniform(1, 3),
+                down=rng.uniform(0.5, 2),
+            )
+        else:
+            lab.admin("kill", addr=addr[x])
+        i += 1
+        time.sleep(0.3)
+    lab.admin("reset")
+
+    def texts(n, conv):
+        if n in py:
+            return py_texts(py[n], conv)
+        return kt[n].texts(conv)
+
+    for kind, x, y, t in sent:
+        if kind == "dm":
+            wait_until(lambda y=y, x=x, t=t: t in texts(y, dm_conv(ids[x])), 180, msg=t)
+        else:
+            for n in ids:
+                if n != x:
+                    wait_until(
+                        lambda n=n, t=t: t in texts(n, group_conv(gid)),
+                        180,
+                        msg=f"{t}@{n}",
+                    )
+    for n in ids:
+        g = texts(n, group_conv(gid))
+        assert len(g) == len(set(g)), f"group duplicates at {n}"
