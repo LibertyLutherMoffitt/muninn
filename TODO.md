@@ -210,6 +210,15 @@ Android side, will lose or stall messages silently.
 - **4f0891a** (mislabelled "style: formatter pass") polite discovery of hidden
   peers, scan modes, presence, BlueZ agent hardening, Android background
   inquiry. 34 Python tests + Kotlin tests green.
+- **4836779** six more games + plugin test harness. **ded58cd** docs rewritten
+  for v2. **6f42b57** byte-exact wire vectors in both languages.
+- **b44715c** Android emulator in the simulated cabin: 12/12 scenarios (relay
+  both ways, receipts via relay, group across relay, burst over a flapping
+  link, GIF).
+- Real Bluetooth (netsim, 3 emulators, no simulator): bonded pair reconnects
+  in ~2 s; a *fresh* phone finds a visible phone by itself (inquiry → polite
+  pairing-free probe), then reaches the third phone 2 hops away; message
+  delivered with ✓.
 - Next: more games (chess, checkers, connect4, reversi, real-time demo),
   BT good-citizen audit (bluez agent), Python scan policy, Windows check,
   Android notification/background testing, netsim real-BT test of new app,
