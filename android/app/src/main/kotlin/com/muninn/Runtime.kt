@@ -40,7 +40,16 @@ object Runtime {
     @Volatile var visibleConv: String? = null
     @Volatile var foreground = false
 
-    fun bump() { _tick.value = _tick.value + 1 }
+    private val bumpPending = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val bumper = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "ui-bump").apply { isDaemon = true } }
+
+    /** Coalesce bursts (file chunks, gossip) into at most ~7 UI refreshes/s. */
+    fun bump() {
+        if (bumpPending.compareAndSet(false, true)) bumper.schedule({
+            bumpPending.set(false)
+            _tick.value = _tick.value + 1
+        }, 150, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
     fun toast(msg: String) { _toast.value = msg }
     fun clearToast() { _toast.value = null }
 

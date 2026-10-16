@@ -24,6 +24,8 @@ dependencies = [
   "winrt-Windows.Networking; sys_platform == 'win32'",
   "winrt-Windows.Networking.Sockets; sys_platform == 'win32'",
   "winrt-Windows.Storage.Streams; sys_platform == 'win32'",
+  # Full-screen terminal client on Windows (stdlib curses is Unix-only).
+  "windows-curses; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

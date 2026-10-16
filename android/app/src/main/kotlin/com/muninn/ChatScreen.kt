@@ -355,8 +355,8 @@ private fun FileContent(m: StoredMessage) {
     val size = (m.meta["s"] as? Number)?.toLong() ?: 0
     if (mime.startsWith("image/")) {
         val path = if (state == "complete") rec?.path else m.meta["thumb"] as? String
-        Box(Modifier.widthIn(max = 260.dp).heightIn(min = 60.dp, max = 300.dp).clip(RoundedCornerShape(10.dp))) {
-            if (path != null) MediaImage(path, Modifier.widthIn(max = 260.dp))
+        Box(Modifier.width(220.dp).heightIn(min = 80.dp, max = 300.dp).clip(RoundedCornerShape(10.dp))) {
+            if (path != null) MediaImage(path, Modifier.width(220.dp))
             if (state != "complete") {
                 Box(Modifier.matchParentSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) {
                     Text(if (state == "downloading") "${if (total > 0) have * 100 / total else 0}%" else "⬇ ${human(size)}",

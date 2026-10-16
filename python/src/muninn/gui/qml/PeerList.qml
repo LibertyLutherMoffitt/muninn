@@ -116,6 +116,7 @@ Rectangle {
                     width: 10; height: 10; radius: 5
                     color: model.status === "direct"  ? Theme.success
                          : model.status === "relay"   ? Theme.warning
+                         : model.status === "nearby"  ? "#7fa7d9"
                          : model.status === "group"   ? Theme.accent
                                                       : Theme.textMuted
                     border.color: Theme.surface
@@ -140,10 +141,7 @@ Rectangle {
                     }
                     Text {
                         width: parent.width
-                        text: model.typing ? "typing…"
-                            : (model.lastMessage || (model.convType === "group" ? model.via
-                               : model.status === "direct" ? "nearby" : model.status === "relay"
-                               ? "in range via relay" : ""))
+                        text: model.typing ? "typing…" : (model.lastMessage || model.via)
                         color: model.typing ? Theme.accent : Theme.textMuted
                         font.italic: model.typing
                         font.pixelSize: 11
