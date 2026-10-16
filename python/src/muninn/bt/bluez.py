@@ -112,8 +112,11 @@ def _dbus_loop() -> None:
         bus.get_object("org.bluez", "/org/bluez"),
         "org.bluez.AgentManager1",
     )
+    # Registered, but NOT as the default agent: it then only answers for
+    # pairings Muninn itself starts. Becoming the default would silently
+    # auto-confirm every pairing on this machine (the user's own headphones,
+    # strangers) while Muninn runs.
     agent_manager.RegisterAgent(_AGENT_PATH, "NoInputNoOutput")
-    agent_manager.RequestDefaultAgent(_AGENT_PATH)
 
     # Register RFCOMM profile.
     _Profile(bus, _PROFILE_PATH)
