@@ -114,6 +114,7 @@ fun ConversationsScreen() {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { Nav.go(Screen.Search) }) { Text("🔍") }
                     TextButton(onClick = { Nav.go(Screen.Nearby) }) { Text("Nearby") }
                     IconButton(onClick = { Nav.go(Screen.Settings) }) { Icon(Icons.Default.Settings, "Settings") }
                 },

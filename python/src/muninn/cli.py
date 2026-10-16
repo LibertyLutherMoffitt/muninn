@@ -76,6 +76,10 @@ HELP = """\
 /connect <addr>            dial a device by Bluetooth address
 /status                    links, routes, queues
 /emoji <prefix>            search emoji shortcodes
+/sticker [name]            list or send a bundled/saved sticker GIF
+/members                   who's in this group and who's in range
+/mute  /unmute             silence the terminal bell for this chat
+/search <words>            find messages in all chats
 /quit
 Text supports :shortcodes: like :thumbsup: :airplane: :joy:"""
 
@@ -357,6 +361,46 @@ class ChatUI:
             ):
                 tag = "★ muninn" if r.muninn else ("? maybe " if r.probeable else "  ")
                 self.out(f"  {tag:9} {r.addr}  {r.name}  ({r.kind})")
+        elif cmd == "sticker":
+            from pathlib import Path
+
+            dirs = [
+                Path(mesh.storage.path).parent / "stickers",
+                Path(emoji.__file__).parent / "assets" / "stickers",
+            ]
+            files = {
+                p.stem: p for d in dirs if d.is_dir() for p in sorted(d.glob("*.gif"))
+            }
+            if not args:
+                self.out("  stickers: " + " ".join(sorted(files)))
+            elif args[0] in files and self._need_conv():
+                mesh.send_file(self.conv, str(files[args[0]]), "image/gif")
+            else:
+                self.out(f"! no sticker {args[0]} — /sticker to list")
+        elif cmd == "search" and args:
+            for m in mesh.storage.search(" ".join(args), 30):
+                who = "you" if m.sender == mesh.node_id else mesh.display_name(m.sender)
+                t = time.strftime("%d %b %H:%M", time.localtime(m.ts))
+                self.out(
+                    f"  {self._conv_name(m.conv)} · {t} · {who}: {(m.text or m.meta.get('n', ''))[:80]}"
+                )
+        elif cmd in ("mute", "unmute") and self._need_conv():
+            mesh.set_muted(self.conv, cmd == "mute")
+            self.out("  muted" if cmd == "mute" else "  unmuted")
+        elif cmd == "members":
+            gid = conv_group_id(self.conv)
+            g = mesh.groups.get(gid or b"")
+            if g is None:
+                self.out("! not in a group conversation")
+            else:
+                for nid in sorted(
+                    g.members, key=lambda n: mesh.display_name(n).lower()
+                ):
+                    who = "you" if nid == mesh.node_id else mesh.display_name(nid)
+                    where = (
+                        "" if nid == mesh.node_id else self.node.presence(nid)["text"]
+                    )
+                    self.out(f"  {who:20} {where}")
         elif cmd == "scanmode":
             from muninn import scanpolicy
 

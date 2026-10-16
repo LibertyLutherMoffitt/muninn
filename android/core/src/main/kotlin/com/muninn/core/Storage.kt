@@ -89,6 +89,7 @@ interface Storage {
     fun getMessage(msgId: ByteArray): StoredMessage?
     fun loadHistory(conv: String, limit: Int = 200): List<StoredMessage>
     fun lastMessages(): Map<String, StoredMessage>
+    fun search(query: String, limit: Int = 50): List<StoredMessage>
 
     fun outboxAdd(e: OutboxEntry)
     fun outboxAck(packetId: ByteArray): Pair<String, ByteArray?>?
@@ -231,6 +232,12 @@ class MemStorage(override val filesDir: File) : Storage {
     override fun loadHistory(conv: String, limit: Int) = synchronized(lock) {
         messages.values.filter { it.conv == conv }.takeLast(limit).sortedBy { it.ts }.map(::hydrate)
     }
+    override fun search(query: String, limit: Int) = synchronized(lock) {
+        messages.values.filter { !it.deleted && (it.kind == "text" || it.kind == "file") &&
+            (it.text.contains(query, true) || (it.meta["n"] as? String)?.contains(query, true) == true) }
+            .sortedByDescending { it.ts }.take(limit).map(::hydrate)
+    }
+
     override fun lastMessages() = synchronized(lock) {
         val out = LinkedHashMap<String, StoredMessage>()
         for (m in messages.values) out[m.conv] = m

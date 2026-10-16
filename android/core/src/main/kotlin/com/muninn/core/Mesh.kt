@@ -358,6 +358,9 @@ class Mesh(
         emit { it.onPeers() }
     }
 
+    fun isMuted(conv: String) = storage.getSetting("mute:$conv") == "1"
+    fun setMuted(conv: String, muted: Boolean) { storage.setSetting("mute:$conv", if (muted) "1" else "0"); emit { it.onPeers() } }
+
     fun activePeers(): List<PeerInfo> = synchronized(lock) { peers.values.filter { it.replacedBy == null } }
 
     private fun preferNew(old: Link, new: Link): Boolean {

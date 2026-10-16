@@ -37,6 +37,7 @@ sealed class Screen {
     data object Settings : Screen()
     data class Game(val session: String) : Screen()
     data class Image(val path: String) : Screen()
+    data object Search : Screen()
 }
 
 /** Simple back stack (no navigation library needed for a handful of screens). */
@@ -139,5 +140,6 @@ fun App(discovery: BtDiscovery) {
         Screen.Settings -> SettingsScreen()
         is Screen.Game -> GameScreen(s.session)
         is Screen.Image -> ImageScreen(s.path)
+        Screen.Search -> SearchScreen()
     }
 }

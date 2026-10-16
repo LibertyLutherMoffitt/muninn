@@ -615,6 +615,13 @@ class Mesh:
         self.storage.set_peer_override(node_id, name)
         self._emit("peers")
 
+    def is_muted(self, conv: str) -> bool:
+        return self.storage.get_setting("mute:" + conv) == "1"
+
+    def set_muted(self, conv: str, muted: bool) -> None:
+        self.storage.set_setting("mute:" + conv, "1" if muted else "0")
+        self._emit("peers")
+
     def active_peers(self) -> list[PeerInfo]:
         """Known peers, minus identities that were replaced by a reinstall."""
         with self.lock:

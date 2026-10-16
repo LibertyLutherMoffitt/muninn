@@ -73,7 +73,7 @@ object Runtime {
                 bump()
                 if (m.sender != n.nodeId && (m.kind == "text" || m.kind == "file")) {
                     if (foreground && visibleConv == m.conv) n.mesh.markRead(m.conv)
-                    else Notifications.message(app, m)
+                    else if (!n.mesh.isMuted(m.conv)) Notifications.message(app, m)
                 }
             }
             override fun onUpdate(msgId: ByteArray) = bump()

@@ -505,6 +505,20 @@ class Storage:
             )
         return self._hydrate(list(reversed(rows)))
 
+    def search(self, query: str, limit: int = 50) -> list[StoredMessage]:
+        """Newest-first messages whose text (or file name) contains query."""
+        q = (
+            "%"
+            + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "%"
+        )
+        rows = self._q(
+            _MSG_SELECT + " WHERE deleted = 0 AND kind IN ('text', 'file') AND "
+            "(text LIKE ? ESCAPE '\\' OR json_extract(meta, '$.n') LIKE ? ESCAPE '\\') ORDER BY ts DESC LIMIT ?",
+            (q, q, limit),
+        )
+        return self._hydrate(rows)
+
     def last_messages(self) -> dict[str, StoredMessage]:
         rows = self._q(
             _MSG_SELECT + " WHERE rowid IN (SELECT MAX(rowid) FROM messages "

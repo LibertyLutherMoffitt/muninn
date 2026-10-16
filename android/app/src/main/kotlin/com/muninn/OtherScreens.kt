@@ -468,3 +468,32 @@ fun GameScreen(session: String) {
         }
     }
 }
+
+
+// ---------------------------------------------------------------- search
+
+@Composable
+fun SearchScreen() {
+    var q by remember { mutableStateOf("") }
+    val results by produceState(emptyList<com.muninn.core.StoredMessage>(), q) {
+        value = if (q.trim().length < 2) emptyList()
+        else withContext(Dispatchers.IO) { Runtime.node?.mesh?.storage?.search(q.trim(), 80) ?: emptyList() }
+    }
+    SimpleScaffold("Search") { mod ->
+        Column(mod.fillMaxSize()) {
+            OutlinedTextField(q, { q = it }, placeholder = { Text("Search all chats") }, singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(16.dp))
+            LazyColumn {
+                items(results, key = { it.idHex }) { m ->
+                    val mesh = Runtime.node?.mesh
+                    val who = if (m.sender == Runtime.node?.nodeId) "You" else mesh?.displayName(m.sender) ?: ""
+                    Column(Modifier.fillMaxWidth().clickable { Nav.go(Screen.Chat(m.conv)) }.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Text("${Runtime.convTitle(m.conv)} · ${timeLabel(m.ts)}", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$who: " + m.text.ifEmpty { "📎 " + (m.meta["n"] ?: "") }, maxLines = 2)
+                    }
+                }
+            }
+        }
+    }
+}

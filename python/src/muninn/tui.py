@@ -89,7 +89,11 @@ class Tui(ChatUI):
     def _on_message(self, m: StoredMessage) -> None:
         if m.conv == self.conv and m.sender != self.mesh.node_id:
             self.mesh.mark_read(m.conv)
-        elif m.sender != self.mesh.node_id and m.kind in ("text", "file"):
+        elif (
+            m.sender != self.mesh.node_id
+            and m.kind in ("text", "file")
+            and not self.mesh.is_muted(m.conv)
+        ):
             self.events.put("bell")
         self.events.put("redraw")
 

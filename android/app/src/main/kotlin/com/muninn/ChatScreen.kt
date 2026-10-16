@@ -120,6 +120,7 @@ fun ChatScreen(conv: String) {
     var selected by remember { mutableStateOf<StoredMessage?>(null) }
     var showStickers by remember { mutableStateOf(false) }
     var showGames by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
     var attachMenu by remember { mutableStateOf(false) }
     var lastTyping by remember { mutableLongStateOf(0L) }
     val listState = rememberLazyListState()
@@ -178,7 +179,14 @@ fun ChatScreen(conv: String) {
                         }
                     }
                 },
-                actions = { IconButton(onClick = { showGames = true }) { Text("🎮", fontSize = 20.sp) } },
+                actions = {
+                    IconButton(onClick = { showGames = true }) { Text("🎮", fontSize = 20.sp) }
+                    if (!isGroup) IconButton(onClick = { renaming = true }) { Text("✎", fontSize = 18.sp) }
+                    val muted = remember(tick) { Runtime.node?.mesh?.isMuted(conv) == true }
+                    IconButton(onClick = { Thread { Runtime.node?.mesh?.setMuted(conv, !muted) }.start() }) {
+                        Text(if (muted) "🔕" else "🔔", fontSize = 18.sp)
+                    }
+                },
             )
         },
         bottomBar = {
@@ -278,6 +286,28 @@ fun ChatScreen(conv: String) {
                 }
             }
         }
+    }
+    if (renaming) {
+        var nick by remember { mutableStateOf(Runtime.node?.mesh?.peers?.get(conv.removePrefix("dm:"))?.override ?: "") }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { renaming = false },
+            title = { Text("Nickname for this person") },
+            text = {
+                Column {
+                    Text("Only you see this. Leave empty to use the name they chose.",
+                        style = MaterialTheme.typography.bodySmall)
+                    androidx.compose.material3.OutlinedTextField(nick, { nick = it }, singleLine = true)
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    renaming = false
+                    val n = nick.trim()
+                    scope.launch(Dispatchers.IO) { Runtime.node?.mesh?.setOverride(conv.removePrefix("dm:"), n.ifEmpty { null }) }
+                }) { Text("Save") }
+            },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+        )
     }
     if (showGames) {
         ModalBottomSheet(onDismissRequest = { showGames = false }) { GamesSheet(conv) { showGames = false } }

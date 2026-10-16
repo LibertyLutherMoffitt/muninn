@@ -123,7 +123,11 @@ class ChatBridge(QObject):
             if m.sender != self.mesh.node_id and self._window_focused():
                 self.mesh.mark_read(m.conv)
                 self._peers.update_conv(m.conv)
-        if m.sender != self.mesh.node_id and m.kind in ("text", "file"):
+        if (
+            m.sender != self.mesh.node_id
+            and m.kind in ("text", "file")
+            and not self.mesh.is_muted(m.conv)
+        ):
             if not (m.conv == self._active and self._window_focused()):
                 who = self.mesh.display_name(m.sender)
                 gid = conv_group_id(m.conv)
@@ -684,6 +688,9 @@ class ChatBridge(QObject):
         "scanmode",
         "whoami",
         "members",
+        "mute",
+        "unmute",
+        "search",
         "clear",
         "help",
         "about",
@@ -706,6 +713,8 @@ class ChatBridge(QObject):
         (":add <peer…> / :kick <peer>", "change members of this group"),
         (":rename <name> / :leave", "rename or leave this group"),
         (":members", "who's in this group and who's in range"),
+        (":mute / :unmute", "silence notifications for this chat"),
+        (":search <words>", "find messages in all chats"),
         (":nick <name>", "set your display name"),
         (":nick <peer> <name>", 'local nickname for a peer ("" clears)'),
         (":reply [text]", "reply to selected message (Alt+↑/↓ selects, Alt+R)"),
@@ -1014,6 +1023,32 @@ class ChatBridge(QObject):
                         for p in scanpolicy.POLICIES.values()
                     ],
                 )
+        elif head == "search":
+            if not args:
+                return self.errorOccurred.emit("usage: :search <words>")
+            q = " ".join(args)
+            rows = []
+            for m in mesh.storage.search(q, 60):
+                who = "you" if m.sender == mesh.node_id else mesh.display_name(m.sender)
+                when = time.strftime("%d %b %H:%M", time.localtime(m.ts))
+                text = m.text or m.meta.get("n", "")
+                rows.append(
+                    (
+                        f"{who}: {text[:70]}",
+                        f"{self._conv_title(m.conv)} · {when}",
+                        m.conv,
+                    )
+                )
+            self._info(f"search “{q}”", rows)
+        elif head in ("mute", "unmute"):
+            if not self._active:
+                return self.errorOccurred.emit("open a conversation first")
+            self.mesh.set_muted(self._active, head == "mute")
+            self.notify.emit(
+                "notifications off for this chat"
+                if head == "mute"
+                else "notifications on"
+            )
         elif head == "members":
             if gid is None or gid not in mesh.groups:
                 return self.errorOccurred.emit("open a group first")

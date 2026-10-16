@@ -266,6 +266,12 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 3
         query("$MSG_SELECT WHERE conv = ? ORDER BY ts DESC, rowid DESC LIMIT ?", arrayOf(conv, limit), ::msgRow)
             .reversed().map(::hydrate)
 
+    override fun search(query: String, limit: Int): List<StoredMessage> {
+        val q = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        return query("$MSG_SELECT WHERE deleted = 0 AND kind IN ('text','file') AND (text LIKE ? ESCAPE '\\' OR json_extract(meta, '$.n') LIKE ? ESCAPE '\\') " +
+            "ORDER BY ts DESC LIMIT ?", arrayOf(q, q, limit), ::msgRow).map(::hydrate)
+    }
+
     override fun lastMessages(): Map<String, StoredMessage> =
         query("$MSG_SELECT WHERE rowid IN (SELECT MAX(rowid) FROM messages GROUP BY conv)", emptyArray(), ::msgRow)
             .associateBy { it.conv }
