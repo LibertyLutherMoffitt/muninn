@@ -714,11 +714,12 @@ class Mesh(
     private fun dispatch(pkt: P.Packet, body: Body.B) {
         val m = body.meta
         val src = pkt.src
-        val ts = minOf(pkt.ts, P.now() + 60)
+        val ts = minOf(pkt.ts, P.now() + 60) // sender clock (app event order)
+        val arrived = P.now() // chat is ordered by arrival (see mesh.py)
         when (body.kind) {
             Body.TEXT -> {
                 val msg = StoredMessage(
-                    m.str("i").unhex(), convFor(src, m), src, ts, "text", m.str("t"),
+                    m.str("i").unhex(), convFor(src, m), src, arrived, "text", m.str("t"),
                     m.str("r").takeIf { it.isNotEmpty() }?.unhex(),
                 )
                 if (storage.saveMessage(msg)) {
@@ -726,7 +727,7 @@ class Mesh(
                     emit { it.onMessage(msg) }
                 }
             }
-            Body.FILE -> onFileOffer(src, ts, m, body.blob)
+            Body.FILE -> onFileOffer(src, arrived, m, body.blob)
             Body.REACT -> {
                 val mid = m.str("m").unhex()
                 storage.setReaction(mid, src, m.str("e").take(32), !m.bool("x"))

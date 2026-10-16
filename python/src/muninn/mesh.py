@@ -959,13 +959,16 @@ class Mesh:
 
     def _dispatch(self, pkt: P.Packet, body: C.Body) -> None:
         k, m, src = body.kind, body.meta, pkt.src
-        ts = min(pkt.ts, int(time.time()) + 60)
+        ts = min(pkt.ts, int(time.time()) + 60)  # sender clock (app event order)
+        # Chat is ordered by arrival: a wrong clock on the sender's device or a
+        # long wait at a relay can't bury a new message in the history.
+        arrived = int(time.time())
         if k == C.K_TEXT:
             msg = StoredMessage(
                 msg_id=bytes.fromhex(m["i"]),
                 conv=self._conv_for(src, m),
                 sender=src,
-                ts=ts,
+                ts=arrived,
                 kind="text",
                 text=str(m.get("t", "")),
                 reply_to=bytes.fromhex(m["r"]) if m.get("r") else None,
@@ -974,7 +977,7 @@ class Mesh:
                 self.typing.pop((msg.conv, src), None)
                 self._emit("message", msg)
         elif k == C.K_FILE:
-            self._on_file_offer(src, ts, m, body.blob)
+            self._on_file_offer(src, arrived, m, body.blob)
         elif k == C.K_REACT:
             mid = bytes.fromhex(m["m"])
             self.storage.set_reaction(mid, src, str(m["e"])[:32], not m.get("x"))

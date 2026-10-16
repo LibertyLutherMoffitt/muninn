@@ -52,8 +52,6 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - Real-hardware Linux ↔ Android and Windows (WinRT) are untested.
 - Phone ↔ phone first contact needs one side to be visible (Android allows
   5 min); after that everything reconnects by itself.
-- Message order follows the sender's clock; a device with a wrong clock
-  sorts its messages accordingly.
 - NFC tap-to-pair not implemented (emulators have no NFC to test with; it
   would only save the "Make me visible" tap).
 

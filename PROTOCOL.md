@@ -103,7 +103,8 @@ packet_id(16) src(6) dst(6) ttl u8 flags u8 ts u32 src_pubkey(32) | box
   from the pinned key for `src` is dropped.
 - `flags`: `0x01` RELIABLE (ACK required), `0x02` BULK (file chunks — relays
   queue them behind chat), `0x04` REALTIME (games/typing — relays send first).
-- `ts`: sender's wall clock (seconds). Receivers clamp it to now + 60 s.
+- `ts`: sender's wall clock (seconds). Receivers clamp it to now + 60 s and
+  use it to order app events; chat messages are ordered by local arrival.
 
 **Forwarding** (dst ≠ me): drop if `ttl ≤ 1` or `src == me`; drop if this
 `packet_id` was forwarded in the last 5 s; otherwise decrement TTL and send to
