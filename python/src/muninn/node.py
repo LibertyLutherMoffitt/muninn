@@ -310,7 +310,11 @@ class Node:
         for a device not confirmed to run Muninn: never pairs."""
         addr = addr.upper()
         self._backoff.pop(addr, None)
-        sock = self.transport.probe(addr) if probe else self.transport.connect(addr)
+        sock = (
+            self.transport.probe(addr)
+            if probe
+            else self.transport.connect_interactive(addr)
+        )
         return self.mesh.add_link(sock, addr, True)
 
     def status(self) -> dict:

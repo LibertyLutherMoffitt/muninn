@@ -70,3 +70,15 @@ def test_group_three_way(lab):
     assert b.mesh.groups[gid].name == "trip"
     b.mesh.send_text(conv, "from b")
     wait_until(lambda: "from b" in texts(a, conv) and "from b" in texts(c, conv), 15)
+
+
+def test_duplicate_names_are_told_apart(lab):
+    a = lab.node("a", (0, 0))
+    b1 = lab.node("alex", (1, 0))
+    b2 = lab.node("alex2", (1, 1))
+    b2.mesh.set_name("alex")
+    wait_until(lambda: len(a.mesh.connected()) == 2, 20)
+    wait_until(lambda: a.mesh.peers[b2.node_id].name == "alex", 15)
+    n1, n2 = a.mesh.display_name(b1.node_id), a.mesh.display_name(b2.node_id)
+    assert n1 != n2 and n1.startswith("alex ·") and n2.startswith("alex ·")
+    assert a.mesh.resolve(n2) == b2.node_id

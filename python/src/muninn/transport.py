@@ -10,6 +10,7 @@ settimeout / gettimeout). Implementations:
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -60,6 +61,10 @@ class Transport:
         or prompting anyone. Returns a socket or raises."""
         return self.connect(addr)
 
+    def connect_interactive(self, addr: str):
+        """User explicitly asked to connect: pairing (and its prompt) is OK."""
+        return self.connect(addr)
+
     def should_defer(self, addr: str) -> bool:
         """True if we should give the peer a head start dialing us first."""
         return False
@@ -75,6 +80,7 @@ class BtTransport(Transport):
             backend = bt.load()
         self.bt = backend
         self._addr: str | None = None
+        self._pair_tried: dict[str, float] = {}
         self._stop = threading.Event()
 
     def local_addr(self) -> str:
@@ -115,11 +121,30 @@ class BtTransport(Transport):
         except Exception:
             pass
 
+    PAIR_RETRY = 24 * 3600
+
     def connect(self, addr: str, timeout: float = 20.0):
-        # Known / confirmed peers: pair if needed (link keys persist).
-        self.bt.ensure_paired(addr)
-        sock, _ = self.bt.connect(addr)
-        return sock
+        # Known / Muninn-confirmed peers only (strangers go through probe()).
+        # Try without a bond first; if the link needs one, pair — but at
+        # most once a day per device, so a phone never sees repeated
+        # "Pair with …?" prompts while a peer keeps redialling it.
+        try:
+            sock, _ = self.bt.connect(addr)
+            return sock
+        except Exception:
+            if self.bt.is_paired(addr):
+                raise
+            now = time.time()
+            if now - self._pair_tried.get(addr, 0) < self.PAIR_RETRY:
+                raise
+            self._pair_tried[addr] = now
+            self.bt.ensure_paired(addr)
+            sock, _ = self.bt.connect(addr)
+            return sock
+
+    def connect_interactive(self, addr: str):
+        self._pair_tried.pop(addr, None)  # the user asked; a prompt is expected
+        return self.connect(addr)
 
     def probe(self, addr: str):
         # Unconfirmed device: never pair (a pairing prompt on a stranger's

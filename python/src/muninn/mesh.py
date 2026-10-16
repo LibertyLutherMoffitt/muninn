@@ -624,7 +624,23 @@ class Mesh:
         if node_id == self.node_id:
             return self.name or "me"
         p = self.peers.get(node_id)
-        return p.display if p else node_id
+        if p is None:
+            return node_id
+        label = p.display
+        if label != node_id and not p.override:
+            with self.lock:
+                clash = (
+                    any(
+                        q.node_id != node_id
+                        and not q.replaced_by
+                        and q.display.lower() == label.lower()
+                        for q in self.peers.values()
+                    )
+                    or label.lower() == (self.name or "").lower()
+                )
+            if clash:  # two "Alex"es: tell them apart
+                label += " ·" + node_id.replace(":", "")[-4:]
+        return label
 
     def resolve(self, name_or_id: str) -> str | None:
         up = name_or_id.upper()
@@ -638,6 +654,9 @@ class Mesh:
                 return p.node_id
         for p in peers:
             if p.name and p.name.lower() == low:
+                return p.node_id
+        for p in peers:  # "Alex ·4F2A"
+            if self.display_name(p.node_id).lower() == low:
                 return p.node_id
         for p in peers:  # unique prefix
             if p.display.lower().startswith(low):

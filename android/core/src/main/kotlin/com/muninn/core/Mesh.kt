@@ -468,14 +468,24 @@ class Mesh(
         emit { it.onPeers() }
     }
 
-    fun displayName(node: String): String =
-        if (node == nodeId) name.ifEmpty { "me" } else synchronized(lock) { peers[node]?.display ?: node }
+    fun displayName(node: String): String {
+        if (node == nodeId) return name.ifEmpty { "me" }
+        return synchronized(lock) {
+            val p = peers[node] ?: return@synchronized node
+            val label = p.display
+            if (label == node || p.override != null) return@synchronized label
+            val clash = peers.values.any { it.nodeId != node && it.replacedBy == null && it.display.equals(label, true) } ||
+                label.equals(name, true)
+            if (clash) "$label ·" + node.replace(":", "").takeLast(4) else label
+        }
+    }
 
     fun resolve(s: String): String? {
         val up = s.uppercase()
         val ps = synchronized(lock) { if (up in peers) return up; peers.values.filter { it.replacedBy == null } }
         val low = s.lowercase()
         ps.firstOrNull { it.override?.lowercase() == low }?.let { return it.nodeId }
+        ps.firstOrNull { displayName(it.nodeId).lowercase() == low }?.let { return it.nodeId }
         ps.firstOrNull { it.name.lowercase() == low }?.let { return it.nodeId }
         return ps.firstOrNull { it.display.lowercase().startsWith(low) }?.nodeId
     }
