@@ -1,21 +1,29 @@
-"""Single-instance lock (per data dir) — one Muninn owns the radio + DB."""
+"""Single-instance lock (per data dir) — one Muninn owns the radio + DB.
 
+Taken by every front end (GUI, terminal, bot) through Node, so a second copy
+fails with a clear message instead of fighting over Bluetooth and the DB.
+"""
+
+import os
 import sys
+from pathlib import Path
 
 
-class WriterLock:
-    def __init__(self):
-        from muninn.storage import data_dir
+class AlreadyRunning(RuntimeError):
+    pass
 
-        state_dir = data_dir()
+
+class InstanceLock:
+    def __init__(self, state_dir: Path):
         state_dir.mkdir(parents=True, exist_ok=True)
-        self._path = state_dir / ".writer.lock"
+        self._path = state_dir / ".instance.lock"
         self._fd = None
         self._held = False
 
     def try_acquire(self) -> bool:
         try:
-            self._fd = open(self._path, "w")
+            self._fd = open(self._path, "a+")
+            self._fd.seek(0)
             if sys.platform == "win32":
                 import msvcrt
 
@@ -24,6 +32,9 @@ class WriterLock:
                 import fcntl
 
                 fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._fd.truncate()
+                self._fd.write(str(os.getpid()))  # for the error message
+                self._fd.flush()
             self._held = True
             return True
         except (OSError, IOError):
@@ -49,3 +60,9 @@ class WriterLock:
         self._fd.close()
         self._fd = None
         self._held = False
+
+    def holder(self) -> str:
+        try:
+            return self._path.read_text().strip()
+        except OSError:
+            return ""

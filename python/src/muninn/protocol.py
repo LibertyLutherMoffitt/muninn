@@ -3,7 +3,7 @@
 Every frame: [type u8][length u16 BE][payload]. Two families:
 
 Link frames (hop-by-hop, never forwarded):
-    HELLO, PING, PONG, ROUTES, ROSTER
+    HELLO, PING, PONG, ROUTES, ROSTER, ADDRS
 
 Mesh frames (routed end-to-end by node id):
     PACKET  — encrypted body (see content.py), optionally reliable
@@ -24,6 +24,7 @@ T_PING = 0x02
 T_PONG = 0x03
 T_ROUTES = 0x04
 T_ROSTER = 0x05
+T_ADDRS = 0x06
 T_PACKET = 0x10
 T_ACK = 0x11
 
@@ -214,6 +215,37 @@ def decode_roster(p: bytes) -> list[RosterEntry]:
         out.append(RosterEntry(nid, pk, name, name_ts))
         off += 43 + nlen
     return out
+
+
+# --- ADDRS (radio address hints) ----------------------------------------------
+
+
+def encode_addrs(entries: list[tuple[str, str]]) -> bytes:
+    """[(node_id, radio address)] for our direct links; addresses that aren't
+    6-byte MACs are skipped."""
+    parts = []
+    for node_id, addr in entries:
+        try:
+            parts.append(id_to_bytes(node_id) + id_to_bytes(addr))
+        except ValueError:
+            continue
+    parts = parts[:255]
+    return encode_frame(T_ADDRS, bytes([len(parts)]) + b"".join(parts))
+
+
+def decode_addrs(p: bytes) -> list[tuple[str, str]]:
+    if not p:
+        return []
+    n = p[0]
+    if len(p) < 1 + n * 12:
+        raise MalformedFrame("addrs truncated")
+    return [
+        (
+            bytes_to_id(p[1 + i * 12 : 7 + i * 12]),
+            bytes_to_id(p[7 + i * 12 : 13 + i * 12]),
+        )
+        for i in range(n)
+    ]
 
 
 # --- PACKET ------------------------------------------------------------------

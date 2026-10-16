@@ -49,9 +49,12 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 
 ### 1.3 Known limits
 
-- Real-hardware Linux ↔ Android and Windows (WinRT) are untested.
+- Windows (WinRT) is untested on hardware.
 - Phone ↔ phone first contact needs one side to be visible (Android allows
-  5 min); after that everything reconnects by itself.
+  5 min) — unless both already share a neighbour (e.g. a laptop), whose
+  address hints (ADDRS) let them dial each other directly.
+- BlueZ can only dial devices in its cache: a laptop can't dial a hidden
+  phone it learned about by hint, but the phone dials the laptop.
 - NFC tap-to-pair not implemented (emulators have no NFC to test with; it
   would only save the "Make me visible" tap).
 
@@ -187,6 +190,17 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   in ~2 s; a *fresh* phone finds a visible phone by itself (inquiry → polite
   pairing-free probe), then reaches the third phone 2 hops away; message
   delivered with ✓.
+- Real hardware (2026-10-15, Pixel 10 Pro + Pixel 9 + magnus TUI): chat,
+  files, relaying through a wall all worked. Found and fixed: phones relayed
+  forever instead of linking directly (→ ADDRS address hints, both cores);
+  Android's Nearby screen and background scanner cancelled each other's
+  inquiries (→ one scan owner, user scans check every phone in sight, ignore
+  stale "not Muninn" verdicts); "Make me visible" gave no feedback (→
+  countdown card on Nearby + Settings); TUI corrupted by stray prints from the
+  BlueZ backend (→ logging to `<data>/muninn.log`, help/command output in a
+  scrollable pane, Ctrl-L full repaint); GUI died on NixOS when the flake's
+  Mesa ≠ system driver (→ software-renderer fallback); a second front end
+  fought the first over BlueZ (→ single-instance lock in Node, clear error).
 - Next: more games (chess, checkers, connect4, reversi, real-time demo),
   BT good-citizen audit (bluez agent), Python scan policy, Windows check,
   Android notification/background testing, netsim real-BT test of new app,

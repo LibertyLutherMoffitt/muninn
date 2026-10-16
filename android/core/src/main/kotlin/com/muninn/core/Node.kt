@@ -49,12 +49,14 @@ class Node(
     private val deferred = ConcurrentHashMap<String, Double>()
     private val confirmed = ConcurrentHashMap<String, Long>()
     private val probeQueue = java.util.Collections.synchronizedList(ArrayList<String>())
+    @Volatile private var hints: Set<String> = emptySet()
     private val refused = ConcurrentHashMap<String, Long>() // addr -> until (ms)
     val sightings = ConcurrentHashMap<String, ScanResult>()
     private val sightedAt = ConcurrentHashMap<String, Long>()
     private val dialing = ConcurrentHashMap.newKeySet<String>()
     @Volatile var scanResults: List<ScanResult> = emptyList()
     @Volatile var lastInquiry = 0.0
+    private val scanLock = Any() // one inquiry at a time: concurrent ones cancel each other
 
     init {
         var ident = storage.getIdentity() ?: storage.createIdentity(Nacl.newSecretKey(), name ?: "")
@@ -100,7 +102,7 @@ class Node(
 
     fun presence(node: String): Presence {
         val h = mesh.hops(node)
-        if (h == 1) return Presence("direct", "nearby · connected", 1)
+        if (h == 1) return Presence("direct", "connected directly", 1)
         if (h != null) return Presence("relay", "in range via ${mesh.displayName(mesh.nextHop(node) ?: "")} · $h hops", h)
         val addrs = storage.loadTransports().filter { it.first == node }.map { it.second }
         val seen = addrs.maxOfOrNull { sightedAt[it] ?: 0 } ?: 0
@@ -124,7 +126,19 @@ class Node(
     private fun candidates(): List<Pair<String, Boolean>> {
         val linkedNodes = mesh.connected().toSet()
         val out = LinkedHashMap<String, Boolean>()
-        for ((node, addr, _) in storage.loadTransports()) if (node !in linkedNodes) out.putIfAbsent(addr, false)
+        val h = HashSet<String>()
+        for ((node, addr, lastOk) in storage.loadTransports()) {
+            if (node in linkedNodes || addr in out) continue
+            if (lastOk == 0L) {
+                // Gossiped by a neighbour, never connected there: only worth
+                // a try while they're a short relay away (probably in range).
+                val hops = mesh.hops(node)
+                if (hops == null || hops > HINT_MAX_HOPS) continue
+                h.add(addr)
+            }
+            out[addr] = false
+        }
+        hints = h
         val now = System.currentTimeMillis()
         confirmed.entries.sortedByDescending { it.value }.forEach { if (now - it.value < 180_000) out.putIfAbsent(it.key, false) }
         synchronized(probeQueue) { probeQueue.toList() }.forEach { out.putIfAbsent(it, true) }
@@ -161,7 +175,9 @@ class Node(
         } catch (e: Throwable) {
             if (probe) refused[addr] = System.currentTimeMillis() + (policy.probeBackoff * 1000).toLong()
             else {
-                val d = minOf(maxOf((backoff[addr]?.second ?: 1.0) * 2, 2.0), policy.peerBackoffMax)
+                val prev = (backoff[addr]?.second ?: 1.0) * 2
+                val d = if (addr in hints) minOf(maxOf(prev, HINT_BACKOFF_MIN), HINT_BACKOFF_MAX)
+                        else minOf(maxOf(prev, 2.0), policy.peerBackoffMax)
                 backoff[addr] = (mono() + d * (0.8 + Math.random() * 0.4)) to d
             }
             return
@@ -186,7 +202,7 @@ class Node(
                 val interval = if (mesh.connected().isEmpty()) p.inquiryAlone else p.inquiryLinked
                 val due = interval > 0 && mono() - lastInquiry >= interval
                 val forced = scanNow.tryAcquire()
-                if ((first && p.inquiryAlone > 0) || due || forced) ingest(transport.scan(5000))
+                if ((first && p.inquiryAlone > 0) || due || forced) synchronized(scanLock) { ingest(transport.scan(5000)) }
             } catch (e: Throwable) { log("scan: $e") }
             first = false
             scanNow.tryAcquire((2000 * (0.8 + Math.random() * 0.4)).toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -194,18 +210,20 @@ class Node(
         }
     }
 
-    private fun ingest(results: List<ScanResult>) {
+    /** [manual]: the user asked (Nearby screen) — check every phone/laptop in
+     *  sight, including ones that weren't running Muninn last time. */
+    private fun ingest(results: List<ScanResult>, manual: Boolean = false) {
         lastInquiry = mono()
         scanResults = results
         val now = System.currentTimeMillis()
-        var budget = policy.probeBudget
+        var budget = if (manual) Int.MAX_VALUE else policy.probeBudget
         val known = storage.loadTransports().map { it.second }.toSet()
         for (r in results.sortedByDescending { it.rssi ?: -100 }) {
             val addr = r.addr.uppercase()
             sightings[addr] = r
             sightedAt[addr] = now
             if (r.muninn == true) markSeen(addr)
-            else if (r.probeable && budget > 0 && addr !in known && (refused[addr] ?: 0) < now &&
+            else if (r.probeable && budget > 0 && addr !in known && (manual || (refused[addr] ?: 0) < now) &&
                 addr !in probeQueue && !mesh.hasTransport(addr)) {
                 probeQueue.add(addr); budget--
             }
@@ -220,7 +238,22 @@ class Node(
         if (fresh) backoff.remove(a)
     }
 
-    fun scanNow(durationMs: Long = 6000): List<ScanResult> = transport.scan(durationMs).also { ingest(it) }
+    fun scanNow(durationMs: Long = 6000): List<ScanResult> =
+        synchronized(scanLock) { transport.scan(durationMs).also { ingest(it, manual = true) } }
+
+    /** What the Nearby screen shows for a scanned device. */
+    fun deviceState(addr: String): String {
+        val a = addr.uppercase()
+        val now = System.currentTimeMillis()
+        return when {
+            mesh.hasTransport(a) -> "connected"
+            a in dialing || a in probeQueue -> "checking"
+            now - (confirmed[a] ?: 0) < 180_000 -> "muninn"
+            (refused[a] ?: 0) > now -> "not_muninn"
+            sightings[a]?.probeable == false && sightings[a]?.muninn != true -> "ignored"
+            else -> "unknown"
+        }
+    }
 
     fun connectTo(addr: String, probe: Boolean = false): String? {
         backoff.remove(addr.uppercase())
@@ -234,6 +267,10 @@ class Node(
     )
 
     companion object {
+        const val HINT_MAX_HOPS = 3 // dial gossiped addresses of peers at most this far away
+        const val HINT_BACKOFF_MIN = 10.0
+        const val HINT_BACKOFF_MAX = 300.0
+
         fun ago(ts: Long): String {
             val d = P.now() - ts
             return when {

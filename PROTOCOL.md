@@ -32,6 +32,7 @@ No compatibility with v1 is kept (v1 databases are wiped on first start).
 | 0x03 | PONG    | link       | echo of PING token (RTT) |
 | 0x04 | ROUTES  | link       | distance-vector reachability |
 | 0x05 | ROSTER  | link       | who-is-who gossip (ids, keys, names) |
+| 0x06 | ADDRS   | link       | radio addresses of the sender's direct links |
 | 0x10 | PACKET  | end-to-end | encrypted body, routed by destination |
 | 0x11 | ACK     | end-to-end | delivery confirmation, routed to the sender |
 
@@ -88,6 +89,21 @@ name is replaced only if `name_ts` is newer. **Keys are pinned** — an entry
 whose key differs from the stored key for that id is ignored (reinstalls are
 handled by HELLO/REPLACED instead). Changed entries are re-gossiped to the
 other links, so names and keys travel any number of hops.
+
+### ADDRS (0x06)
+
+```
+count u8, then count × ( node_id(6) radio_addr(6) )
+```
+
+Where the sender's direct neighbours can be dialled (the address it sees on
+each link). Sent with the initial sync (all current links) and, when a link
+comes up, to every other neighbour (just the newcomer). Receivers store an
+entry as a *dial hint* for a known peer that they reach only through relays,
+and try it with a long back-off (10 s → 5 min) while that peer is ≤ 3 hops
+away. Hints are never forwarded. They are what lets two phones that are
+both linked to a laptop (but not discoverable) connect directly, and they
+never count as evidence for reinstall detection.
 
 ## Mesh frames
 

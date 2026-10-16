@@ -334,6 +334,18 @@ class Storage:
             (node_id, addr, int(time.time())),
         )
 
+    def add_transport_hint(self, node_id: str, addr: str) -> bool:
+        """Remember a gossiped address (last_ok = 0: never connected there).
+        True if it was new."""
+        return (
+            self._x(
+                "INSERT OR IGNORE INTO transports (node_id, addr, last_ok) "
+                "VALUES (?, ?, 0)",
+                (node_id, addr.upper()),
+            )
+            > 0
+        )
+
     def load_transports(self) -> list[tuple[str, str, int]]:
         return [
             (r[0], r[1], r[2])

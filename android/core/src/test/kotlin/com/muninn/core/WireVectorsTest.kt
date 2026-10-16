@@ -24,6 +24,11 @@ class WireVectorsTest {
             assertEquals(it.str("frame"), P.encodeRoutes(e).hex())
             assertEquals(e, P.decodeRoutes(it.str("frame").unhex().let { b -> b.copyOfRange(3, b.size) }))
         }
+        list("addrs").forEach {
+            val e = it.list("entries").map { x -> val l = x as List<Any?>; (l[0] as String) to (l[1] as String) }
+            assertEquals(it.str("frame"), P.encodeAddrs(e).hex())
+            assertEquals(e, P.decodeAddrs(it.str("frame").unhex().let { b -> b.copyOfRange(3, b.size) }))
+        }
         list("roster").forEach {
             val es = it.list("entries").map { x -> val l = x as List<Any?>
                 P.RosterEntry(l[0] as String, (l[1] as String).unhex(), l[2] as String, (l[3] as Number).toLong()) }

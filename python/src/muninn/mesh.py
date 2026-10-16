@@ -399,8 +399,16 @@ class Mesh:
         for frame in P.encode_roster(self._roster_entries(exclude=hello.node_id)):
             link.send(frame, PRIO_CONTROL)
         link.send(self._routes_frame_for(hello.node_id), PRIO_CONTROL)
+        link.send(P.encode_addrs(self._link_addrs()), PRIO_CONTROL)
         if changed:
             self._gossip(changed, exclude=hello.node_id)
+        # Tell our other neighbours where the newcomer can be reached: they
+        # are probably in radio range of it too and can link up directly
+        # instead of relaying through us (no inquiry/visibility needed).
+        self._broadcast(
+            P.encode_addrs([(hello.node_id, link.transport_addr)]),
+            exclude=hello.node_id,
+        )
         self._advert_due = 0.0
         self._log(f"link up {hello.node_id} ({hello.name}) via {link.transport_addr}")
         self._on_topology_change()
@@ -449,8 +457,8 @@ class Mesh:
         """Same radio address, same name, different identity → the person
         reinstalled Muninn. Carry their conversation over instead of leaving
         it stranded on a key that no longer exists."""
-        for old, a, _ in self.storage.load_transports():
-            if a != addr or old == new:
+        for old, a, last_ok in self.storage.load_transports():
+            if a != addr or old == new or not last_ok:  # hints don't count
                 continue
             with self.lock:
                 p = self.peers.get(old)
@@ -553,6 +561,8 @@ class Mesh:
                 link._ping = None
         elif ftype == P.T_ROUTES:
             self._on_routes(link, P.decode_routes(payload))
+        elif ftype == P.T_ADDRS:
+            self._on_addrs(link, P.decode_addrs(payload))
         elif ftype == P.T_ROSTER:
             changed = []
             for e in P.decode_roster(payload):
@@ -590,6 +600,35 @@ class Mesh:
                 if p.node_id != exclude and not p.replaced_by
             ]
         return out
+
+    def _link_addrs(self) -> list[tuple[str, str]]:
+        with self.lock:
+            return [(nid, lk.transport_addr) for nid, lk in self.links.items()]
+
+    def _on_addrs(self, link: Link, entries: list[tuple[str, str]]) -> None:
+        """Address hints from a neighbour: remember them as dial candidates
+        for peers we only reach through relays. Never forwarded further —
+        only neighbours-of-neighbours are likely to be in radio range."""
+        learned = False
+        for nid, addr in entries:
+            with self.lock:
+                skip = (
+                    nid == self.node_id
+                    or nid in self.links
+                    or nid not in self.peers
+                    or bool(self.peers[nid].replaced_by)
+                )
+            if not skip and self.storage.add_transport_hint(nid, addr):
+                self._log(f"addr hint {nid} at {addr} from {link.node_id}")
+                learned = True
+        if learned:
+            self._emit("addrs")
+
+    def _broadcast(self, frame: bytes, exclude: str | None = None) -> None:
+        with self.lock:
+            targets = [lk for nid, lk in self.links.items() if nid != exclude]
+        for lk in targets:
+            lk.send(frame, PRIO_CONTROL)
 
     def _gossip(self, entries: list[P.RosterEntry], exclude: str | None) -> None:
         frames = P.encode_roster(entries)

@@ -1,12 +1,16 @@
 package com.muninn
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
 import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -65,6 +69,7 @@ import com.muninn.core.dmConv
 import com.muninn.core.groupConv
 import com.muninn.core.hex
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -82,31 +87,79 @@ fun SimpleScaffold(title: String, actions: @Composable () -> Unit = {}, content:
 
 // ---------------------------------------------------------------- Nearby
 
+/** "Make me visible" with feedback: whether it worked and for how long. */
+@SuppressLint("MissingPermission")
 @Composable
-fun NearbyScreen(discovery: BtDiscovery) {
+fun VisibilityCard() {
+    val ctx = LocalContext.current
+    val adapter = remember { ctx.getSystemService(BluetoothManager::class.java)?.adapter }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { delay(1000); now = System.currentTimeMillis() } }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        // The system returns the granted duration in seconds, or CANCELED.
+        if (r.resultCode > 0) {
+            Runtime.visibleUntil = System.currentTimeMillis() + r.resultCode * 1000L
+            Runtime.toast("Visible for ${r.resultCode / 60} min — other phones can find you now")
+            Runtime.node?.poke()
+        } else Runtime.toast("Not visible: the request was declined")
+    }
+    val discoverable = runCatching { adapter?.scanMode == BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE }.getOrDefault(false)
+    val left = ((Runtime.visibleUntil - now) / 1000).coerceAtLeast(0)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        if (discoverable || left > 0) {
+            Text(if (left > 0) "● Visible to nearby phones for ${left / 60}:${"%02d".format(left % 60)}" else "● Visible to nearby phones",
+                color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
+            Text("Keep Muninn open on the other phone and tap ⟳ there.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Text("Phones are hidden by default. For the very first connection, one of the two must be visible.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedButton(onClick = {
+                runCatching {
+                    launcher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                        .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300))
+                }.onFailure { Runtime.toast("Couldn't ask Android to make this phone visible") }
+            }, modifier = Modifier.padding(top = 6.dp)) { Text("Make me visible for 5 minutes") }
+        }
+    }
+}
+
+private val STATE_LABEL = mapOf(
+    "connected" to "connected",
+    "checking" to "checking for Muninn…",
+    "muninn" to "Muninn",
+    "not_muninn" to "not running Muninn",
+    "ignored" to "not a phone or computer — left alone",
+    "unknown" to "",
+)
+
+@Composable
+fun NearbyScreen() {
     val scope = rememberCoroutineScope()
-    val sim = Runtime.transport !is BtTransport
-    val devices by discovery.devices.collectAsState()
-    val scanning by discovery.scanning.collectAsState()
-    var simResults by remember { mutableStateOf<List<ScanResult>>(emptyList()) }
-    var simScanning by remember { mutableStateOf(false) }
+    val tick by Runtime.tick.collectAsState()
+    var results by remember { mutableStateOf<List<ScanResult>>(emptyList()) }
+    var scanning by remember { mutableStateOf(false) }
+    var scans by remember { mutableStateOf(0) }
     var showAll by remember { mutableStateOf(false) }
     var connecting by remember { mutableStateOf(setOf<String>()) }
+    var now by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
 
     fun scan() {
-        if (sim) {
-            simScanning = true
-            scope.launch(Dispatchers.IO) { simResults = Runtime.node?.scanNow() ?: emptyList(); simScanning = false }
-        } else discovery.scan()
+        if (scanning) return
+        scanning = true
+        scope.launch(Dispatchers.IO) {
+            results = runCatching { Runtime.node?.scanNow(10_000) }.getOrNull() ?: emptyList()
+            scans++
+            scanning = false
+        }
     }
     LaunchedEffect(Unit) { scan() }
-    DisposableEffect(Unit) { onDispose { discovery.stopScan() } }
 
     fun connect(addr: String, label: String) {
         connecting = connecting + addr
         scope.launch(Dispatchers.IO) {
-            val confirmed = discovery.devices.value.firstOrNull { it.address == addr }?.muninn == true ||
-                simResults.firstOrNull { it.addr == addr }?.muninn == true
+            val confirmed = Runtime.node?.deviceState(addr) == "muninn" || results.firstOrNull { it.addr == addr }?.muninn == true
             val r = runCatching { Runtime.node?.connectTo(addr, probe = !confirmed) }
             connecting = connecting - addr
             r.onSuccess { id ->
@@ -118,45 +171,59 @@ fun NearbyScreen(discovery: BtDiscovery) {
         }
     }
 
-    val rows: List<Triple<String, String, Boolean>> =
-        if (sim) simResults.map { Triple(it.addr, it.name, it.muninn == true) }
-        else devices.map { Triple(it.address, it.label, it.muninn) }
-    val shown = rows.filter { showAll || it.third }.sortedBy { !it.third }
-    val busy = if (sim) simScanning else scanning
+    val node = Runtime.node
+    // State is re-read on every tick: probes finish in the background.
+    val rows = remember(results, tick, now) {
+        results.map { r -> Triple(r, node?.deviceState(r.addr) ?: "unknown", r.muninn == true) }
+    }
+    val muninnRows = rows.filter { (_, st, m) -> m || st == "muninn" || st == "connected" }
+    val shown = if (showAll) rows.sortedBy { it.second !in setOf("connected", "muninn") } else muninnRows
+    val checking = rows.count { it.second == "checking" }
 
     SimpleScaffold("People nearby", actions = {
-        if (busy) CircularProgressIndicator(Modifier.size(22.dp).padding(end = 4.dp), strokeWidth = 2.dp)
-        else IconButton(onClick = { scan() }) { Icon(Icons.Default.Refresh, "Scan") }
+        if (scanning) CircularProgressIndicator(Modifier.size(22.dp).padding(end = 4.dp), strokeWidth = 2.dp)
+        else IconButton(onClick = { scan() }) { Icon(Icons.Default.Refresh, "Look again") }
     }) { mod ->
         Column(mod.fillMaxSize()) {
+            VisibilityCard()
+            HorizontalDivider()
             Text(
-                "Devices running Muninn show up here. Tap one to connect — no pairing needed. " +
-                    "Muninn never connects to other Bluetooth devices." +
-                    if (!sim) "\n\nOther phones only appear while they're discoverable: on theirs, open Muninn → Settings → Be visible." else "",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(16.dp),
+                when {
+                    scanning -> "Looking around (about 10 s)…"
+                    scans == 0 -> ""
+                    else -> "Saw ${rows.size} Bluetooth device${if (rows.size == 1) "" else "s"}, " +
+                        "${muninnRows.size} running Muninn" + if (checking > 0) " · checking $checking phone${if (checking == 1) "" else "s"}…" else ""
+                },
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             )
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Show all Bluetooth devices", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 Switch(checked = showAll, onCheckedChange = { showAll = it })
             }
             HorizontalDivider(Modifier.padding(top = 8.dp))
-            if (shown.isEmpty()) Text(if (busy) "Scanning…" else "No Muninn devices found yet.",
-                Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (shown.isEmpty() && !scanning) Text(
+                "No Muninn devices in sight yet. Phones only show up while visible — tap \"Make me visible\" on one of them, " +
+                    "then ⟳ on the other. Laptops running Muninn are always visible. " +
+                    "Once two devices have connected they find each other by themselves.",
+                Modifier.padding(24.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             LazyColumn {
-                items(shown, key = { it.first }) { (addr, name, muninn) ->
+                items(shown, key = { it.first.addr }) { (r, st, _) ->
+                    val name = r.name.ifBlank { r.addr }
+                    val isMuninn = st == "muninn" || st == "connected" || r.muninn == true
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(name, null, 38)
+                        Avatar(name, if (st == "connected") "direct" else null, 38)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(name, fontWeight = FontWeight.Medium)
-                            Text(if (muninn) "Muninn · $addr" else addr, style = MaterialTheme.typography.labelSmall,
-                                color = if (muninn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                            val label = STATE_LABEL[st].orEmpty().ifEmpty { r.kind }
+                            Text("$label · ${r.addr}", style = MaterialTheme.typography.labelSmall,
+                                color = if (isMuninn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         when {
-                            addr in connecting -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                            muninn -> Button(onClick = { connect(addr, name) }) { Text("Connect") }
-                            else -> OutlinedButton(onClick = { connect(addr, name) }) { Text("Try") }
+                            r.addr in connecting || st == "checking" -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                            st == "connected" -> {}
+                            isMuninn -> Button(onClick = { connect(r.addr, name) }) { Text("Connect") }
+                            st != "ignored" -> OutlinedButton(onClick = { connect(r.addr, name) }) { Text("Try") }
                         }
                     }
                 }
@@ -304,14 +371,7 @@ fun SettingsScreen() {
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             HorizontalDivider()
             Text("Be visible", style = MaterialTheme.typography.titleSmall)
-            Text("Let nearby phones find you for the first connection (Android asks once, for a few minutes).",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            OutlinedButton(onClick = {
-                runCatching {
-                    ctx.startActivity(Intent("android.bluetooth.adapter.action.REQUEST_DISCOVERABLE")
-                        .putExtra("android.bluetooth.adapter.extra.DISCOVERABLE_DURATION", 300).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                }
-            }) { Text("Make me visible for 5 minutes") }
+            VisibilityCard()
             HorizontalDivider()
             Text("Stay connected in the background", style = MaterialTheme.typography.titleSmall)
             Text(if (unrestricted) "✓ Battery optimisation is off for Muninn — messages keep flowing with the screen off."

@@ -29,6 +29,7 @@ def main() -> None:
         "hello": [],
         "routes": [],
         "roster": [],
+        "addrs": [],
         "packet": [],
         "ack": [],
         "body": [],
@@ -66,6 +67,13 @@ def main() -> None:
             "frame": hx(P.encode_roster(roster)[0]),
         }
     )
+    for entries in [[], [(A, "98:98:FB:38:87:EF"), (B, "00:1A:7D:DA:71:13")]]:
+        v["addrs"].append(
+            {
+                "entries": [[i, a] for i, a in entries],
+                "frame": hx(P.encode_addrs(entries)),
+            }
+        )
     pkt = P.Packet(
         bytes(range(16)),
         A,

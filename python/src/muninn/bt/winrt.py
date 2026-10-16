@@ -49,6 +49,7 @@ get the socket back synchronously. Much simpler than the BlueZ path.
 
 import array
 import asyncio
+import logging
 import os
 import queue
 import re
@@ -83,6 +84,8 @@ from winrt.windows.storage.streams import (  # type: ignore[import-not-found]
     DataWriter,
     InputStreamOptions,
 )
+
+log = logging.getLogger("muninn.bt")
 
 _LOG_PATH = os.environ.get(
     "MUNINN_WINRT_LOG", os.path.join(tempfile.gettempdir(), "muninn-winrt.log")
@@ -521,7 +524,7 @@ def discover() -> list[tuple[str, str]]:
         import traceback
 
         traceback.print_exc()
-        print(f"Discover error: {e}")
+        log.warning("discover error: %s", e)
         return []
 
 
@@ -559,7 +562,7 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
         except Exception as e:
             _log(f"[scan] create_watcher({attempt}) failed: {type(e).__name__}: {e}")
     if watcher is None:
-        print("Fatal watcher error: all create_watcher overloads failed")
+        log.error("fatal watcher error: all create_watcher overloads failed")
         return []
 
     watcher.add_added(on_added)
@@ -616,7 +619,7 @@ async def _scan_devices_async(duration: float) -> list[tuple[str, str]]:
 
 def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str, str]]:
     if not quiet:
-        print(f"Scanning for nearby Bluetooth devices ({duration:.0f}s)...")
+        log.info("scanning for nearby Bluetooth devices (%.0fs)", duration)
     try:
         return _run_async(_scan_devices_async(duration))
     except Exception as e:
@@ -624,7 +627,7 @@ def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str,
 
         traceback.print_exc()
         if not quiet:
-            print(f"Scan error: {e}")
+            log.warning("scan error: %s", e)
         return []
 
 
@@ -685,9 +688,9 @@ async def _pair_async(addr: str) -> None:
 
 
 def pair(addr: str) -> None:
-    print(f"Pairing with {addr}...")
+    log.info("pairing with %s", addr)
     _run_async(_pair_async(addr))
-    print(f"Paired {addr}")
+    log.info("paired %s", addr)
 
 
 def ensure_paired(addr: str) -> None:
@@ -737,5 +740,5 @@ def connect(addr: str) -> tuple:
     """Connect to a peer's Muninn RFCOMM service. Returns (sock, peer_addr)."""
     addr = addr.upper()
     adapter = _run_async(_connect_async(addr))
-    print(f"Connected to {addr}")
+    log.info("connected to %s", addr)
     return adapter, addr

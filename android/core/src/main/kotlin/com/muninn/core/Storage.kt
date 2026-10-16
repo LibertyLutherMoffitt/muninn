@@ -74,6 +74,8 @@ interface Storage {
 
     fun saveTransport(nodeId: String, addr: String)
     fun loadTransports(): List<Triple<String, String, Long>> // node, addr, lastOk (newest first)
+    /** Gossiped address (lastOk = 0: never connected there). True if new. */
+    fun addTransportHint(nodeId: String, addr: String): Boolean
 
     fun saveGroup(groupId: ByteArray, name: String, version: Int, members: List<String>, left: Boolean)
     fun loadGroups(): List<GroupRow>
@@ -170,6 +172,9 @@ class MemStorage(override val filesDir: File) : Storage {
     }
 
     override fun saveTransport(nodeId: String, addr: String) = synchronized(lock) { transports[nodeId to addr] = P.now() }
+    override fun addTransportHint(nodeId: String, addr: String) = synchronized(lock) {
+        transports.putIfAbsent(nodeId to addr.uppercase(), 0L) == null
+    }
     override fun loadTransports() = synchronized(lock) {
         transports.entries.sortedByDescending { it.value }.map { Triple(it.key.first, it.key.second, it.value) }
     }

@@ -1,3 +1,4 @@
+import logging
 import queue
 import socket
 import subprocess
@@ -22,6 +23,9 @@ _incoming_queue: queue.Queue = queue.Queue()
 _waiters: dict[str, queue.Queue] = {}
 _waiters_lock = threading.Lock()
 _loop: GLib.MainLoop | None = None
+_ready = threading.Event()
+_start_error: list[Exception] = []
+log = logging.getLogger("muninn.bt")
 
 
 class _Agent(dbus.service.Object):
@@ -104,6 +108,18 @@ class _Profile(dbus.service.Object):
 
 def _dbus_loop() -> None:
     global _loop
+    try:
+        _register()
+    except Exception as e:
+        _start_error.append(e)
+        _ready.set()
+        return
+    _loop = GLib.MainLoop()
+    _ready.set()
+    _loop.run()
+
+
+def _register() -> None:
     bus = dbus.SystemBus()
 
     # Register pairing agent so link keys are persisted (store_hint=1).
@@ -124,20 +140,25 @@ def _dbus_loop() -> None:
         bus.get_object("org.bluez", "/org/bluez"),
         "org.bluez.ProfileManager1",
     )
-    profile_manager.RegisterProfile(
-        _PROFILE_PATH,
-        SERVICE_UUID,
-        {
-            "Name": dbus.String(SERVICE_NAME),
-            "Channel": dbus.UInt16(RFCOMM_CHANNEL),
-            "AutoConnect": dbus.Boolean(False),
-            "RequireAuthentication": dbus.Boolean(False),
-            "RequireAuthorization": dbus.Boolean(False),
-        },
-    )
-
-    _loop = GLib.MainLoop()
-    _loop.run()
+    try:
+        profile_manager.RegisterProfile(
+            _PROFILE_PATH,
+            SERVICE_UUID,
+            {
+                "Name": dbus.String(SERVICE_NAME),
+                "Channel": dbus.UInt16(RFCOMM_CHANNEL),
+                "AutoConnect": dbus.Boolean(False),
+                "RequireAuthentication": dbus.Boolean(False),
+                "RequireAuthorization": dbus.Boolean(False),
+            },
+        )
+    except dbus.DBusException as e:
+        if e.get_dbus_name() == "org.bluez.Error.NotPermitted":
+            raise RuntimeError(
+                "Another Muninn is already using Bluetooth on this computer "
+                "(close the other window or terminal client first)."
+            ) from e
+        raise
 
 
 def _device_path(addr: str) -> str:
@@ -166,10 +187,14 @@ def create_server() -> None:
     """Register agent + RFCOMM profile via D-Bus. Starts background GLib loop."""
     # Must be called before any SystemBus() so the mainloop is set first.
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    set_discoverable(True)
+    _ready.clear()
+    _start_error.clear()
     threading.Thread(target=_dbus_loop, daemon=True).start()
-    # Let the GLib loop start and both registrations complete before returning.
-    time.sleep(0.5)
+    # Registrations must complete (or fail loudly) before we go on.
+    _ready.wait(10)
+    if _start_error:
+        raise _start_error[0]
+    set_discoverable(True)
 
 
 def close_server() -> None:
@@ -286,7 +311,7 @@ def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str,
     and appear in ObjectManager results.
     """
     if not quiet:
-        print(f"Scanning for nearby Bluetooth devices ({duration:.0f}s)...")
+        log.info("scanning for nearby Bluetooth devices (%.0fs)", duration)
     try:
         bus = dbus.SystemBus()
         adapter = dbus.Interface(
@@ -300,7 +325,7 @@ def scan_devices(duration: float = 10.0, quiet: bool = False) -> list[tuple[str,
         except dbus.DBusException:
             pass
     except dbus.DBusException as e:
-        print(f"Scan error: {e}")
+        log.warning("scan error: %s", e)
         return []
 
     manager = dbus.Interface(
@@ -339,7 +364,7 @@ def pair(addr: str) -> None:
     link key is stored with store_hint=1, which is required for ConnectProfile
     to succeed afterwards.
     """
-    print(f"Pairing with {addr}...")
+    log.info("pairing with %s", addr)
     try:
         bus = dbus.SystemBus()
         device = dbus.Interface(
@@ -353,7 +378,7 @@ def pair(addr: str) -> None:
             "org.freedesktop.DBus.Properties",
         )
         props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True))
-        print(f"Paired and trusted {addr}")
+        log.info("paired and trusted %s", addr)
     except dbus.exceptions.DBusException as e:
         name = e.get_dbus_name()
         if name == "org.bluez.Error.AlreadyExists":
@@ -435,7 +460,7 @@ def connect(addr: str) -> tuple:
                 break
             try:
                 sock, peer_addr = q.get(timeout=min(0.5, remaining))
-                print(f"Connected to {peer_addr}")
+                log.info("connected to %s", peer_addr)
                 return sock, peer_addr
             except queue.Empty:
                 if connect_error:

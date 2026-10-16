@@ -305,7 +305,11 @@ class Mesh(
         thread("link-w ${hello.nodeId}") { link.writer() }
         for (f in P.encodeRoster(rosterEntries(exclude = hello.nodeId))) link.send(f, Tun.PRIO_CONTROL)
         link.send(routesFrameFor(hello.nodeId), Tun.PRIO_CONTROL)
+        link.send(P.encodeAddrs(linkAddrs()), Tun.PRIO_CONTROL)
         if (changed.isNotEmpty()) gossip(changed, hello.nodeId)
+        // Our other neighbours are probably in range of the newcomer too:
+        // tell them where to dial it directly instead of relaying via us.
+        broadcast(P.encodeAddrs(listOf(hello.nodeId to link.transportAddr)), exclude = hello.nodeId)
         advertDue = 0.0
         log("link up ${hello.nodeId} (${hello.name}) via ${link.transportAddr}")
         onTopologyChange()
@@ -316,8 +320,8 @@ class Mesh(
 
     /** Same radio address + same name, different identity → reinstalled app. */
     private fun checkReinstall(new: String, name: String, addr: String) {
-        for ((old, a, _) in storage.loadTransports()) {
-            if (a != addr || old == new) continue
+        for ((old, a, lastOk) in storage.loadTransports()) {
+            if (a != addr || old == new || lastOk == 0L) continue // hints don't count
             val (p, live) = synchronized(lock) { peers[old] to (old in links) }
             if (p == null || p.replacedBy != null || live) continue
             if (p.name.isNotEmpty() && name.isNotEmpty() && p.name != name) continue
@@ -418,6 +422,7 @@ class Mesh(
             P.T_PING -> link.send(P.encodePong(payload), Tun.PRIO_CONTROL)
             P.T_PONG -> link.ping?.let { (tok, t) -> if (tok.contentEquals(payload)) { link.rtt = mono() - t; link.ping = null } }
             P.T_ROUTES -> onRoutes(link, P.decodeRoutes(payload))
+            P.T_ADDRS -> onAddrs(link, P.decodeAddrs(payload))
             P.T_ROSTER -> {
                 val changed = P.decodeRoster(payload).flatMap { learnPeer(it) }
                 if (changed.isNotEmpty()) gossip(changed, link.nodeId)
@@ -449,6 +454,28 @@ class Mesh(
     private fun rosterEntries(exclude: String?): List<P.RosterEntry> = synchronized(lock) {
         listOf(P.RosterEntry(nodeId, pubkey, name, nameTs)) +
             peers.values.filter { it.nodeId != exclude && it.replacedBy == null }.map { P.RosterEntry(it.nodeId, it.pubkey, it.name, it.nameTs) }
+    }
+
+    private fun linkAddrs(): List<Pair<String, String>> = synchronized(lock) { links.map { it.key to it.value.transportAddr } }
+
+    /** Address hints from a neighbour: dial candidates for peers we only reach
+     *  through relays. Never forwarded (only neighbours-of-neighbours are
+     *  likely in radio range). */
+    private fun onAddrs(link: Link, entries: List<Pair<String, String>>) {
+        var learned = false
+        for ((id, addr) in entries) {
+            val skip = synchronized(lock) { id == nodeId || id in links || peers[id]?.replacedBy != null || id !in peers }
+            if (!skip && storage.addTransportHint(id, addr)) {
+                log("addr hint $id at $addr from ${link.nodeId}")
+                learned = true
+            }
+        }
+        if (learned) emit { it.onPeers() }
+    }
+
+    private fun broadcast(frame: ByteArray, exclude: String? = null) {
+        val targets = synchronized(lock) { links.filter { it.key != exclude }.values.toList() }
+        for (l in targets) l.send(frame, Tun.PRIO_CONTROL)
     }
 
     private fun gossip(entries: List<P.RosterEntry>, exclude: String?) {

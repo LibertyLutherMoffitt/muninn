@@ -38,6 +38,7 @@ object Runtime {
 
     /** Conversation currently on screen (suppresses its notifications). */
     @Volatile var visibleConv: String? = null
+    @Volatile var visibleUntil = 0L // "Make me visible" granted until (ms)
     @Volatile var foreground = false
 
     private val bumpPending = java.util.concurrent.atomic.AtomicBoolean(false)

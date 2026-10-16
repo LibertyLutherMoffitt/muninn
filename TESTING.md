@@ -39,7 +39,7 @@ it over TCP. It models what makes a cabin hard:
 | `test_protocol.py` | frame codecs, malformed input, UTF-8-safe name cutting |
 | `test_mesh.py` | DM + ACK + read, relay line, store-and-forward, 3-way group |
 | `test_chaos.py` | flapping relay link, weak edge both ways, a peer walking past, sender restart with queued messages, 6-seat cabin with 40 decoys and concurrent group chatter, file through a flapping relay, multi-hop names/keys, group created while a member is away, simultaneous dial, replies/reactions/edits/receipts via relay, app events, 2 random-chaos soak runs, reinstalled peer |
-| `test_discovery.py` | hidden service records found by polite probes; headsets/watches never contacted; quiet mode; presence states; Python/Kotlin scan-policy parity |
+| `test_discovery.py` | hidden service records found by polite probes; headsets/watches never contacted; quiet mode; relayed neighbours upgrade to a direct link via address hints; presence states; Python/Kotlin scan-policy parity |
 | `test_games.py` | every game plugin played to the end with random moves, JSON round trips, canvas-subset rendering, rule spot checks |
 | `test_interop.py` | Python ↔ Kotlin: DMs, relays both ways, mixed group, files both ways, flapping Kotlin relay |
 

@@ -42,7 +42,11 @@ adb exec-out screencap -p > out.png      # drive with `adb shell input tap/text`
 adb emu kill
 ```
 
-Xvfb has no usable GLX, so `gui-headless` sets `QT_QUICK_BACKEND=software`.
+Xvfb has no usable GLX, so `gui-headless` sets `QT_QUICK_BACKEND=software`
+(the GUI also falls back to it by itself when OpenGL can't start — e.g. the
+flake's Mesa differs from the host's driver). Only one front end may run per
+data dir (`muninn/instance.py`, taken by `Node`); the TUI logs to
+`<data dir>/muninn.log`.
 The headless GUI still owns the host's real BT adapter when it is the writer.
 Emulator Bluetooth is virtual (netsim) and can't reach the host adapter, but
 emulators on the same host share it: `MUNINN_AVD=b nix run .#android-emu --

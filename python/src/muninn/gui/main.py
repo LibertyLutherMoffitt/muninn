@@ -7,17 +7,18 @@ import pathlib
 import sys
 
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont, QIcon, QOpenGLContext
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from muninn.instance import AlreadyRunning
 from muninn.node import Node, default_transport
 
 from . import notifications
 from .bridge import ChatBridge
 from .models import MessageListModel, PeerListModel
 from .vim import VimEditor
-from .writer_lock import WriterLock
 
 _QML_DIR = pathlib.Path(__file__).parent / "qml"
 
@@ -37,8 +38,27 @@ _THEME = {
 }
 
 
+def _ensure_renderer() -> None:
+    """Fall back to Qt Quick's software renderer when OpenGL is unusable.
+
+    Happens e.g. on NixOS when the app's Mesa differs from the system driver
+    (`nix run` from a flake pinned to another nixpkgs), or over plain X
+    forwarding. A chat window doesn't need a GPU; it must just open.
+    """
+    if os.environ.get("QT_QUICK_BACKEND") or os.environ.get("QSG_RHI_BACKEND"):
+        return
+    ctx = QOpenGLContext()
+    if not ctx.create():
+        print(
+            "muninn: OpenGL unavailable, using the software renderer",
+            file=sys.stderr,
+        )
+        QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.Software)
+
+
 def main() -> None:
     app = QApplication(sys.argv)
+    _ensure_renderer()
     app.setApplicationName("Muninn")
     app.setOrganizationName("Muninn")
     app.setQuitOnLastWindowClosed(True)
@@ -47,20 +67,13 @@ def main() -> None:
     font.setPointSize(11)
     app.setFont(font)
 
-    lock = WriterLock()
-    if not lock.try_acquire():
-        QMessageBox.information(
-            None,
-            "Muninn",
-            "Muninn is already running (only one instance can use Bluetooth).",
-        )
-        sys.exit(0)
-
     try:
-        transport = default_transport()
-        node = Node(transport, name=os.environ.get("MUNINN_NAME") or None)
+        node = Node(default_transport(), name=os.environ.get("MUNINN_NAME") or None)
+    except AlreadyRunning as e:
+        QMessageBox.information(None, "Muninn", str(e))
+        sys.exit(0)
     except Exception as e:
-        QMessageBox.critical(None, "Muninn", f"Could not start Bluetooth:\n\n{e}")
+        QMessageBox.critical(None, "Muninn", f"Could not start Muninn:\n\n{e}")
         sys.exit(1)
 
     notifications.init(app, QIcon())
@@ -83,10 +96,14 @@ def main() -> None:
     if not engine.rootObjects():
         sys.exit(1)
 
-    node.start()
+    try:
+        node.start()
+    except Exception as e:
+        QMessageBox.critical(None, "Muninn", f"Could not start Bluetooth:\n\n{e}")
+        node.stop()
+        sys.exit(1)
     ret = app.exec()
     node.stop()
-    lock.release()
     sys.exit(ret)
 
 

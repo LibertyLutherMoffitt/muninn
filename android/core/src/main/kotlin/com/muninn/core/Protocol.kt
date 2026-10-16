@@ -14,6 +14,7 @@ object P {
     const val T_PONG: Int = 0x03
     const val T_ROUTES: Int = 0x04
     const val T_ROSTER: Int = 0x05
+    const val T_ADDRS: Int = 0x06
     const val T_PACKET: Int = 0x10
     const val T_ACK: Int = 0x11
 
@@ -153,6 +154,24 @@ object P {
             off += 43 + nlen
         }
         return out
+    }
+
+    // ---- addrs (radio address hints) ------------------------------------------------
+
+    /** [(nodeId, radio address)] of our direct links; non-MAC addresses are skipped. */
+    fun encodeAddrs(entries: List<Pair<String, String>>): ByteArray {
+        val parts = entries.mapNotNull { (id, a) -> runCatching { idToBytes(id) + idToBytes(a) }.getOrNull() }.take(255)
+        val bb = ByteBuffer.allocate(1 + parts.size * 12)
+        bb.put(parts.size.toByte())
+        parts.forEach { bb.put(it) }
+        return frame(T_ADDRS, bb.array())
+    }
+
+    fun decodeAddrs(p: ByteArray): List<Pair<String, String>> {
+        if (p.isEmpty()) return emptyList()
+        val n = p[0].toInt() and 0xff
+        if (p.size < 1 + n * 12) throw Malformed("addrs truncated")
+        return (0 until n).map { bytesToId(p, 1 + it * 12) to bytesToId(p, 7 + it * 12) }
     }
 
     // ---- packet ------------------------------------------------------------------

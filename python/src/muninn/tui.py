@@ -1,11 +1,11 @@
 """Full-screen terminal client (curses). Same commands as the line CLI.
 
-    ┌ conversations ┐┌ bob · nearby · connected ─────────────────────┐
+    ┌ conversations ┐┌ bob · connected directly ─────────────────────┐
     │● bob        2 ││ 12:01 bob: hi                                  │
     │◎ carol        ││ 12:02 you: hey ✓✓                              │
     │# trip         ││   ↪ bob: hi                                    │
     └───────────────┘└────────────────────────────────────────────────┘
-     > message, or /command                     me · 2 nearby · balanced
+     > message, or /command                     me · 2 connected · balanced
 
 Keys: Enter send · Tab / Ctrl-N, Shift-Tab / Ctrl-P switch conversation ·
 PgUp/PgDn scroll · Esc message mode (↑↓ select, r reply, e edit, d delete,
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import curses
 import locale
+import logging
 import os
 import queue
 import subprocess
@@ -28,6 +29,7 @@ import unicodedata
 
 from muninn import emoji
 from muninn.cli import ChatUI
+from muninn.instance import AlreadyRunning
 from muninn.mesh import conv_group_id, dm_conv
 from muninn.node import Node, default_transport
 from muninn.protocol import FrameTooLarge
@@ -36,10 +38,13 @@ from muninn.storage import StoredMessage
 
 def cwidth(s: str) -> int:
     w = 0
-    for ch in s:
-        if unicodedata.combining(ch) or ch in "‍️":
+    for i, ch in enumerate(s):
+        if unicodedata.combining(ch) or ch in "\u200d\ufe0f":
             continue
-        w += 2 if unicodedata.east_asian_width(ch) in "WF" or ord(ch) >= 0x1F300 else 1
+        wide = unicodedata.east_asian_width(ch) in "WF" or ord(ch) >= 0x1F300
+        # text-style symbol turned emoji by VS16 (e.g. ✈️ ❤️): two cells
+        wide = wide or s[i + 1 : i + 2] == "\ufe0f"
+        w += 2 if wide else 1
     return w
 
 
@@ -76,11 +81,18 @@ class Tui(ChatUI):
         self.edit_id: bytes | None = None
         self.convs: list[dict] = []
         self.last_typing = 0.0
+        self.panel: tuple[str, list[str]] | None = None  # (title, lines)
+        self.panel_scroll = 0
+        self._capture: list[str] | None = None
+        self._full_redraw = False
         super().__init__(node)
 
     # --- ChatUI hooks: route output into the TUI ---------------------------
 
     def out(self, line: str) -> None:
+        if self._capture is not None:  # a /command is running: collect it
+            self._capture += line.split("\n")
+            return
         for ln in line.split("\n"):
             self.notes.append((time.time(), ln))
         del self.notes[:-200]
@@ -174,8 +186,48 @@ class Tui(ChatUI):
         side = min(26, max(18, w // 4))
         self.draw_sidebar(scr, h - 2, side)
         self.draw_chat(scr, 0, side + 1, h - 2, w - side - 1)
+        if self.panel:
+            self.draw_panel(scr, h - 2, w)
         self.draw_input(scr, h, w)
         scr.refresh()
+
+    def draw_panel(self, scr, h: int, w: int) -> None:
+        """Command output (/help, /peers, /search …) in a box over the chat."""
+        C = curses.color_pair
+        title, rows = self.panel or ("", [])
+        bw = min(w - 4, max(40, max((cwidth(r) for r in rows), default=0) + 4))
+        lines = [ln for r in rows for ln in (wrap(r, bw - 4) if r else [""])]
+        bh = min(h - 2, len(lines) + 2)
+        y0, x0 = max(0, (h - bh) // 2), max(0, (w - bw) // 2)
+        inner = bh - 2
+        self.panel_scroll = max(0, min(self.panel_scroll, len(lines) - inner))
+        shown = lines[self.panel_scroll : self.panel_scroll + inner]
+        top = f"┌ {clip(title, bw - 6)} "
+        scr.addstr(y0, x0, top + "─" * (bw - 1 - cwidth(top)) + "┐", C(5))
+        for i in range(inner):
+            ln = shown[i] if i < len(shown) else ""
+            body = " " + clip(ln, bw - 4)
+            scr.addstr(y0 + 1 + i, x0, "│", C(5))
+            scr.addstr(y0 + 1 + i, x0 + 1, body + " " * (bw - 2 - cwidth(body)))
+            scr.addstr(y0 + 1 + i, x0 + bw - 1, "│", C(5))
+        more = len(lines) - self.panel_scroll - inner
+        bottom = f" {more} more ↓ " if more > 0 else ""
+        scr.addstr(
+            y0 + bh - 1, x0, "└" + bottom + "─" * (bw - 2 - cwidth(bottom)) + "┘", C(5)
+        )
+
+    def key_panel(self, k) -> None:
+        if k in (27, "\x1b", "q", "\n", "\r", curses.KEY_ENTER, 10, 13, " "):
+            self.panel = None
+            self._full_redraw = True
+        elif k in (curses.KEY_UP, "k"):
+            self.panel_scroll = max(0, self.panel_scroll - 1)
+        elif k in (curses.KEY_DOWN, "j"):
+            self.panel_scroll += 1
+        elif k == curses.KEY_PPAGE:
+            self.panel_scroll = max(0, self.panel_scroll - 10)
+        elif k == curses.KEY_NPAGE:
+            self.panel_scroll += 10
 
     def draw_sidebar(self, scr, h: int, w: int) -> None:
         C = curses.color_pair
@@ -315,7 +367,7 @@ class Tui(ChatUI):
             if i == self.sel:
                 sel_line = len(lines)
             lines += self.msg_lines(m, w - 2, i == self.sel)
-        recent = [n for t, n in self.notes if time.time() - t < 12][-4:]
+        recent = [n for t, n in self.notes if time.time() - t < 10][-3:]
         lines += [(n, C(6)) for n in recent]
         if self.mode == "select" and sel_line is not None:
             self.scroll = max(
@@ -335,11 +387,17 @@ class Tui(ChatUI):
 
     def draw_input(self, scr, h: int, w: int) -> None:
         C = curses.color_pair
-        n = len(self.mesh.connected())
-        status = (
-            f" {self.mesh.name or 'no name'} · {n} nearby · {self.node.policy.name} "
+        direct = len(self.mesh.connected())
+        relayed = sum(
+            1 for p in self.mesh.active_peers() if (self.mesh.hops(p.node_id) or 0) > 1
         )
-        if self.mode == "select":
+        status = f" {self.mesh.name or 'no name'} · {direct} connected"
+        if relayed:
+            status += f" · {relayed} via relay"
+        status += f" · {self.node.policy.name} "
+        if self.panel:
+            prompt = " ↑↓ scroll · Esc/q/Enter close "
+        elif self.mode == "select":
             prompt = (
                 " [msg] ↑↓ r:reply e:edit d:delete 1-8/+:react o:open y:copy Esc:back "
             )
@@ -351,8 +409,12 @@ class Tui(ChatUI):
         else:
             prompt = " > "
         scr.addstr(h - 2, 0, "─" * (w - 1), C(4))
+        status = clip(status, w - 4)
         scr.addstr(h - 2, max(0, w - cwidth(status) - 2), status, C(4))
         scr.addstr(h - 1, 0, clip(prompt, w - 1), C(5) | curses.A_BOLD)
+        if self.panel:
+            curses.curs_set(0)
+            return
         avail = w - cwidth(prompt) - 2
         text = self.input
         start = 0
@@ -379,7 +441,17 @@ class Tui(ChatUI):
         self.history.append(line)
         self.hist_i = len(self.history)
         if line.startswith("/"):
-            return self.handle(line)
+            self._capture = []
+            try:
+                keep = self.handle(line)
+            finally:
+                rows, self._capture = self._capture, None
+            rows = [r for r in rows if r.strip()] and rows
+            if len(rows) > 1:
+                self.panel, self.panel_scroll = (line.split()[0], rows), 0
+            elif rows:
+                self.out(rows[0])
+            return keep
         if not self.conv:
             self.out("! pick a conversation first (Tab or /dm name)")
             return True
@@ -548,6 +620,9 @@ class Tui(ChatUI):
                     curses.beep()
                 dirty = True
             if dirty:
+                if self._full_redraw:  # repaint every cell (Ctrl-L, panels)
+                    scr.clear()
+                    self._full_redraw = False
                 self.refresh_convs()
                 self.draw(scr)
                 dirty = False
@@ -559,9 +634,12 @@ class Tui(ChatUI):
                     dirty = True
                 continue
             if k == curses.KEY_RESIZE or k == "\x0c":
+                self._full_redraw = True
                 dirty = True
                 continue
-            if self.mode == "select":
+            if self.panel:
+                self.key_panel(k)
+            elif self.mode == "select":
                 self.key_select(k)
             elif not self.key_type(k):
                 return
@@ -576,11 +654,45 @@ def _size(n: float) -> str:
     return f"{n:.1f}GB"
 
 
+def _quiet_streams(path) -> None:
+    """Nothing but curses may write to the terminal: a stray print or a
+    library warning scrolls the screen and leaves curses' picture of it
+    stale (duplicated rows, half-drawn lines). Send it all to a log file."""
+    logf = open(path, "a", buffering=1, encoding="utf-8")
+    logging.basicConfig(
+        stream=logf,
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        force=True,
+    )
+    sys.stdout = sys.stderr = logf
+    try:
+        os.dup2(logf.fileno(), 2)  # C-level warnings (GLib, Qt, D-Bus)
+    except OSError:
+        pass
+
+
 def main() -> None:
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
-    node = Node(default_transport(), name=os.environ.get("MUNINN_NAME") or None)
-    node.start()
+    term_out = sys.stdout
+    try:
+        node = Node(
+            default_transport(),
+            name=os.environ.get("MUNINN_NAME") or None,
+            log=logging.getLogger("muninn").info,
+        )
+    except AlreadyRunning as e:
+        print(e)
+        return
+    log_path = node.storage.path.parent / "muninn.log"
+    _quiet_streams(log_path)
+    try:
+        node.start()
+    except Exception as e:
+        node.stop()
+        print(f"Could not start Bluetooth: {e}", file=term_out)
+        return
     ui = Tui(node)
     try:
         curses.wrapper(ui.loop)

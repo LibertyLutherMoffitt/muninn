@@ -49,8 +49,6 @@ object Nav {
 }
 
 class MainActivity : ComponentActivity() {
-    lateinit var discovery: BtDiscovery
-
     private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (hasBt()) startRadio() else Runtime.toast("Muninn needs the Nearby devices permission to use Bluetooth")
     }
@@ -62,11 +60,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         Emoji.init(this)
-        discovery = BtDiscovery(this)
         handleIntent(intent)
         setContent {
             MuninnTheme {
-                Surface(modifier = Modifier.fillMaxSize()) { App(discovery) }
+                Surface(modifier = Modifier.fillMaxSize()) { App() }
             }
         }
         ensurePermissions()
@@ -100,13 +97,11 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         Runtime.foreground = true
-        discovery.start()
         Runtime.bump()
     }
 
     override fun onStop() {
         Runtime.foreground = false
-        discovery.stop()
         super.onStop()
     }
 
@@ -124,7 +119,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun App(discovery: BtDiscovery) {
+fun App() {
     val ctx = LocalContext.current
     val toast by Runtime.toast.collectAsState()
     LaunchedEffect(toast) {
@@ -134,7 +129,7 @@ fun App(discovery: BtDiscovery) {
     when (val s = Nav.stack.last()) {
         Screen.Convs -> ConversationsScreen()
         is Screen.Chat -> ChatScreen(s.conv)
-        Screen.Nearby -> NearbyScreen(discovery)
+        Screen.Nearby -> NearbyScreen()
         Screen.NewGroup -> NewGroupScreen()
         is Screen.GroupInfo -> GroupInfoScreen(s.conv)
         Screen.Settings -> SettingsScreen()

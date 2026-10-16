@@ -22,6 +22,7 @@ from pathlib import Path
 
 from muninn import scanpolicy
 from muninn.crypto import generate_keypair, privkey_from_bytes
+from muninn.instance import AlreadyRunning, InstanceLock
 from muninn.mesh import Mesh
 from muninn.storage import Storage
 from muninn.transport import ScanResult, Transport
@@ -29,6 +30,9 @@ from muninn.transport import ScanResult, Transport
 DIAL_BACKOFF_MIN = 2.0
 DEFER_SECONDS = 6.0
 SIGHTING_FRESH = 120.0  # a scan sighting counts as "nearby" this long
+HINT_MAX_HOPS = 3  # dial gossiped addresses of peers at most this far away
+HINT_BACKOFF_MIN = 10.0
+HINT_BACKOFF_MAX = 300.0
 
 
 class Node:
@@ -41,6 +45,15 @@ class Node:
     ):
         self.transport = transport
         self.storage = Storage(db_path)
+        self._instance = InstanceLock(self.storage.path.parent)
+        if not self._instance.try_acquire():
+            self.storage.close()
+            pid = self._instance.holder()
+            raise AlreadyRunning(
+                "Muninn is already running"
+                + (f" (pid {pid})" if pid else "")
+                + " — only one copy can use Bluetooth and the message store."
+            )
         ident = self.storage.get_identity()
         if ident is None:
             ident = self.storage.create_identity(bytes(generate_keypair()), name or "")
@@ -71,8 +84,10 @@ class Node:
         self._dial_fail: dict[str, float] = {}
         self.scan_results: list[ScanResult] = []
         self._dialing: set[str] = set()
+        self._hints: set[str] = set()
         self._dial_lock = threading.Lock()
         self.last_inquiry = 0.0
+        self._scan_lock = threading.Lock()  # concurrent inquiries cancel each other
         self.mesh.on("peers", self._on_peers)
 
     @property
@@ -95,6 +110,7 @@ class Node:
         while self._dialing and time.monotonic() < deadline:
             time.sleep(0.05)
         self.storage.close()
+        self._instance.release()
 
     # --- settings -------------------------------------------------------------
 
@@ -122,7 +138,7 @@ class Node:
         m = self.mesh
         h = m.hops(node_id)
         if h == 1:
-            return {"state": "direct", "text": "nearby · connected", "hops": 1}
+            return {"state": "direct", "text": "connected directly", "hops": 1}
         if h:
             via = m.display_name(m.next_hop(node_id) or "")
             return {
@@ -166,11 +182,20 @@ class Node:
         linked_nodes = set(self.mesh.connected())
         out: list[tuple[str, bool]] = []
         seen: set[str] = set()
-        for node_id, addr, _ in self.storage.load_transports():
+        hints: set[str] = set()
+        for node_id, addr, last_ok in self.storage.load_transports():
             if node_id in linked_nodes or addr in seen:
                 continue
+            if not last_ok:
+                # Gossiped by a neighbour, never connected there yet: worth a
+                # try only while they're close (a short relay away).
+                h = self.mesh.hops(node_id)
+                if not h or h > HINT_MAX_HOPS:
+                    continue
+                hints.add(addr)
             out.append((addr, False))
             seen.add(addr)
+        self._hints = hints
         now = time.time()
         for addr, t in sorted(self._confirmed.items(), key=lambda kv: -kv[1]):
             if now - t < 180 and addr not in seen:
@@ -230,9 +255,12 @@ class Node:
                 self._refused[addr] = time.time() + self.policy.probe_backoff
             else:
                 _, delay = self._backoff.get(addr, (0.0, DIAL_BACKOFF_MIN / 2))
-                delay = min(
-                    max(delay * 2, DIAL_BACKOFF_MIN), self.policy.peer_backoff_max
-                )
+                if addr in self._hints:  # maybe out of range: back off further
+                    delay = min(max(delay * 2, HINT_BACKOFF_MIN), HINT_BACKOFF_MAX)
+                else:
+                    delay = min(
+                        max(delay * 2, DIAL_BACKOFF_MIN), self.policy.peer_backoff_max
+                    )
                 self._backoff[addr] = (
                     time.monotonic() + delay * random.uniform(0.8, 1.2),
                     delay,
@@ -267,17 +295,20 @@ class Node:
                 due = interval and time.monotonic() - self.last_inquiry >= interval
                 if (first and pol.inquiry_alone) or due or self._scan_now.is_set():
                     self._scan_now.clear()
-                    self._ingest(self.transport.scan(5.0))
+                    with self._scan_lock:
+                        self._ingest(self.transport.scan(5.0))
             except Exception as e:
                 self.log(f"scan: {e!r}")
             first = False
             self._scan_now.wait(2.0 * random.uniform(0.8, 1.2))
 
-    def _ingest(self, results: list[ScanResult]) -> None:
+    def _ingest(self, results: list[ScanResult], manual: bool = False) -> None:
+        """`manual`: the user asked — check every phone/laptop in sight,
+        including ones that weren't running Muninn last time."""
         self.last_inquiry = time.monotonic()
         self.scan_results = results
         now = time.time()
-        budget = self.policy.probe_budget
+        budget = len(results) if manual else self.policy.probe_budget
         known = {a for _, a, _ in self.storage.load_transports()}
         for r in sorted(results, key=lambda r: -(r.rssi or -100)):
             addr = r.addr.upper()
@@ -289,7 +320,7 @@ class Node:
                 r.probeable
                 and budget > 0
                 and addr not in known
-                and self._refused.get(addr, 0) < now
+                and (manual or self._refused.get(addr, 0) < now)
                 and addr not in self._probe_queue
                 and not self.mesh.has_transport(addr)
             ):
@@ -305,9 +336,28 @@ class Node:
             self._backoff.pop(addr, None)
 
     def scan_now(self, duration: float = 5.0) -> list[ScanResult]:
-        results = self.transport.scan(duration)
-        self._ingest(results)
+        with self._scan_lock:
+            results = self.transport.scan(duration)
+            self._ingest(results, manual=True)
         return results
+
+    def device_state(self, addr: str) -> str:
+        """What a scan list shows for a device: connected / checking / muninn /
+        not_muninn / ignored (headset, watch…) / unknown."""
+        a = addr.upper()
+        now = time.time()
+        seen = self.sightings.get(a)
+        if self.mesh.has_transport(a):
+            return "connected"
+        if a in self._dialing or a in self._probe_queue:
+            return "checking"
+        if now - self._confirmed.get(a, 0) < 180:
+            return "muninn"
+        if self._refused.get(a, 0) > now:
+            return "not_muninn"
+        if seen is not None and not seen.probeable and not seen.muninn:
+            return "ignored"
+        return "unknown"
 
     def connect_to(self, addr: str, probe: bool = False) -> str | None:
         """Explicit user-initiated connect (e.g. from a scan dialog). `probe`

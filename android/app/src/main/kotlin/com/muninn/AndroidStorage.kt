@@ -145,6 +145,12 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 3
         )
     }
 
+    override fun addTransportHint(nodeId: String, addr: String) = w { db ->
+        db.insertWithOnConflict("transports", null, ContentValues().apply {
+            put("node_id", nodeId); put("addr", addr.uppercase()); put("last_ok", 0L)
+        }, SQLiteDatabase.CONFLICT_IGNORE) != -1L
+    }
+
     override fun loadTransports() = query("SELECT node_id, addr, last_ok FROM transports ORDER BY last_ok DESC") {
         Triple(it.getString(0), it.getString(1), it.getLong(2))
     }

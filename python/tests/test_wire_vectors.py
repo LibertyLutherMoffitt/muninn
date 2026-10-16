@@ -41,6 +41,10 @@ def test_routes_roster_packet_ack():
         es = [P.RosterEntry(e[0], b(e[1]), e[2], e[3]) for e in v["entries"]]
         assert P.encode_roster(es)[0].hex() == v["frame"]
         assert P.decode_roster(b(v["frame"])[3:]) == es
+    for v in V["addrs"]:
+        entries = [tuple(e) for e in v["entries"]]
+        assert P.encode_addrs(entries).hex() == v["frame"]
+        assert P.decode_addrs(b(v["frame"])[3:]) == entries
     for v in V["packet"]:
         pkt = P.decode_packet(b(v["frame"])[3:])
         assert (pkt.src, pkt.dst, pkt.ttl, pkt.flags, pkt.ts) == (

@@ -36,6 +36,21 @@ def test_finds_peer_whose_service_record_is_hidden():
         lab.close()
 
 
+def test_relayed_neighbours_link_up_directly(lab):
+    # a and c sit next to each other but never look around (think: two phones
+    # that aren't discoverable). Both know b. b's address hints let them dial
+    # each other directly instead of relaying forever.
+    a = lab.node("a", (0, 0), start=False)
+    c = lab.node("c", (0, 1), start=False)
+    for n in (a, c):
+        n.set_scan_mode("quiet")
+        n.start()
+    lab.node("b", (1, 0))
+    wait_until(lambda: a.mesh.reachable(c.node_id), 40, msg="relay route")
+    wait_until(lambda: c.node_id in a.mesh.connected(), 40, msg="direct link")
+    assert a.presence(c.node_id)["state"] == "direct"
+
+
 def test_quiet_mode_never_inquires_but_known_peers_reconnect(lab):
     a = lab.node("a", (0, 0))
     b = lab.node("b", (1, 0))

@@ -368,7 +368,7 @@ python/src/muninn/gui/
 ├── main.py              # entrypoint: QGuiApplication + default font + QML engine + theme dict
 ├── bridge.py            # ChatBridge: signals/slots, runCommand dispatcher, completeCommand
 ├── vim.py               # VimEditor state machine + key dispatcher
-├── writer_lock.py       # advisory lock + reader polling
+├── (../instance.py)     # single-instance lock, taken by Node
 ├── models.py            # PeerListModel, MessageListModel (QAbstractListModel)
 └── qml/
     ├── Main.qml         # window + status bar + global shortcuts
