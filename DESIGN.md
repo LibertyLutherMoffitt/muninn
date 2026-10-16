@@ -87,13 +87,29 @@ log; illegal or out-of-turn moves are ignored identically everywhere.
 
 ### Discovery (good Bluetooth citizen)
 
-Known peers are redialled with a short, capped back-off. Inquiry is rationed
-by a user-chosen scan mode (eager / balanced / quiet) because it disrupts
-audio and links. Devices whose service record says Muninn are dialled; an
-*unknown phone or computer* may get one pairing-free probe per look within a
-budget, then is left alone for a long time. Headsets, watches and peripherals
-are never contacted. BlueZ only authorizes Muninn's own service for paired
-devices.
+What Muninn does to a device that isn't running Muninn — the complete list
+(audited 2026-10-15; `tests/test_discovery.py` enforces the numbers):
+
+| Device | What can happen | How often |
+|---|---|---|
+| Headset, watch, mouse, speaker, "other" | nothing — never dialled, probed, paired or SDP-queried | never |
+| Stranger's phone/laptop, *visible* and not revealing its services | one pairing-free probe (SDP lookup of the Muninn UUID; no prompt, no bond) | ≤ 2 per look (balanced), then: 10 min pause after a first miss, 6 h after a second (eager 1 h, quiet 12 h) |
+| …same, user taps "look again" | probe the 6 strongest unknowns | a device at most once a minute |
+| Stranger's phone that is *not* visible (most phones) | nothing — it never shows up in an inquiry | never |
+| Any device | hears our inquiry (a broadcast; every phone's BT settings screen does the same) | balanced: every 25 s while alone, every 3 min once connected; quiet: never |
+
+Pairing only ever happens (a) when the user explicitly connects from a scan
+list, or (b) once a day with a *known* Muninn peer whose link demands it —
+never from a probe, and never to an address learned from gossip (ADDRS hints
+are dialled like strangers). The laptop is made discoverable but **not
+pairable** (pairable is switched on only for the seconds of a pairing Muninn
+itself starts), the previous discoverable state is restored on exit, paired
+peers are not marked Trusted, Muninn's agent is never the default agent and
+only authorizes Muninn's own service. Android uses insecure RFCOMM throughout
+(never bonds) and only becomes discoverable when the user asks.
+
+Known Muninn peers are redialled with a short, capped back-off; that only
+pages devices that ran Muninn with us before.
 
 ## Clients
 

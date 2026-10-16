@@ -177,10 +177,37 @@ def get_local_mac() -> str:
     raise RuntimeError("No Bluetooth adapter found")
 
 
+def _adapter_props():
+    return dbus.Interface(
+        dbus.SystemBus().get_object("org.bluez", "/org/bluez/hci0"),
+        "org.freedesktop.DBus.Properties",
+    )
+
+
+def _get_adapter(prop: str) -> bool | None:
+    try:
+        return bool(_adapter_props().Get("org.bluez.Adapter1", prop))
+    except dbus.DBusException:
+        return None
+
+
+def _set_adapter(prop: str, value: bool) -> None:
+    try:
+        _adapter_props().Set("org.bluez.Adapter1", prop, dbus.Boolean(value))
+    except dbus.DBusException as e:
+        log.warning("set %s=%s failed: %s", prop, value, e)
+
+
+# Adapter state before Muninn touched it — restored on exit.
+_prev_discoverable: bool | None = None
+
+
 def set_discoverable(enabled: bool) -> None:
-    state = "on" if enabled else "off"
-    subprocess.run(["bluetoothctl", "discoverable", state], capture_output=True)
-    subprocess.run(["bluetoothctl", "pairable", state], capture_output=True)
+    """Visible to inquiries (so seat neighbours can find us). Deliberately
+    NOT pairable: strangers must not be able to start pairing with this
+    machine just because Muninn is running. Muninn's own links don't need
+    a bond (open RFCOMM profile); see pair() for the rare exception."""
+    _set_adapter("Discoverable", enabled)
 
 
 def create_server() -> None:
@@ -194,11 +221,14 @@ def create_server() -> None:
     _ready.wait(10)
     if _start_error:
         raise _start_error[0]
+    global _prev_discoverable
+    if _prev_discoverable is None:
+        _prev_discoverable = _get_adapter("Discoverable")
     set_discoverable(True)
 
 
 def close_server() -> None:
-    set_discoverable(False)
+    set_discoverable(bool(_prev_discoverable))  # leave the adapter as we found it
     if _loop:
         _loop.quit()
     _incoming_queue.put((None, None))
@@ -365,33 +395,31 @@ def pair(addr: str) -> None:
     to succeed afterwards.
     """
     log.info("pairing with %s", addr)
+    # Bonding needs the adapter pairable; only for the few seconds of this
+    # pairing (with a known Muninn peer), then back to how it was.
+    was_pairable = _get_adapter("Pairable")
+    if not was_pairable:
+        _set_adapter("Pairable", True)
     try:
-        bus = dbus.SystemBus()
+        _pair(addr)
+    finally:
+        if was_pairable is False:
+            _set_adapter("Pairable", False)
+
+
+def _pair(addr: str) -> None:
+    # Not marked Trusted: Muninn's profile needs no authorization anyway, and
+    # a trusted device could use every other profile (audio, network…)
+    # without the user being asked.
+    try:
         device = dbus.Interface(
-            bus.get_object("org.bluez", _device_path(addr)),
+            dbus.SystemBus().get_object("org.bluez", _device_path(addr)),
             "org.bluez.Device1",
         )
         device.Pair(timeout=30)
-        # Mark trusted so future connections don't require confirmation.
-        props = dbus.Interface(
-            bus.get_object("org.bluez", _device_path(addr)),
-            "org.freedesktop.DBus.Properties",
-        )
-        props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True))
-        log.info("paired and trusted %s", addr)
+        log.info("paired %s", addr)
     except dbus.exceptions.DBusException as e:
-        name = e.get_dbus_name()
-        if name == "org.bluez.Error.AlreadyExists":
-            # Already paired — mark trusted and continue.
-            try:
-                props = dbus.Interface(
-                    bus.get_object("org.bluez", _device_path(addr)),
-                    "org.freedesktop.DBus.Properties",
-                )
-                props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True))
-            except dbus.DBusException:
-                pass
-        else:
+        if e.get_dbus_name() != "org.bluez.Error.AlreadyExists":
             raise ConnectionError(f"Pairing failed: {e}") from e
 
 

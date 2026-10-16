@@ -33,6 +33,8 @@ SIGHTING_FRESH = 120.0  # a scan sighting counts as "nearby" this long
 HINT_MAX_HOPS = 3  # dial gossiped addresses of peers at most this far away
 HINT_BACKOFF_MIN = 10.0
 HINT_BACKOFF_MAX = 300.0
+MANUAL_PROBES = 6  # a user-initiated scan checks at most this many unknowns
+MANUAL_RECHECK = 60.0  # ...and may re-check a "not Muninn" verdict this old
 
 
 class Node:
@@ -79,6 +81,8 @@ class Node:
         self._confirmed: dict[str, float] = {}  # Muninn-capable addr -> last seen
         self._probe_queue: list[str] = []
         self._refused: dict[str, float] = {}  # probed, not Muninn -> until
+        self._refusals: dict[str, int] = {}
+        self._refused_at: dict[str, float] = {}
         self.sightings: dict[str, ScanResult] = {}
         self._sighted_at: dict[str, float] = {}
         self._dial_fail: dict[str, float] = {}
@@ -247,12 +251,15 @@ class Node:
         threading.Thread(target=self._dial, args=(addr, probe), daemon=True).start()
 
     def _dial(self, addr: str, probe: bool) -> None:
+        # Gossiped addresses are hearsay: dial them like a stranger (never
+        # pair), even though they claim to be a known peer.
+        quiet = probe or addr in self._hints
         try:
-            sock = self.transport.probe(addr) if probe else self.transport.connect(addr)
+            sock = self.transport.probe(addr) if quiet else self.transport.connect(addr)
         except Exception:
             self._dial_fail[addr] = time.time()
             if probe:
-                self._refused[addr] = time.time() + self.policy.probe_backoff
+                self._refuse(addr)
             else:
                 _, delay = self._backoff.get(addr, (0.0, DIAL_BACKOFF_MIN / 2))
                 if addr in self._hints:  # maybe out of range: back off further
@@ -272,7 +279,7 @@ class Node:
         self._deferred.pop(addr, None)
         if self.mesh.add_link(sock, addr, True) is None:
             if probe:  # answered, but not Muninn
-                self._refused[addr] = time.time() + self.policy.probe_backoff
+                self._refuse(addr)
             self._backoff[addr] = (
                 time.monotonic() + DIAL_BACKOFF_MIN,
                 DIAL_BACKOFF_MIN,
@@ -308,7 +315,7 @@ class Node:
         self.last_inquiry = time.monotonic()
         self.scan_results = results
         now = time.time()
-        budget = len(results) if manual else self.policy.probe_budget
+        budget = MANUAL_PROBES if manual else self.policy.probe_budget
         known = {a for _, a, _ in self.storage.load_transports()}
         for r in sorted(results, key=lambda r: -(r.rssi or -100)):
             addr = r.addr.upper()
@@ -320,12 +327,27 @@ class Node:
                 r.probeable
                 and budget > 0
                 and addr not in known
-                and (manual or self._refused.get(addr, 0) < now)
+                and (
+                    self._refused.get(addr, 0) < now
+                    or (manual and now - self._refused_at.get(addr, 0) > MANUAL_RECHECK)
+                )
                 and addr not in self._probe_queue
                 and not self.mesh.has_transport(addr)
             ):
                 self._probe_queue.append(addr)
                 budget -= 1
+
+    def _refuse(self, addr: str) -> None:
+        """A probe didn't find Muninn. Could be a radio hiccup the first time
+        (short pause); after that the device is left alone for hours."""
+        n = self._refusals[addr] = self._refusals.get(addr, 0) + 1
+        wait = (
+            self.policy.probe_backoff
+            if n > 1
+            else min(600.0, self.policy.probe_backoff)
+        )
+        self._refused[addr] = time.time() + wait
+        self._refused_at[addr] = time.time()
 
     def _mark_confirmed(self, addr: str) -> None:
         addr = addr.upper()

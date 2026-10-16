@@ -51,6 +51,8 @@ class Node(
     private val probeQueue = java.util.Collections.synchronizedList(ArrayList<String>())
     @Volatile private var hints: Set<String> = emptySet()
     private val refused = ConcurrentHashMap<String, Long>() // addr -> until (ms)
+    private val refusedAt = ConcurrentHashMap<String, Long>()
+    private val refusals = ConcurrentHashMap<String, Int>()
     val sightings = ConcurrentHashMap<String, ScanResult>()
     private val sightedAt = ConcurrentHashMap<String, Long>()
     private val dialing = ConcurrentHashMap.newKeySet<String>()
@@ -170,10 +172,11 @@ class Node(
     }
 
     private fun dial(addr: String, probe: Boolean) {
+        // Gossiped addresses are hearsay: dial them like a stranger (never pair).
         val conn = try {
-            if (probe) transport.probe(addr) else transport.connect(addr)
+            if (probe || addr in hints) transport.probe(addr) else transport.connect(addr)
         } catch (e: Throwable) {
-            if (probe) refused[addr] = System.currentTimeMillis() + (policy.probeBackoff * 1000).toLong()
+            if (probe) refuse(addr)
             else {
                 val prev = (backoff[addr]?.second ?: 1.0) * 2
                 val d = if (addr in hints) minOf(maxOf(prev, HINT_BACKOFF_MIN), HINT_BACKOFF_MAX)
@@ -186,7 +189,7 @@ class Node(
         }
         deferred.remove(addr)
         if (mesh.addLink(conn, addr, true) == null) {
-            if (probe) refused[addr] = System.currentTimeMillis() + (policy.probeBackoff * 1000).toLong()
+            if (probe) refuse(addr)
             backoff[addr] = (mono() + 2) to 2.0
         } else backoff.remove(addr)
     }
@@ -216,18 +219,28 @@ class Node(
         lastInquiry = mono()
         scanResults = results
         val now = System.currentTimeMillis()
-        var budget = if (manual) Int.MAX_VALUE else policy.probeBudget
+        var budget = if (manual) MANUAL_PROBES else policy.probeBudget
         val known = storage.loadTransports().map { it.second }.toSet()
         for (r in results.sortedByDescending { it.rssi ?: -100 }) {
             val addr = r.addr.uppercase()
             sightings[addr] = r
             sightedAt[addr] = now
             if (r.muninn == true) markSeen(addr)
-            else if (r.probeable && budget > 0 && addr !in known && (manual || (refused[addr] ?: 0) < now) &&
+            else if (r.probeable && budget > 0 && addr !in known && ((refused[addr] ?: 0) < now || (manual && now - (refusedAt[addr] ?: 0) > MANUAL_RECHECK_MS)) &&
                 addr !in probeQueue && !mesh.hasTransport(addr)) {
                 probeQueue.add(addr); budget--
             }
         }
+    }
+
+    /** A probe didn't find Muninn: maybe a radio hiccup the first time (short
+     *  pause), after that the device is left alone for hours. */
+    private fun refuse(addr: String) {
+        val n = refusals.merge(addr, 1, Int::plus)!!
+        val wait = if (n > 1) policy.probeBackoff else minOf(600.0, policy.probeBackoff)
+        val now = System.currentTimeMillis()
+        refused[addr] = now + (wait * 1000).toLong()
+        refusedAt[addr] = now
     }
 
     fun markSeen(addr: String) {
@@ -270,6 +283,8 @@ class Node(
         const val HINT_MAX_HOPS = 3 // dial gossiped addresses of peers at most this far away
         const val HINT_BACKOFF_MIN = 10.0
         const val HINT_BACKOFF_MAX = 300.0
+        const val MANUAL_PROBES = 6 // a user-initiated scan checks at most this many unknowns
+        const val MANUAL_RECHECK_MS = 60_000L // ...and may re-check a "not Muninn" verdict this old
 
         fun ago(ts: Long): String {
             val d = P.now() - ts

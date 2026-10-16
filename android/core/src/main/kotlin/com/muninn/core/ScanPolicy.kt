@@ -20,9 +20,9 @@ data class ScanPolicy(
 
     companion object {
         const val SETTING_KEY = "scan_mode"
-        val EAGER = ScanPolicy("eager", "Eager", 15.0, 60.0, 4, 600.0, 20.0)
-        val BALANCED = ScanPolicy("balanced", "Balanced", 25.0, 180.0, 2, 1200.0, 30.0)
-        val QUIET = ScanPolicy("quiet", "Quiet", 0.0, 0.0, 0, 3600.0, 45.0)
+        val EAGER = ScanPolicy("eager", "Eager", 15.0, 60.0, 4, 3600.0, 20.0)
+        val BALANCED = ScanPolicy("balanced", "Balanced", 25.0, 180.0, 2, 21600.0, 30.0)
+        val QUIET = ScanPolicy("quiet", "Quiet", 0.0, 0.0, 0, 43200.0, 45.0)
         val ALL = listOf(EAGER, BALANCED, QUIET).associateBy { it.name }
         val DEFAULT = BALANCED
         fun get(name: String?) = ALL[name ?: ""] ?: DEFAULT

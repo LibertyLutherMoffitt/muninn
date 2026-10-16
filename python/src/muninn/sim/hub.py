@@ -99,7 +99,9 @@ class Hub:
 
     # --- radio model ----------------------------------------------------------
 
-    def _make_decoys(self, n: int) -> None:
+    def _make_decoys(self, n: int, hidden_phones: bool = False) -> None:
+        """`hidden_phones`: only strangers' phones that don't reveal their
+        services — the worst case for politeness (all look probe-worthy)."""
         names = [
             "AirPods Pro",
             "Galaxy Buds2",
@@ -130,12 +132,14 @@ class Hub:
         for _ in range(n):
             addr = _rand_addr(self.rng)
             pos = (self.rng.uniform(0, 40), self.rng.uniform(0, 6))
-            name = self.rng.choice(names)
+            name = "iPhone" if hidden_phones else self.rng.choice(names)
             kind = kinds.get(name, "audio")
             d = Device(addr, name, pos, muninn=False, kind=kind)
             # Other passengers' phones/laptops: inquiry often doesn't reveal
             # their services, so they look exactly like a hidden Muninn peer.
-            d.advertise = not (kind == "phone" and self.rng.random() < 0.6)
+            d.advertise = not (
+                kind == "phone" and (hidden_phones or self.rng.random() < 0.6)
+            )
             self.devices[addr] = d
 
     def dist(self, a: Device, b: Device) -> float:
@@ -487,7 +491,7 @@ class Hub:
         elif cmd == "hide":  # service record invisible to inquiry
             self.devices[m["addr"].upper()].advertise = not m.get("show")
         elif cmd == "decoys":
-            self._make_decoys(int(m["n"]))
+            self._make_decoys(int(m["n"]), bool(m.get("hidden_phones")))
         elif cmd == "reset":
             self.blocked.clear()
             self.forced.clear()

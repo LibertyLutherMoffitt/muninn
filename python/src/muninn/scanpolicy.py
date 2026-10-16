@@ -44,9 +44,12 @@ def _t(s: float) -> str:
     return f"{int(s)}s" if s < 60 else f"{s / 60:.0f} min"
 
 
-EAGER = ScanPolicy("eager", "Eager", 15.0, 60.0, 4, 600.0, 20.0)
-BALANCED = ScanPolicy("balanced", "Balanced", 25.0, 180.0, 2, 1200.0, 30.0)
-QUIET = ScanPolicy("quiet", "Quiet", 0.0, 0.0, 0, 3600.0, 45.0)
+# probe_backoff: a device that answered "not Muninn" is left alone for hours —
+# it won't suddenly start running Muninn mid-flight (a user-initiated scan may
+# still re-check it once a minute has passed).
+EAGER = ScanPolicy("eager", "Eager", 15.0, 60.0, 4, 3600.0, 20.0)
+BALANCED = ScanPolicy("balanced", "Balanced", 25.0, 180.0, 2, 6 * 3600.0, 30.0)
+QUIET = ScanPolicy("quiet", "Quiet", 0.0, 0.0, 0, 12 * 3600.0, 45.0)
 
 POLICIES = {p.name: p for p in (EAGER, BALANCED, QUIET)}
 DEFAULT = BALANCED

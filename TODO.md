@@ -116,10 +116,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   game can be shared as a file and installed by the receiver (sandboxed).
 - [x] **Offline GIFs**: bundled GIF/sticker pack that works with no internet,
   plus "save received GIF" to a local favourites library.
-- [ ] **Good BT citizen audit**: never pair with / dial / prompt devices that
-  don't advertise the Muninn UUID; pairing agent must not accept arbitrary
-  devices or authorize non-Muninn profiles; no repeated inquiry storms;
-  document guarantees.
+- [x] **Good BT citizen audit** (2026-10-15, table in DESIGN.md): fixed hint
+  dials that could pair, laptop permanently pairable, Trusted on paired
+  peers, unbounded "look again" probing, 20-min re-probing of strangers.
 - [ ] Windows parity (WinRT transport on the shared core; notifications).
 - [x] Game API generic (any turn-based game; real-time when latency allows).
 - [x] Explicit flapping-link tests (weak links several rows apart, on/off).

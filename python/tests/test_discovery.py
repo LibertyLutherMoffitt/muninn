@@ -1,6 +1,8 @@
 """Discovery and politeness: find hidden Muninn peers, never bother others."""
 
-from muninn import scanpolicy
+import time
+
+from muninn import node, scanpolicy
 from muninn.mesh import dm_conv
 from muninn.sim.lab import SimLab, wait_until
 
@@ -36,19 +38,61 @@ def test_finds_peer_whose_service_record_is_hidden():
         lab.close()
 
 
+def test_user_scans_stay_polite():
+    # Someone mashes "look again" in a full cabin: each scan checks a few
+    # strangers' phones, never headsets/watches, and doesn't hammer the same
+    # phone over and over.
+    lab = SimLab(time_scale=0.3, decoys=40, seed=5)
+    try:
+        lab.admin("decoys", n=60, hidden_phones=True)
+        a = lab.node("a", (0, 0), start=False)
+        a.set_scan_mode("quiet")  # only the user's scans
+        a.start()
+        for _ in range(3):
+            a.scan_now(2.0)
+            time.sleep(3)
+        st = lab.admin("state")
+        attempts = st["connect_attempts"]
+        strangers = [d for d in st["devices"] if not d["muninn"]]
+        for d in strangers:
+            if d["kind"] not in ("phone", "computer"):
+                assert attempts.get(d["addr"], 0) == 0, d
+            assert attempts.get(d["addr"], 0) <= 1, d
+        total = sum(attempts.get(d["addr"], 0) for d in strangers)
+        assert node.MANUAL_PROBES < total <= 3 * node.MANUAL_PROBES
+    finally:
+        lab.close()
+
+
 def test_relayed_neighbours_link_up_directly(lab):
     # a and c sit next to each other but never look around (think: two phones
     # that aren't discoverable). Both know b. b's address hints let them dial
     # each other directly instead of relaying forever.
-    a = lab.node("a", (0, 0), start=False)
-    c = lab.node("c", (0, 1), start=False)
+    a = lab.node("a", (0, 0), start=False, advertise=False)
+    c = lab.node("c", (0, 1), start=False, advertise=False)
+    paired_style: list[str] = []
     for n in (a, c):
         n.set_scan_mode("quiet")
+        real = n.transport.connect
+
+        def connect(addr, *args, _real=real, _n=n, **kw):
+            proven = any(a == addr and ok for _, a, ok in _n.storage.load_transports())
+            if not proven:  # connect() may pair on real BT
+                paired_style.append(addr)
+            return _real(addr, *args, **kw)
+
+        n.transport.connect = connect
+        n.transport.probe = real  # sim probes are plain connects; don't count them
         n.start()
-    lab.node("b", (1, 0))
+    b = lab.node("b", (1, 0))
     wait_until(lambda: a.mesh.reachable(c.node_id), 40, msg="relay route")
     wait_until(lambda: c.node_id in a.mesh.connected(), 40, msg="direct link")
     assert a.presence(c.node_id)["state"] == "direct"
+    # Hints are hearsay: dialled like strangers (probe), never with connect()
+    # — which on real Bluetooth may pair.
+    hinted = {lab.addr_of("a"), lab.addr_of("c")}
+    assert not hinted & set(paired_style), paired_style
+    assert b  # b only relays
 
 
 def test_quiet_mode_never_inquires_but_known_peers_reconnect(lab):
