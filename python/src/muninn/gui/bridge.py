@@ -194,6 +194,15 @@ class ChatBridge(QObject):
     def localName(self) -> str:
         return self.mesh.name
 
+    @Property(str, constant=True)
+    def suggestedName(self) -> str:
+        import getpass
+
+        try:
+            return getpass.getuser().capitalize()
+        except Exception:
+            return ""
+
     @Property(bool, constant=True)
     def isWriter(self) -> bool:
         return True

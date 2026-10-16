@@ -271,6 +271,8 @@ ApplicationWindow {
         onAccepted: bridge.sendFiles(selectedFiles)
     }
 
+    Welcome { anchors.fill: parent; z: 50
+        onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
     EmojiPicker { id: emojiPicker; anchors.fill: parent; z: 12
         onVisibleChanged: if (!visible) chatPane.forceActiveFocus() }
     ImageViewer { id: imageViewer; anchors.fill: parent; z: 13

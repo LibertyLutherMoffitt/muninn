@@ -77,14 +77,20 @@ class SimTransport(Transport):
 
     def local_addr(self) -> str:
         if self._addr is None or not self._registered.is_set():
-            self._register()
+            try:
+                self._register()
+            except OSError:
+                return self._addr or "00:00:00:00:00:00"  # hub not up (yet)
         assert self._addr is not None
         return self._addr
 
     def start(self, on_incoming) -> None:
         self._on_incoming = on_incoming
         if not self._registered.is_set():
-            self._register()
+            try:
+                self._register()
+            except OSError:
+                pass  # the control loop keeps retrying until the hub is up
         threading.Thread(target=self._ctrl_loop, daemon=True).start()
 
     def _ctrl_loop(self) -> None:

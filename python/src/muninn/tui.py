@@ -534,6 +534,12 @@ class Tui(ChatUI):
         scr.keypad(True)
         scr.timeout(250)
         self.refresh_convs()
+        if not self.mesh.name:
+            self.out(
+                "Welcome to Muninn! Type your name and press Enter (people nearby will see it)."
+            )
+            self.input = "/nick "
+            self.cursor = len(self.input)
         dirty = True
         while True:
             while not self.events.empty():

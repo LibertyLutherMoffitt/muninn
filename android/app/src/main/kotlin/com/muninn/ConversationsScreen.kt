@@ -30,8 +30,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -104,6 +108,9 @@ fun ConversationsScreen() {
             }
         }
     }
+    var askName by remember { mutableStateOf(false) }
+    LaunchedEffect(tick) { if (Runtime.node?.mesh?.name?.isEmpty() == true) askName = true }
+    if (askName) WelcomeDialog { askName = false }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -195,4 +202,34 @@ private fun ConvRow(c: Runtime.ConvItem) {
             }
         }
     }
+}
+
+
+@Composable
+fun WelcomeDialog(onDone: () -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val suggestion = remember {
+        android.provider.Settings.Global.getString(ctx.contentResolver, "device_name") ?: android.os.Build.MODEL
+    }
+    var name by remember { mutableStateOf(suggestion) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = {},
+        title = { Text("Welcome to Muninn") },
+        text = {
+            Column {
+                Text("Encrypted chat over Bluetooth — no internet needed. People nearby show up by " +
+                    "themselves, and messages hop through others to reach people further away.\n\nWhat should people call you?")
+                Spacer(Modifier.size(8.dp))
+                androidx.compose.material3.OutlinedTextField(name, { name = it }, singleLine = true)
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = name.isNotBlank(), onClick = {
+                val n = name.trim()
+                Runtime.prefs(ctx).edit().putString("name", n).apply()
+                Thread { Runtime.node?.mesh?.setName(n) }.start()
+                onDone()
+            }) { Text("Start") }
+        },
+    )
 }

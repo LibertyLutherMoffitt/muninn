@@ -517,6 +517,13 @@ def main() -> None:
             return tui.main()
     name = os.environ.get("MUNINN_NAME") or None
     node = Node(default_transport(), name=name)
+    if not node.mesh.name and sys.stdin.isatty():
+        try:
+            chosen = input("Welcome to Muninn! What should people call you? ").strip()
+        except EOFError:
+            chosen = ""
+        if chosen:
+            node.mesh.set_name(chosen)
     print(
         f"Muninn — you are {node.mesh.name or '(no name: /nick <name>)'} [{node.node_id}]"
     )
