@@ -15,6 +15,9 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Only used by the developer simulator mode (Settings → Developer). -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- self-update from GitHub releases (Updater.kt) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
 
@@ -47,8 +50,12 @@
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- after a self-update: bring the radio back up -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <receiver android:name=".InstallReceiver" android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

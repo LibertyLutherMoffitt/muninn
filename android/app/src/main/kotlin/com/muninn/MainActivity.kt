@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         Runtime.foreground = true
         Runtime.bump()
+        Thread({ runCatching { Updater.maybeCheck(this) } }, "update-check").start()
     }
 
     override fun onStop() {

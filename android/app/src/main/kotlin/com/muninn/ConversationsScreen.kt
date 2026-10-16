@@ -152,6 +152,15 @@ fun ConversationsScreen() {
             }
         } else {
             LazyColumn(Modifier.fillMaxSize().padding(pad)) {
+                item(key = "update") {
+                    val up by Updater.state.collectAsState()
+                    if (up is Updater.State.Available || up is Updater.State.Downloading || up is Updater.State.Installing)
+                        androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.fillMaxWidth().padding(12.dp, 6.dp),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)) {
+                            Column(Modifier.padding(12.dp)) { UpdateCard(compact = true) }
+                        }
+                }
                 items(items, key = { it.conv }) { c -> ConvRow(c) }
             }
         }

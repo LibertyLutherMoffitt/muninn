@@ -85,6 +85,49 @@ fun SimpleScaffold(title: String, actions: @Composable () -> Unit = {}, content:
     }) { pad -> content(Modifier.padding(pad)) }
 }
 
+// ---------------------------------------------------------------- updates
+
+@Composable
+fun UpdateCard(compact: Boolean = false) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val st by Updater.state.collectAsState()
+    fun check() = scope.launch(Dispatchers.IO) { Updater.check(ctx) }
+    fun install() { if (Updater.ensurePermission(ctx)) scope.launch(Dispatchers.IO) { Updater.install(ctx) } }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (!compact) Text("You have Muninn ${Updater.current}. Updates come from the project's GitHub releases " +
+            "when you're online; nothing is sent over Bluetooth.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        when (val s = st) {
+            is Updater.State.Idle -> OutlinedButton(onClick = { check() }) { Text("Check for updates") }
+            is Updater.State.Checking -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text("  Checking…")
+            }
+            is Updater.State.UpToDate -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("✓ Up to date (${s.version})", Modifier.weight(1f))
+                TextButton(onClick = { check() }) { Text("Check again") }
+            }
+            is Updater.State.Available -> {
+                Text("Muninn ${s.version} is available" + if (s.sizeBytes > 0) " (${s.sizeBytes / 1_000_000} MB)" else "",
+                    fontWeight = FontWeight.Medium)
+                if (s.notes.isNotBlank() && !compact) Text(s.notes.take(400), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onClick = { install() }) { Text("Download and install") }
+            }
+            is Updater.State.Downloading -> {
+                Text("Downloading ${s.version}… ${(s.progress * 100).toInt()}%")
+                androidx.compose.material3.LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth())
+            }
+            is Updater.State.Installing -> Text("Installing ${s.version}… Muninn restarts by itself.")
+            is Updater.State.Failed -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(s.message, Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { check() }) { Text("Retry") }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- Nearby
 
 /** "Make me visible" with feedback: whether it worked and for how long. */
@@ -372,6 +415,9 @@ fun SettingsScreen() {
             HorizontalDivider()
             Text("Be visible", style = MaterialTheme.typography.titleSmall)
             VisibilityCard()
+            HorizontalDivider()
+            Text("Updates", style = MaterialTheme.typography.titleSmall)
+            UpdateCard()
             HorizontalDivider()
             Text("Stay connected in the background", style = MaterialTheme.typography.titleSmall)
             Text(if (unrestricted) "✓ Battery optimisation is off for Muninn — messages keep flowing with the screen off."

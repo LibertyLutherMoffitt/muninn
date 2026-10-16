@@ -4,6 +4,18 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// One version for every client: read it from python/pyproject.toml.
+val muninnVersion: String = Regex("""(?m)^version\s*=\s*"([^"]+)"""")
+    .find(rootProject.file("../python/pyproject.toml").readText())!!.groupValues[1]
+val muninnVersionCode: Int = muninnVersion.split(".").map { it.takeWhile(Char::isDigit).toInt() }
+    .let { (a, b, c) -> a * 10000 + b * 100 + c }
+
+// All builds are signed with the Muninn key when it's present, so an APK
+// built on any machine (or by CI) can update an installed one in place.
+// Not in git: ~/.config/muninn/android-signing.keystore (or $MUNINN_KEYSTORE).
+val muninnKeystore = file(System.getenv("MUNINN_KEYSTORE")
+    ?: "${System.getProperty("user.home")}/.config/muninn/android-signing.keystore")
+
 android {
     namespace = "com.muninn"
     compileSdk = 34
@@ -12,13 +24,24 @@ android {
         applicationId = "com.muninn"
         minSdk = 31
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = muninnVersionCode
+        versionName = muninnVersion
+        buildConfigField("String", "UPDATE_REPO", "\"LibertyLutherMoffitt/muninn\"")
 
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
+    }
+
+    signingConfigs {
+        if (muninnKeystore.exists()) create("muninn") {
+            storeFile = muninnKeystore
+            storePassword = System.getenv("MUNINN_KEYSTORE_PASSWORD") ?: "android"
+            keyAlias = System.getenv("MUNINN_KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("MUNINN_KEY_PASSWORD") ?: "android"
+        }
     }
 
     // Games, stickers and emoji data are shared with the desktop client and
@@ -35,8 +58,11 @@ android {
     }
 
     buildTypes {
+        val signing = signingConfigs.findByName("muninn")
+        debug { if (signing != null) signingConfig = signing }
         release {
             isMinifyEnabled = false
+            signingConfig = signing ?: signingConfigs.getByName("debug")
         }
     }
 

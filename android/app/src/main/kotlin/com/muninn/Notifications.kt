@@ -124,8 +124,10 @@ class ReplyReceiver : BroadcastReceiver() {
 /** Restart the radio after reboot (if the user hasn't turned that off). */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-        if (!Runtime.prefs(ctx).getBoolean("start_on_boot", true)) return
+        val updated = intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
+        if (intent.action != Intent.ACTION_BOOT_COMPLETED && !updated) return
+        // after a self-update the radio was running a moment ago: always resume
+        if (!updated && !Runtime.prefs(ctx).getBoolean("start_on_boot", true)) return
         runCatching { ctx.startForegroundService(Intent(ctx, MuninnService::class.java)) }
     }
 }
