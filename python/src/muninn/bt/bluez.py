@@ -225,25 +225,34 @@ def device_kind(cls: int) -> str:
 
 
 def inquiry(duration: float = 5.0) -> list[dict]:
-    """Run an inquiry, then report every device BlueZ knows about:
+    """Run a Classic (BR/EDR) inquiry and report every device seen:
     {addr, name, muninn (True/False/None = unknown), kind, rssi}."""
     try:
         bus = dbus.SystemBus()
         adapter = dbus.Interface(
             bus.get_object("org.bluez", "/org/bluez/hci0"), "org.bluez.Adapter1"
         )
+        try:  # Muninn is RFCOMM-only: don't also scan the LE band
+            adapter.SetDiscoveryFilter({"Transport": dbus.String("bredr")})
+        except dbus.DBusException:
+            pass
         try:
             adapter.StartDiscovery()
         except dbus.DBusException:
             pass  # already discovering
         time.sleep(duration)
+        # RSSI is only present while discovery runs: read before stopping.
+        objects = dbus.Interface(
+            bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager"
+        ).GetManagedObjects()
         try:
             adapter.StopDiscovery()
         except dbus.DBusException:
             pass
-        objects = dbus.Interface(
-            bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager"
-        ).GetManagedObjects()
+        try:
+            adapter.SetDiscoveryFilter({})
+        except dbus.DBusException:
+            pass
     except dbus.DBusException:
         return []
     out = []
@@ -251,6 +260,10 @@ def inquiry(duration: float = 5.0) -> list[dict]:
         d = ifaces.get("org.bluez.Device1")
         if not d or not d.get("Address"):
             continue
+        if str(d.get("AddressType", "public")) == "random":
+            continue  # LE-only device: can't speak RFCOMM
+        if "RSSI" not in d:
+            continue  # only in BlueZ's cache, not actually seen this time
         uuids = [str(u).lower() for u in d.get("UUIDs", [])]
         muninn = True if SERVICE_UUID.lower() in uuids else (False if uuids else None)
         out.append(
