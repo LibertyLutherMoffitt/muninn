@@ -10,82 +10,52 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 
 ---
 
-## 1. Audit findings (state at commit `fb0a241`)
+## 1. Status (2026-10-15)
 
 ### 1.1 Feature matrix
 
-| Feature                                  | Python core | CLI | GUI | Android |
-|------------------------------------------|:-----------:|:---:|:---:|:-------:|
-| Handshake / E2EE 1:1                     | ✅ | ✅ | ✅ | ✅ |
-| ACK tracking + delivery ticks            | ✅ | ✅ | ✅ | ❌ (logs only) |
-| Read receipts                            | ✅ | ✅ | ❌ **never sent** | ❌ |
-| Retransmit unacked                       | ⚠️ only on *direct* reconnect of dest | | | ❌ |
-| Periodic retry / backoff                 | ❌ | | | ❌ |
-| Persistent history                       | ✅ | ✅ | ✅ | ❌ (RAM only) |
-| Multiple conversations                   | ✅ | ✅ | ✅ | ❌ (one flat log, sends to *every* peer) |
-| Groups                                   | ✅ | ✅ | ✅ | ❌ |
-| Relay / multi-hop                        | ⚠️ (see 1.2) | | | ❌ drops non-addressed frames |
-| Peer roster gossip (PEER_ANNC)           | ⚠️ 1 hop only | | | ❌ |
-| Display names (PROFILE)                  | ✅ | ✅ | ✅ | ❌ |
-| Link keepalive / dead-link detection     | ❌ | | | ❌ |
-| Auto reconnect to known peers            | ⚠️ discovery-dependent | | | ✅ (15 s loop) |
-| Message notifications                    | n/a | ❌ | ✅ notify-send | ❌ |
-| Replies / quotes                         | ❌ | ❌ | ❌ | ❌ |
-| Reactions                                | ❌ | ❌ | ❌ | ❌ |
-| Emoji input                              | n/a | terminal | ❌ no picker / shortcodes | ✅ keyboard |
-| Edit / delete                            | ❌ | ❌ | ❌ | ❌ |
-| Files / images / GIFs                    | ❌ (64 KB frame cap) | ❌ | ❌ | ❌ |
-| Games API                                | ❌ | ❌ | ❌ | ❌ |
-| Real-time (unreliable) channel           | ❌ | | | ❌ |
-| Typing indicator                         | ❌ | | | ❌ |
-| Simulation / automated tests             | ❌ none | | | ❌ |
+| Feature                                   | Qt GUI | Terminal (TUI) | Android |
+|-------------------------------------------|:------:|:--------------:|:-------:|
+| 1:1 + group chat, relayed multi-hop        | ✅ | ✅ | ✅ |
+| delivery ✓ / read ✓✓ across relays         | ✅ | ✅ | ✅ |
+| replies, reactions, edit, delete           | ✅ | ✅ | ✅ |
+| typing indicator                           | ✅ | ✅ | ✅ |
+| emoji picker / `:shortcodes:`              | ✅ / ✅ | search / ✅ | keyboard / ✅ |
+| files, images, GIFs (resumable, relayed)   | ✅ inline | ✅ open externally | ✅ inline |
+| offline sticker pack + save GIFs           | ✅ | send only | ✅ |
+| games (7 bundled, JS plugins, share code)  | ✅ | invites only | ✅ |
+| real-time game channel (pong)              | ✅ | — | ✅ |
+| group create / add / remove / rename / leave / members | ✅ | ✅ | ✅ |
+| presence: connected / via relay / nearby / last seen | ✅ | ✅ | ✅ |
+| nicknames for others, duplicate-name disambiguation | ✅ | ✅ | ✅ |
+| notifications (+ mute per chat)            | ✅ notify-send/tray | bell | ✅ inline reply, private on lock screen |
+| search                                     | ✅ | ✅ | ✅ |
+| scan modes, polite discovery, /whoami      | ✅ | ✅ | ✅ |
+| first-run name onboarding                  | ✅ | ✅ | ✅ |
+| background / boot / battery                | — | — | ✅ (verified in Doze) |
 
-### 1.2 Reliability bugs in the Python core (peers.py)
+### 1.2 Verified
 
-1. **Relayed messages are never retried.** Unacked frames are only resent in
-   `add_peer()` *for the destination itself*. If A→B→C and the first forward is
-   lost, A never retries unless C connects to A directly.
-2. **`seen_relayed` never expires.** A relay that forwarded `(msg, dest)` once drops
-   every retransmit of it forever — even if the first forward died in a queue.
-3. **`seen_acks` / `seen_reads` never expire.** If an ACK was flooded while the
-   originator was unreachable, the receiver's re-ACK (sent on duplicate) is dropped
-   by every relay that already saw it → originator retransmits forever, message
-   shows "sent" forever.
-4. **Routing picks the first connected peer, blindly.** `_route_frame` hands the
-   frame to any peer, not one that can reach the destination; multi-hop beyond a
-   line topology is luck. `indirect_via` is learned but unused for routing.
-5. **Relay queue is in-memory and unbounded**; lost on restart, grows forever.
-6. **PEER_ANNC only propagates one hop.** In A–B–C–D, D never learns A's pubkey
-   until a reconnect → can't DM A even though a path exists.
-7. **GROUP_SETUP is fire-and-forget.** If a member is unreachable when the group is
-   created and the queued frame is lost (restart), they never get the group;
-   messages for it arrive as an unknown `group:<hex>` conversation.
-8. **No keepalive.** Half-open RFCOMM sockets (peer walked away / radio glitch) are
-   only detected on the next write; reads block indefinitely. Peer shows
-   "connected" while it's gone and the queue isn't used.
-9. **Sends happen on recv threads.** `sendall()` under a lock from recv loops: two
-   nodes whose send buffers fill simultaneously can deadlock each other (both recv
-   threads blocked sending). Large frames block chat for everyone.
-10. **Scanner dials only devices whose UUIDs BlueZ already has cached** → after the
-    first contact, reconnection still depends on discovery luck. Transport
-    addresses of peers (esp. Android, whose wire id ≠ BT address) are not persisted.
-11. **Duplicate links** resolved by last-wins; both sides can churn.
-12. GUI: read receipts never sent (`send_read` only called by CLI).
-13. `decode_*` functions trust lengths → malformed frames raise inside recv loop
-    (caught as generic Exception → link dropped). Fine, but should be explicit.
+- 60+ Python tests: protocol, wire vectors, mesh, chaos (flapping relays,
+  weak edges, walking peers, restarts, reinstalls, 40-decoy cabin, 10-seat
+  full-cabin soak with files), discovery politeness, games, Python↔Kotlin
+  interop incl. a mixed 6-seat soak.
+- Kotlin core tests: NaCl vs PyNaCl vectors, wire vectors, UTF-8 cuts.
+- Android in the simulated cabin: 12/12 scenarios (tools/android_scenarios.py).
+- Android over the real Bluetooth stack (netsim, 3 emulators): automatic
+  first contact via polite probe, 2-hop relay with delivery receipt.
+- BlueZ on real hardware (magnus): registration, inquiry; nothing probed.
+- Qt GUI, TUI and Android UIs driven and screenshotted headlessly.
 
-### 1.3 Android gaps
+### 1.3 Known limits
 
-Android is at "milestone 3": a single PeerSession per socket, flat message list,
-`send()` fans out to *every* connected peer. No storage, no ACK state, no
-retransmit, no groups, no relay, no names, no notifications for messages, no
-conversation list. All of it must be ported.
-
-### 1.4 Plane-readiness verdict (before this work)
-
-**Not ready.** Two devices in range work. Anything involving a third device, a
-link drop at the wrong time, an app restart while messages are queued, or the
-Android side, will lose or stall messages silently.
+- Real-hardware Linux ↔ Android and Windows (WinRT) are untested.
+- Phone ↔ phone first contact needs one side to be visible (Android allows
+  5 min); after that everything reconnects by itself.
+- Message order follows the sender's clock; a device with a wrong clock
+  sorts its messages accordingly.
+- NFC tap-to-pair not implemented (emulators have no NFC to test with; it
+  would only save the "Make me visible" tap).
 
 ---
 
