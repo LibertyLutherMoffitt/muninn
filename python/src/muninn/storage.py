@@ -155,14 +155,23 @@ class Storage:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._conn.close()
+
+    # Background threads may still be finishing when the app shuts down; after
+    # close() reads return nothing and writes are dropped instead of raising.
+    _closed = False
 
     def _q(self, sql: str, args: tuple = ()) -> list[tuple]:
         with self._lock:
+            if self._closed:
+                return []
             return self._conn.execute(sql, args).fetchall()
 
     def _x(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
+            if self._closed:
+                return 0
             return self._conn.execute(sql, args).rowcount
 
     def _migrate(self) -> None:

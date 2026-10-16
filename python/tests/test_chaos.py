@@ -348,3 +348,110 @@ def test_reinstalled_peer_keeps_conversation(lab):
     wait_until(lambda: gid in b2.mesh.groups, 30, msg="new b learns the group")
     b2.mesh.send_text(group_conv(gid), "back in the group")
     wait_until(lambda: "back in the group" in inbound(c, group_conv(gid)), 30)
+
+
+def test_full_cabin_soak():
+    """10 seats in two columns, two groups, DMs, two file transfers, people
+    moving and flapping links for ~60 s, then calm: everything must arrive
+    exactly once and every outbox must drain."""
+    from muninn.sim.lab import SimLab
+
+    rng = random.Random(42)
+    lab = SimLab(time_scale=0.3, decoys=30, seed=42)
+    try:
+        seats = {f"s{i}": (i // 2 * 2.6, (i % 2) * 4.0) for i in range(10)}
+        nodes = {n: lab.node(n, p) for n, p in seats.items()}
+        names = list(nodes)
+        ids = {n: nodes[n].node_id for n in names}
+        wait_until(
+            lambda: all(nodes["s0"].mesh.reachable(ids[n]) for n in names[1:]),
+            150,
+            msg="cabin converged",
+        )
+        front = names[:6]
+        back = names[4:]
+        g1 = nodes["s0"].mesh.create_group("front", [ids[n] for n in front[1:]])
+        g2 = nodes["s9"].mesh.create_group("back", [ids[n] for n in back[:-1]])
+        wait_until(
+            lambda: (
+                all(g1 in nodes[n].mesh.groups for n in front)
+                and all(g2 in nodes[n].mesh.groups for n in back)
+            ),
+            90,
+        )
+        blob = os.urandom(250_000)
+        fpath = lab.tmp / "soak.bin"
+        fpath.write_bytes(blob)
+        nodes["s0"].mesh.send_file(dm_conv(ids["s9"]), str(fpath))
+        nodes["s9"].mesh.send_file(group_conv(g2), str(fpath))
+        sent_dm, sent_g = [], []
+        stop = time.monotonic() + 60
+        while time.monotonic() < stop:
+            r = rng.random()
+            x, y = rng.sample(names, 2)
+            if r < 0.35:
+                t = f"dm {x}>{y} {len(sent_dm)}"
+                nodes[x].mesh.send_text(dm_conv(ids[y]), t)
+                sent_dm.append((x, y, t))
+            elif r < 0.6:
+                gid, members = (g1, front) if rng.random() < 0.5 else (g2, back)
+                s = rng.choice(members)
+                t = f"g {s} {len(sent_g)}"
+                nodes[s].mesh.send_text(group_conv(gid), t)
+                sent_g.append((gid, members, t))
+            elif r < 0.7:
+                row, col = seats[x]
+                lab.move(x, (max(0, row + rng.uniform(-3, 3)), col))
+            elif r < 0.8:
+                lab.pair_cmd(
+                    "flap", x, y, up=rng.uniform(1, 4), down=rng.uniform(0.5, 2)
+                )
+            elif r < 0.85:
+                lab.admin("kill", addr=lab.addr_of(x))
+            time.sleep(rng.uniform(0.05, 0.25))
+        lab.admin("reset")
+        for n, p in seats.items():
+            lab.move(n, p)
+        for x, y, t in sent_dm:
+            wait_until(
+                lambda x=x, y=y, t=t: t in inbound(nodes[y], dm_conv(ids[x])),
+                240,
+                msg=t,
+            )
+        for gid, members, t in sent_g:
+            for n in members:
+                wait_until(
+                    lambda n=n, gid=gid, t=t: t in inbound(nodes[n], group_conv(gid)),
+                    240,
+                    msg=f"{t} at {n}",
+                )
+        for n in names:  # exactly once
+            for conv in [group_conv(g1), group_conv(g2)] + [
+                dm_conv(ids[o]) for o in names if o != n
+            ]:
+                msgs = inbound(nodes[n], conv)
+                assert len(msgs) == len(set(msgs)), f"duplicates at {n} in {conv}"
+
+        def files_done():
+            want = hashlib.sha256(blob).hexdigest()
+            ok9 = any(
+                f.state == "complete" and f.sha256 == want and f.sender == ids["s0"]
+                for f in nodes["s9"].mesh.files.values()
+            )
+            okg = all(
+                any(
+                    f.state == "complete" and f.sender == ids["s9"]
+                    for f in nodes[n].mesh.files.values()
+                )
+                for n in back[:-1]
+            )
+            return ok9 and okg
+
+        wait_until(files_done, 300, msg="files complete")
+        wait_until(
+            lambda: sum(nodes[n].mesh.pending_count() for n in names) == 0,
+            240,
+            msg="outboxes drained",
+        )
+    finally:
+        lab.close()

@@ -90,6 +90,10 @@ class Node:
         self._scan_now.set()
         self.transport.stop()
         self.mesh.stop()
+        # let in-flight dials/handshakes finish before the DB goes away
+        deadline = time.monotonic() + 3
+        while self._dialing and time.monotonic() < deadline:
+            time.sleep(0.05)
         self.storage.close()
 
     # --- settings -------------------------------------------------------------
