@@ -204,7 +204,7 @@ object Nacl {
 
     // ---- curve25519 --------------------------------------------------------
 
-    private fun car(o: LongArray) {
+    internal fun car(o: LongArray) {
         for (i in 0 until 16) {
             o[i] += 1L shl 16
             val c = o[i] shr 16
@@ -213,7 +213,7 @@ object Nacl {
         }
     }
 
-    private fun sel(p: LongArray, q: LongArray, b: Int) {
+    internal fun sel(p: LongArray, q: LongArray, b: Int) {
         val c = (b - 1).toLong().inv()
         for (i in 0 until 16) {
             val t = c and (p[i] xor q[i])
@@ -222,7 +222,7 @@ object Nacl {
         }
     }
 
-    private fun pack(o: ByteArray, n: LongArray) {
+    internal fun pack(o: ByteArray, n: LongArray) {
         val m = LongArray(16)
         val t = n.copyOf()
         car(t); car(t); car(t)
@@ -243,15 +243,15 @@ object Nacl {
         }
     }
 
-    private fun unpack(o: LongArray, n: ByteArray) {
+    internal fun unpack(o: LongArray, n: ByteArray) {
         for (i in 0 until 16) o[i] = (n[2 * i].toLong() and 0xff) + ((n[2 * i + 1].toLong() and 0xff) shl 8)
         o[15] = o[15] and 0x7fff
     }
 
-    private fun add(o: LongArray, a: LongArray, b: LongArray) { for (i in 0 until 16) o[i] = a[i] + b[i] }
-    private fun sub(o: LongArray, a: LongArray, b: LongArray) { for (i in 0 until 16) o[i] = a[i] - b[i] }
+    internal fun add(o: LongArray, a: LongArray, b: LongArray) { for (i in 0 until 16) o[i] = a[i] + b[i] }
+    internal fun sub(o: LongArray, a: LongArray, b: LongArray) { for (i in 0 until 16) o[i] = a[i] - b[i] }
 
-    private fun mul(o: LongArray, a: LongArray, b: LongArray) {
+    internal fun mul(o: LongArray, a: LongArray, b: LongArray) {
         val t = LongArray(31)
         for (i in 0 until 16) for (j in 0 until 16) t[i + j] += a[i] * b[j]
         for (i in 0 until 15) t[i] += 38 * t[i + 16]
@@ -259,9 +259,9 @@ object Nacl {
         car(o); car(o)
     }
 
-    private fun sq(o: LongArray, a: LongArray) = mul(o, a, a)
+    internal fun sq(o: LongArray, a: LongArray) = mul(o, a, a)
 
-    private fun inv(o: LongArray, i: LongArray) {
+    internal fun inv(o: LongArray, i: LongArray) {
         val c = i.copyOf()
         for (a in 253 downTo 0) {
             sq(c, c)
