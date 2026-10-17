@@ -32,3 +32,16 @@ repos:
         language: system
         pass_filenames: false
         files: '\.py$'
+
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -l -w
+        language: system
+        files: '^tea/.*\.go$'
+
+      - id: go-vet-test
+        name: go vet + test (tea/)
+        entry: bash -c 'cd tea && go vet ./... && go test ./...'
+        language: system
+        pass_filenames: false
+        files: '^tea/'

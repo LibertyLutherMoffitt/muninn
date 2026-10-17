@@ -137,6 +137,25 @@
           };
         };
 
+        # Bubble Tea terminal client (tea/). It drives the Python core
+        # (`muninn --api`); the wrapper points it at the packaged one.
+        muninn-tea = pkgs.buildGoModule rec {
+          pname = "muninn-tea";
+          version = "0.8.0";
+          src = ./tea;
+          vendorHash = "sha256-oJXQAoJBGWsZ6PSEjDm0zYU5gYxkXvk3vVADybhRXBc=";
+          ldflags = ["-s" "-w" "-X main.version=${version}"];
+          nativeBuildInputs = [pkgs.makeWrapper];
+          postInstall = ''
+            mv $out/bin/tea $out/bin/muninn-tea
+            wrapProgram $out/bin/muninn-tea --set-default MUNINN_CORE "${muninn-linux}/bin/muninn"
+          '';
+          meta = {
+            description = "Muninn terminal client (Bubble Tea)";
+            mainProgram = "muninn-tea";
+          };
+        };
+
         # Muninn GUI on a private Xvfb display for headless testing over ssh.
         # Drive with `DISPLAY=:98 xdotool ...`, screenshot with
         # `DISPLAY=:98 import -window root out.png`. Software Qt Quick backend
@@ -163,6 +182,7 @@
           default = muninn-linux;
           muninn-linux = muninn-linux;
           muninn-gui = muninn-gui;
+          muninn-tea = muninn-tea;
           android-emu = android-emu;
           gui-headless = gui-headless;
           cli = muninn-linux;
@@ -184,6 +204,9 @@
             pkgs.xdotool
             pkgs.tmux
             pkgs.imagemagick
+
+            # Bubble Tea client (tea/)
+            pkgs.go
 
             # Tooling
             pkgs.ruff

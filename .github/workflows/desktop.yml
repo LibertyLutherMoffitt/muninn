@@ -61,6 +61,16 @@ jobs:
           pyinstaller --noconfirm --onefile --name "muninn-${{ matrix.suffix }}" \
             $common --exclude-module PySide6 packaging/muninn_cli.py
           ls -la dist
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tea/go.mod
+          cache-dependency-path: tea/go.sum
+      - name: build the Bubble Tea client (needs the CLI next to it as its core)
+        run: |
+          cd tea
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "../dist/muninn-tea-${{ matrix.suffix }}${{ matrix.exe }}" .
+          "../dist/muninn-tea-${{ matrix.suffix }}${{ matrix.exe }}" --version
       - name: smoke test (imports everything, no Bluetooth needed)
         run: |
           MUNINN_SELFTEST=1 ./dist/muninn-${{ matrix.suffix }}${{ matrix.exe }}

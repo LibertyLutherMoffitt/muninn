@@ -776,6 +776,10 @@ def _human(n: float) -> str:
 
 
 def main() -> None:
+    if "--api" in sys.argv[1:]:  # JSON on stdio for other front ends (tea/)
+        from muninn import api
+
+        return api.main()
     plain = "--plain" in sys.argv[1:]
     if not plain and sys.stdin.isatty() and sys.stdout.isatty():
         try:
