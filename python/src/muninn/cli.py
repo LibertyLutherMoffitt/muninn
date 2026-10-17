@@ -4,7 +4,6 @@ commands (/reply, /react, /edit, /delete, /get) refer to."""
 
 from __future__ import annotations
 
-import mimetypes
 import os
 import shlex
 import sys
@@ -80,6 +79,7 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/photos [compressed|original]  shrink photos before sending (default)
 /privacy [receipts|typing] [on|off]   send read receipts / typing indicators
 /doctor                    check everything before a flight
 /unpair                    remove leftover Bluetooth pairings with Muninn people
@@ -371,9 +371,10 @@ class ChatUI:
                 mesh.delete(self.conv, mid)
         elif cmd == "file" and args and self._need_conv():
             path = os.path.expanduser(args[0])
-            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
             try:
-                mesh.send_file(self.conv, path, mime, caption=" ".join(args[1:]))
+                from muninn import media
+
+                media.send_file(mesh, self.conv, path, caption=" ".join(args[1:]))
             except (OSError, ValueError) as e:
                 self.out(f"! {e}")
         elif cmd == "get" and args:
@@ -431,6 +432,19 @@ class ChatUI:
                     self.out(f"  {'blocked' if cmd == 'block' else 'forgot'} {name}")
                     if self.conv == "dm:" + nid:
                         self.conv = ""
+        elif cmd == "photos":
+            from muninn import media
+
+            if args and args[0] in ("original", "compressed"):
+                mesh.storage.set_setting(media.SETTING, args[0])
+            self.out(
+                "  photos: "
+                + (
+                    "original quality"
+                    if media.wants_original(mesh.storage)
+                    else "shrunk to ≤1600 px, location stripped (default)"
+                )
+            )
         elif cmd == "privacy":
             if (
                 len(args) == 2

@@ -81,6 +81,7 @@
             pkgs.python3Packages.pynacl
             pkgs.python3Packages.dbus-python
             pkgs.python3Packages.pygobject3
+            pkgs.python3Packages.pillow
           ];
 
           meta = {
@@ -115,6 +116,7 @@
             pkgs.python3Packages.dbus-python
             pkgs.python3Packages.pygobject3
             pkgs.python3Packages.pyside6
+            pkgs.python3Packages.pillow
           ];
 
           buildInputs = [

@@ -71,11 +71,12 @@ object Media {
         var out = File(dir, System.nanoTime().toString() + "_" + name.replace('/', '_'))
         ctx.contentResolver.openInputStream(uri)!!.use { inp -> out.outputStream().use { inp.copyTo(it) } }
         var finalMime = mime
-        if (mime.startsWith("image/") && mime != "image/gif") {
+        val original = Runtime.prefs(ctx).getBoolean("photo_original", false)
+        if (!original && mime.startsWith("image/") && mime != "image/gif") {
             val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(out.path, opts)
             if (out.length() > 400_000 || maxOf(opts.outWidth, opts.outHeight) > 1600) {
-                val bmp = decodeScaled(out, 1600)
+                val bmp = decodeScaled(out, 1600)?.let { upright(out, it) }
                 if (bmp != null) {
                     val jpg = File(dir, out.nameWithoutExtension + ".jpg")
                     jpg.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 82, it) }
@@ -99,8 +100,26 @@ object Media {
         return if (scale < 1) Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true) else bmp
     }
 
+    /** Apply the EXIF orientation (phones store portrait shots sideways + a flag);
+     *  the re-encoded JPEG carries no EXIF at all (no location either). */
+    fun upright(f: File, bmp: Bitmap): Bitmap {
+        val o = runCatching { android.media.ExifInterface(f.path).getAttributeInt(
+            android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL) }
+            .getOrDefault(android.media.ExifInterface.ORIENTATION_NORMAL)
+        val m = android.graphics.Matrix()
+        when (o) {
+            android.media.ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
+            android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
+            else -> return bmp
+        }
+        return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+    }
+
     fun thumbnail(f: File): ByteArray {
-        val bmp = decodeScaled(f, 160) ?: return ByteArray(0)
+        val bmp = decodeScaled(f, 160)?.let { upright(f, it) } ?: return ByteArray(0)
         for (q in intArrayOf(70, 50, 30)) {
             val bo = ByteArrayOutputStream()
             bmp.compress(Bitmap.CompressFormat.JPEG, q, bo)

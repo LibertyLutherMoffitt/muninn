@@ -6,7 +6,6 @@ signals so all model mutation happens on the GUI thread.
 
 from __future__ import annotations
 
-import mimetypes
 import os
 import shlex
 import threading
@@ -555,12 +554,12 @@ class ChatBridge(QObject):
         if not os.path.isfile(path):
             self.errorOccurred.emit(f"not a file: {path}")
             return
-        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        thumb = _thumbnail(path) if mime.startswith("image/") else b""
         reply = bytes.fromhex(self._reply_to) if self._reply_to else None
         try:
-            self.mesh.send_file(
-                self._active, path, mime, caption=caption, thumb=thumb, reply_to=reply
+            from muninn import media
+
+            media.send_file(
+                self.mesh, self._active, path, caption=caption, reply_to=reply
             )
         except (OSError, ValueError) as e:
             self.errorOccurred.emit(str(e))
@@ -920,6 +919,7 @@ class ChatBridge(QObject):
         "privacy",
         "doctor",
         "zoom",
+        "photos",
         "sharegame",
         "find",
         "background",
@@ -1265,6 +1265,19 @@ class ChatBridge(QObject):
                     "usage: :zoom [percent]  (or Ctrl +/-/0)"
                 )
             self.setUiScale(pct / 100 if pct > 3 else pct)
+        elif head == "photos":
+            from muninn import media
+
+            if args and args[0] in ("original", "compressed"):
+                self.node.storage.set_setting(media.SETTING, args[0])
+            cur = (
+                "original" if media.wants_original(self.node.storage) else "compressed"
+            )
+            self.notify.emit(
+                "photos are sent in full quality (slow over Bluetooth)"
+                if cur == "original"
+                else "photos are shrunk to ≤1600 px and stripped of location before sending"
+            )
         elif head == "privacy":
             if (
                 len(args) == 2
@@ -1692,25 +1705,3 @@ class ChatBridge(QObject):
                 }
             )
         return out
-
-
-def _thumbnail(path: str) -> bytes:
-    """Small JPEG preview (≤ ~10 KB) so receivers see the picture instantly."""
-    try:
-        from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
-        from PySide6.QtGui import QImage
-
-        img = QImage(path)
-        if img.isNull():
-            return b""
-        img = img.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        for q in (70, 50, 30):
-            ba = QByteArray()
-            buf = QBuffer(ba)
-            buf.open(QIODevice.WriteOnly)
-            img.save(buf, "JPEG", q)  # ty: ignore[no-matching-overload]
-            if ba.size() <= 10000:
-                return bytes(ba.data())
-    except Exception:
-        pass
-    return b""

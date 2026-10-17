@@ -8,6 +8,7 @@ version = "0.6.0"
 requires-python = ">=3.11"
 dependencies = [
   "PyNaCl",
+  "Pillow",  # photos are shrunk before sending (muninn/media.py)
 
   # Linux — BlueZ via D-Bus
   "dbus-python; sys_platform == 'linux'",

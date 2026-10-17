@@ -566,6 +566,17 @@ fun SettingsScreen() {
             HorizontalDivider()
             DoctorCard()
             HorizontalDivider()
+            Text("Photos", style = MaterialTheme.typography.titleSmall)
+            var fullPhotos by remember { mutableStateOf(p.getBoolean("photo_original", false)) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Send photos in full quality")
+                    Text("Off: shrunk to 1600 px and stripped of location — seconds instead of minutes over Bluetooth.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = fullPhotos, onCheckedChange = { fullPhotos = it; p.edit().putBoolean("photo_original", it).apply() })
+            }
+            HorizontalDivider()
             Text("Privacy", style = MaterialTheme.typography.titleSmall)
             val mesh = Runtime.node?.mesh
             var receipts by remember { mutableStateOf(mesh?.privacy("receipts") ?: true) }
