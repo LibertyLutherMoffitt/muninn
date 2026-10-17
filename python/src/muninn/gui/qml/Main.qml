@@ -32,7 +32,22 @@ ApplicationWindow {
     // Main Layout
     // ------------------------------------------------------------------
 
-    ColumnLayout {
+    // Everything visual lives on a "stage" scaled by the zoom level
+    // (Ctrl +/-/0, :zoom): crisp text, correct mouse mapping, layouts that
+    // simply get more or less room.
+    property real uiScale: bridge.uiScale
+    Item {
+        id: stage
+        width: root.width / root.uiScale
+        height: root.height / root.uiScale
+        scale: root.uiScale
+        transformOrigin: Item.TopLeft
+    }
+    Shortcut { sequences: ["Ctrl++", "Ctrl+="]; onActivated: bridge.setUiScale(root.uiScale + 0.1) }
+    Shortcut { sequence: "Ctrl+-"; onActivated: bridge.setUiScale(root.uiScale - 0.1) }
+    Shortcut { sequence: "Ctrl+0"; onActivated: bridge.setUiScale(1.0) }
+
+    ColumnLayout { parent: stage;
         anchors.fill: parent
         spacing: 0
 
@@ -278,7 +293,7 @@ ApplicationWindow {
     // Overlays
     // ------------------------------------------------------------------
 
-    DropArea {
+    DropArea { parent: stage;
         anchors.fill: parent
         onDropped: (drop) => { if (drop.hasUrls) bridge.sendFiles(drop.urls) }
         Rectangle {
@@ -320,22 +335,22 @@ ApplicationWindow {
         chatPane.forceActiveFocus()
     }
 
-    Welcome { id: welcome; anchors.fill: parent; z: 50
+    Welcome { parent: stage; id: welcome; anchors.fill: parent; z: 50
         onVisibleChanged: root.overlayVisibility(welcome) }
-    EmojiPicker { id: emojiPicker; anchors.fill: parent; z: 12
+    EmojiPicker { parent: stage; id: emojiPicker; anchors.fill: parent; z: 12
         onVisibleChanged: root.overlayVisibility(emojiPicker) }
-    ImageViewer { id: imageViewer; anchors.fill: parent; z: 13
+    ImageViewer { parent: stage; id: imageViewer; anchors.fill: parent; z: 13
         onVisibleChanged: root.overlayVisibility(imageViewer) }
-    GameView { id: gameView; anchors.fill: parent; z: 11
+    GameView { parent: stage; id: gameView; anchors.fill: parent; z: 11
         onVisibleChanged: root.overlayVisibility(gameView) }
 
-    ScanDialog { id: scanDialog; anchors.fill: parent; z: 10
+    ScanDialog { parent: stage; id: scanDialog; anchors.fill: parent; z: 10
         onVisibleChanged: root.overlayVisibility(scanDialog) }
-    ConfirmRemove { id: confirmRemove; anchors.fill: parent; z: 14
+    ConfirmRemove { parent: stage; id: confirmRemove; anchors.fill: parent; z: 14
         onVisibleChanged: { root.overlayVisibility(confirmRemove); peerList.confirmOpen = visible }
         onDone: peerList.clearPicked() }
 
-    CommandPalette {
+    CommandPalette { parent: stage;
         id: cmdPalette
         anchors.fill: parent
         z: 10
@@ -346,7 +361,7 @@ ApplicationWindow {
         onVisibleChanged: root.overlayVisibility(cmdPalette)
     }
 
-    InfoMenu {
+    InfoMenu { parent: stage;
         id: infoMenu
         anchors.fill: parent
         z: 11
@@ -361,7 +376,7 @@ ApplicationWindow {
     // Top-most overlay: animated dots that fly along a polyline whenever
     // focus jumps between the composer, the palette, or a peer-list row.
     // Drawn above every dialog so trails are visible as overlays open.
-    CursorTrail {
+    CursorTrail { parent: stage;
         id: cursorTrail
         anchors.fill: parent
         z: 100
@@ -398,7 +413,7 @@ ApplicationWindow {
     }
 
     // Toast (errors red, info neutral). Fades in/out for smoothness.
-    Rectangle {
+    Rectangle { parent: stage;
         id: toast
         property bool isError: true
         visible: opacity > 0

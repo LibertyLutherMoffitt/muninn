@@ -188,15 +188,15 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   bits in HELLO): today a v2 node refuses any other version outright, so a
   friend who hasn't updated can't talk to you mid-flight. Make HELLO carry
   a feature set, accept older peers, and degrade features per link.
-- [ ] `:doctor` / Settings → "Check before the flight": Bluetooth on,
+- [x] `:doctor` / Settings → "Check before the flight": Bluetooth on,
   permissions, battery optimisation off, background running, version vs
   friends', last time each friend was seen, whether find mode is needed.
-- [ ] Privacy toggles: read receipts and typing indicators on/off.
+- [x] Privacy toggles: read receipts and typing indicators on/off.
 - [ ] Export / import chat history (moving to a new phone; pairs with
   linked devices later).
 - [ ] Tap phones to add someone to a room (NFC + group invite).
-- [ ] React / reply from the Android notification.
-- [ ] Desktop font-size / zoom setting (Ctrl +/-) and a light theme.
+- [x] React / reply from the Android notification (👍 + reply).
+- [x] Desktop zoom (Ctrl +/-/0, :zoom). Light theme still open.
 - [ ] Real-time game latency over real Bluetooth + relay (pong), and a
   short note on what's playable.
 - [ ] Windows hardware pass (WinRT): dialing phones without a bond may not

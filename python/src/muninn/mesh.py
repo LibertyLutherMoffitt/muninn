@@ -1165,11 +1165,23 @@ class Mesh:
         for mid, sender in self.storage.mark_read_local(conv):
             if sender != self.node_id:
                 by_sender[sender].append(mid.hex())
+        if not self.privacy("receipts"):
+            return  # marked read here, but nobody is told
         for sender, ids in by_sender.items():
             for i in range(0, len(ids), 500):
                 self._send_body([sender], C.Body(C.K_RECEIPT, {"r": ids[i : i + 500]}))
 
+    def privacy(self, what: str) -> bool:
+        """Privacy switches: "receipts" (tell senders you read their
+        messages) and "typing" (show that you're typing). Both on by default."""
+        return self.storage.get_setting("privacy_" + what, "on") != "off"
+
+    def set_privacy(self, what: str, on: bool) -> None:
+        self.storage.set_setting("privacy_" + what, "on" if on else "off")
+
     def send_typing(self, conv: str) -> None:
+        if not self.privacy("typing"):
+            return
         self._send_body(
             self.conv_members(conv), C.Body(C.K_TYPING, self._conv_meta(conv))
         )

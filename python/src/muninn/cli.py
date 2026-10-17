@@ -80,6 +80,8 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/privacy [receipts|typing] [on|off]   send read receipts / typing indicators
+/doctor                    check everything before a flight
 /unpair                    remove leftover Bluetooth pairings with Muninn people
 /update  /version          install the newest standalone build / show version
 /scores                    who won how many of each game (this chat, or all)
@@ -429,6 +431,26 @@ class ChatUI:
                     self.out(f"  {'blocked' if cmd == 'block' else 'forgot'} {name}")
                     if self.conv == "dm:" + nid:
                         self.conv = ""
+        elif cmd == "privacy":
+            if (
+                len(args) == 2
+                and args[0] in ("receipts", "typing")
+                and args[1] in ("on", "off")
+            ):
+                mesh.set_privacy(args[0], args[1] == "on")
+            elif args:
+                self.out("! usage: /privacy [receipts|typing] [on|off]")
+                return True
+            for w, label in (
+                ("receipts", "read receipts"),
+                ("typing", "typing indicator"),
+            ):
+                self.out(f"  {label:17} {'on' if mesh.privacy(w) else 'off'}")
+        elif cmd == "doctor":
+            for level, label, detail in self.node.doctor():
+                self.out(
+                    f"  {'✓' if level == 'ok' else '!' if level == 'warn' else '✗'} {label:22} {detail}"
+                )
         elif cmd == "unpair":
             done = self.node.unpair_peers()
             self.out(

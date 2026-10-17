@@ -334,6 +334,25 @@ def _props(addr: str):
     )
 
 
+def health() -> tuple[str, str]:
+    """For the pre-flight check: adapter present, powered, discoverable."""
+    powered = _get_adapter("Powered")
+    if powered is None:
+        return ("bad", "no Bluetooth adapter found")
+    if not powered:
+        return ("bad", "Bluetooth is off — turn it on")
+    visible = _get_adapter("Discoverable")
+    return (
+        "ok",
+        f"{get_local_mac()} on"
+        + (
+            ", visible to phones"
+            if visible
+            else ", not visible (phones can't find this computer)"
+        ),
+    )
+
+
 def distrust(addrs: list[str]) -> list[str]:
     """Clear Trusted on these devices (Muninn ≤ 0.2 set it after pairing; a
     trusted bonded phone could then use this computer as a headset without

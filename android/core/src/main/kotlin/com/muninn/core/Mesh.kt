@@ -871,10 +871,15 @@ class Mesh(
     fun markRead(conv: String) {
         val bySender = LinkedHashMap<String, MutableList<String>>()
         for ((mid, sender) in storage.markReadLocal(conv)) if (sender != nodeId) bySender.getOrPut(sender) { ArrayList() }.add(mid.hex())
+        if (!privacy("receipts")) return // marked read here, but nobody is told
         for ((sender, ids) in bySender) ids.chunked(500).forEach { sendBody(listOf(sender), Body.B(Body.RECEIPT, mapOf("r" to it))) }
     }
 
-    fun sendTyping(conv: String) = sendBody(convMembers(conv), Body.B(Body.TYPING, convMeta(conv)))
+    /** Privacy switches (mirrors mesh.py): "receipts" and "typing", on by default. */
+    fun privacy(what: String) = storage.getSetting("privacy_$what") != "off"
+    fun setPrivacy(what: String, on: Boolean) = storage.setSetting("privacy_$what", if (on) "on" else "off")
+
+    fun sendTyping(conv: String) { if (privacy("typing")) sendBody(convMembers(conv), Body.B(Body.TYPING, convMeta(conv))) }
 
     fun typingIn(conv: String): List<String> {
         val now = mono()

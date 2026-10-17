@@ -681,6 +681,23 @@ class ChatBridge(QObject):
 
     keepRunning = Property(bool, _get_keep, _set_keep, notify=keepRunningChanged)
 
+    uiScaleChanged = Signal()
+
+    def _get_scale(self) -> float:
+        try:
+            return float(self.node.storage.get_setting("ui_scale", "1") or 1)
+        except ValueError:
+            return 1.0
+
+    uiScale = Property(float, _get_scale, notify=uiScaleChanged)
+
+    @Slot(float)
+    def setUiScale(self, v: float) -> None:
+        v = round(max(0.7, min(2.0, v)), 2)
+        self.node.storage.set_setting("ui_scale", str(v))
+        self.uiScaleChanged.emit()
+        self.notify.emit(f"zoom {int(v * 100)}%")
+
     @Slot()
     def wentToBackground(self) -> None:
         if self.node.storage.get_setting("bg_notice") != "1":
@@ -900,6 +917,9 @@ class ChatBridge(QObject):
         "update",
         "version",
         "unpair",
+        "privacy",
+        "doctor",
+        "zoom",
         "sharegame",
         "find",
         "background",
@@ -1237,6 +1257,46 @@ class ChatBridge(QObject):
                     )
                 return self._info(f"{game['icon']}  {game['name']} — rules", rows)
             self.startGame(args[0], self._active, opts)
+        elif head == "zoom":
+            try:
+                pct = float(args[0].rstrip("%")) if args else 100
+            except ValueError:
+                return self.errorOccurred.emit(
+                    "usage: :zoom [percent]  (or Ctrl +/-/0)"
+                )
+            self.setUiScale(pct / 100 if pct > 3 else pct)
+        elif head == "privacy":
+            if (
+                len(args) == 2
+                and args[0] in ("receipts", "typing")
+                and args[1] in ("on", "off")
+            ):
+                mesh.set_privacy(args[0], args[1] == "on")
+            self._info(
+                "privacy",
+                [
+                    self._item(
+                        f"{label}: {'on' if mesh.privacy(w) else 'off'}",
+                        "Enter toggles",
+                        action="cmd",
+                        cmd=f"privacy {w} {'off' if mesh.privacy(w) else 'on'}",
+                    )
+                    for w, label in (
+                        ("receipts", "Read receipts"),
+                        ("typing", "Typing indicator"),
+                    )
+                ],
+            )
+        elif head == "doctor":
+            rows = [
+                self._item(
+                    ("✓  " if lvl == "ok" else "⚠  " if lvl == "warn" else "✗  ")
+                    + label,
+                    detail,
+                )
+                for lvl, label, detail in self.node.doctor(gui=self)
+            ]
+            self._info("before the flight", rows)
         elif head == "unpair":
             done = self.node.unpair_peers()
             if done:

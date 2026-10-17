@@ -71,3 +71,20 @@ def test_deleting_a_room_leaves_it(lab):
     assert gid not in a.mesh.groups and texts(a, group_conv(gid)) == []
     wait_until(lambda: a.node_id not in b.mesh.groups[gid].members, 20)
     wait_until(lambda: a.node_id not in c.mesh.groups[gid].members, 20)
+
+
+def test_privacy_switches_and_doctor(lab):
+    a = lab.node("a", (0, 0))
+    b = lab.node("b", (1, 0))
+    wait_until(lambda: b.node_id in a.mesh.connected(), 30)
+    b.mesh.set_privacy("receipts", False)
+    b.mesh.set_privacy("typing", False)
+    mid = a.mesh.send_text(dm_conv(b.node_id), "did you read this?")
+    wait_until(lambda: a.storage.get_message(mid).state == "delivered", 15)
+    b.mesh.mark_read(dm_conv(a.node_id))
+    b.mesh.send_typing(dm_conv(a.node_id))
+    time.sleep(3)
+    assert a.storage.get_message(mid).state == "delivered"  # never "read"
+    assert not a.mesh.typing_in(dm_conv(b.node_id))
+    labels = {label: lvl for lvl, label, _ in a.doctor()}
+    assert labels["Bluetooth"] == "ok" and labels["b"] == "ok" and "Version" in labels

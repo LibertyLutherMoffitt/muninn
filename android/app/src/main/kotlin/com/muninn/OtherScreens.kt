@@ -96,6 +96,57 @@ fun scoreLine(g: com.muninn.core.GameHost.Score?): String {
     return parts.joinToString(" · ")
 }
 
+// ---------------------------------------------------------------- before the flight
+
+/** Pre-flight check (mirrors node.doctor on desktop): everything that keeps
+ *  messages flowing in the air, at a glance. */
+@SuppressLint("BatteryLife", "MissingPermission")
+@Composable
+fun DoctorCard() {
+    val ctx = LocalContext.current
+    val tick by Runtime.tick.collectAsState()
+    val rows by produceState(emptyList<Triple<String, String, String>>(), tick) {
+        value = withContext(Dispatchers.IO) {
+            val out = ArrayList<Triple<String, String, String>>()
+            val adapter = ctx.getSystemService(BluetoothManager::class.java)?.adapter
+            out += if (adapter?.isEnabled == true) Triple("ok", "Bluetooth", "on") else Triple("bad", "Bluetooth", "off — turn it on")
+            val perms = listOf(android.Manifest.permission.BLUETOOTH_CONNECT, android.Manifest.permission.BLUETOOTH_SCAN,
+                android.Manifest.permission.POST_NOTIFICATIONS)
+            val missing = perms.filter { ctx.checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
+            out += if (missing.isEmpty()) Triple("ok", "Permissions", "all granted")
+                   else Triple("bad", "Permissions", "missing: " + missing.joinToString { it.substringAfterLast('.') })
+            val pm = ctx.getSystemService(PowerManager::class.java)
+            out += if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) Triple("ok", "Background", "battery optimisation off")
+                   else Triple("warn", "Background", "battery optimisation on — messages may stop with the screen off")
+            val n = Runtime.node
+            if (n == null) out += Triple("bad", "Muninn", "not running") else {
+                val m = n.mesh
+                out += if (m.name.isNotEmpty()) Triple("ok", "Your name", m.name) else Triple("bad", "Your name", "not set")
+                val people = m.activePeers()
+                if (people.isEmpty()) out += Triple("warn", "People", "you don't know anyone yet — meet them before boarding")
+                people.sortedBy { m.displayName(it.nodeId).lowercase() }.forEach { p ->
+                    val pr = n.presence(p.nodeId)
+                    out += Triple(if (pr.state == "direct" || pr.state == "relay") "ok" else "warn", m.displayName(p.nodeId), pr.text)
+                }
+                out += Triple("ok", "Reconnect", n.reconnect.label)
+            }
+            out += Triple("ok", "Version", Updater.current + " — make sure friends run the same")
+            out
+        }
+    }
+    Text("Before the flight", style = MaterialTheme.typography.titleSmall)
+    rows.forEach { (lvl, label, detail) ->
+        Row(Modifier.padding(vertical = 2.dp)) {
+            Text(when (lvl) { "ok" -> "✓"; "warn" -> "⚠"; else -> "✗" }, Modifier.width(22.dp),
+                color = when (lvl) { "ok" -> GREEN; "warn" -> Color(0xFFF59E0B); else -> MaterialTheme.colorScheme.error })
+            Column {
+                Text(label, style = MaterialTheme.typography.bodyMedium)
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- blocked
 
 @Composable
@@ -512,6 +563,21 @@ fun SettingsScreen() {
             HorizontalDivider()
             Text("Be visible", style = MaterialTheme.typography.titleSmall)
             VisibilityCard()
+            HorizontalDivider()
+            DoctorCard()
+            HorizontalDivider()
+            Text("Privacy", style = MaterialTheme.typography.titleSmall)
+            val mesh = Runtime.node?.mesh
+            var receipts by remember { mutableStateOf(mesh?.privacy("receipts") ?: true) }
+            var typingOn by remember { mutableStateOf(mesh?.privacy("typing") ?: true) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Send read receipts", Modifier.weight(1f))
+                Switch(checked = receipts, onCheckedChange = { receipts = it; Thread { mesh?.setPrivacy("receipts", it) }.start() })
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Show when I'm typing", Modifier.weight(1f))
+                Switch(checked = typingOn, onCheckedChange = { typingOn = it; Thread { mesh?.setPrivacy("typing", it) }.start() })
+            }
             HorizontalDivider()
             BlockedCard()
             Text("Updates", style = MaterialTheme.typography.titleSmall)

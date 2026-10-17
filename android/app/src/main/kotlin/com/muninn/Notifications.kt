@@ -1,5 +1,7 @@
 package com.muninn
 
+import com.muninn.core.unhex
+import com.muninn.core.hex
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -70,6 +72,10 @@ object Notifications {
         val readIntent = PendingIntent.getBroadcast(ctx, conv.hashCode() + 1,
             Intent(ctx, ReplyReceiver::class.java).putExtra("conv", conv).putExtra("read", true),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        // 👍 on the newest message, without opening the app
+        val likeIntent = PendingIntent.getBroadcast(ctx, conv.hashCode() + 2,
+            Intent(ctx, ReplyReceiver::class.java).putExtra("conv", conv).putExtra("react", unread.last().msgId.hex()),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         // Lock screen shows only "New message" unless the user opts in.
         val public = Notification.Builder(ctx, CH_MSG)
             .setSmallIcon(R.drawable.ic_launcher_monochrome)
@@ -85,6 +91,7 @@ object Notifications {
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .addAction(reply)
+            .addAction(Notification.Action.Builder(null, "👍", likeIntent).build())
             .addAction(Notification.Action.Builder(null, "Mark read", readIntent).build())
             .build()
         ctx.getSystemService(NotificationManager::class.java).notify(conv.hashCode(), n)
@@ -111,7 +118,10 @@ class ReplyReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         val conv = intent.getStringExtra("conv") ?: return
         val node = Runtime.node ?: return
-        if (!intent.getBooleanExtra("read", false)) {
+        val react = intent.getStringExtra("react")
+        if (react != null) {
+            runCatching { node.mesh.react(conv, react.unhex(), "👍") }
+        } else if (!intent.getBooleanExtra("read", false)) {
             val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(Notifications.KEY_REPLY)?.toString()
             if (!text.isNullOrBlank()) runCatching { node.mesh.sendText(conv, Emoji.expand(text.trim())) }
         }

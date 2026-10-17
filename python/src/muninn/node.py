@@ -417,6 +417,79 @@ class Node:
             return "ignored"
         return "unknown"
 
+    def doctor(self, gui=None) -> list[tuple[str, str, str]]:
+        """Pre-flight check: [(level ok|warn|bad, label, detail)]."""
+        from muninn import __version__
+
+        out: list[tuple[str, str, str]] = []
+        m = self.mesh
+        try:
+            health = self.transport.health()
+        except Exception as e:
+            health = ("bad", f"radio error: {e}")
+        out.append((health[0], "Bluetooth", health[1]))
+        out.append(
+            ("ok", "Your name", m.name) if m.name else ("bad", "Your name", "not set")
+        )
+        people = m.active_peers()
+        if not people:
+            out.append(
+                (
+                    "warn",
+                    "People",
+                    "you don't know anyone yet — meet them before boarding (find mode / tap phones)",
+                )
+            )
+        for p in sorted(people, key=lambda p: m.display_name(p.node_id).lower()):
+            pres = self.presence(p.node_id)
+            lvl = "ok" if pres["state"] in ("direct", "relay") else "warn"
+            out.append((lvl, m.display_name(p.node_id), pres["text"]))
+        pending = m.pending_count()
+        out.append(
+            ("ok", "Outbox", "empty")
+            if not pending
+            else (
+                "warn",
+                "Outbox",
+                f"{pending} message(s) waiting for someone to come in range",
+            )
+        )
+        out.append(("ok", "Reconnect", self.reconnect.label))
+        out.append(
+            (
+                "ok",
+                "Finding new people",
+                f"on ({self.find_left()}s left)"
+                if self.find_left()
+                else "on (you know nobody)",
+            )
+            if self.finding
+            else (
+                "ok",
+                "Finding new people",
+                "off — turn on Find when you want to meet someone",
+            )
+        )
+        if gui is not None:
+            out.append(
+                ("ok", "Background", "keeps running in the tray when closed")
+                if gui.keepRunning
+                else (
+                    "warn",
+                    "Background",
+                    "closing the window quits Muninn (no tray / :background off)",
+                )
+            )
+        out.append(
+            (
+                "ok",
+                "Privacy",
+                f"receipts {'on' if m.privacy('receipts') else 'off'}, typing {'on' if m.privacy('typing') else 'off'}",
+            )
+        )
+        out.append(("ok", "Version", __version__ + " — make sure friends run the same"))
+        return out
+
     def _peer_addrs(self) -> list[str]:
         return sorted({a for _, a, _ in self.storage.load_transports()})
 

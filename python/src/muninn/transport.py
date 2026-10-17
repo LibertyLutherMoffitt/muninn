@@ -74,6 +74,10 @@ class Transport:
     def distrust(self, addrs: list[str]) -> list[str]:
         return []
 
+    def health(self) -> tuple[str, str]:
+        """(ok|warn|bad, text) for the pre-flight check."""
+        return ("ok", "simulator" if type(self).__name__.startswith("Sim") else "ready")
+
     def unpair(self, addrs: list[str]) -> list[str]:
         return []
 
@@ -148,6 +152,11 @@ class BtTransport(Transport):
         if hasattr(self.bt, "distrust"):
             return self.bt.distrust(addrs)
         return []
+
+    def health(self) -> tuple[str, str]:
+        if hasattr(self.bt, "health"):
+            return self.bt.health()
+        return ("ok", "ready")
 
     def unpair(self, addrs: list[str]) -> list[str]:
         """Remove leftover bonds with these (Muninn) devices."""
