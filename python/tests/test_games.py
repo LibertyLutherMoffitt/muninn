@@ -251,3 +251,227 @@ def test_unsent_invite_disappears_for_everyone(lab):
     gb.act(sid, "join", {})  # a late join can't revive it
     time.sleep(1)
     assert gb.session_info(sid)["withdrawn"] and not gb.session_info(sid)["started"]
+
+
+# --- end conditions: hand-built positions -------------------------------------
+
+
+def _eval(engine, path, js):
+    load(engine, BUNDLED / path)
+    r = engine.evaluate("(function(){" + js + "})()")
+    assert not r.isError(), r.toString()
+    return r.toVariant()
+
+
+NAMES = "{A:'A',B:'B',C:'C',D:'D'}"
+
+
+def test_connect4_wins_and_draw(engine):
+    # vertical, horizontal, both diagonals, full board draw
+    r = _eval(
+        engine,
+        "connect4.js",
+        """
+      function st(cols){var s=game.setup(['A','B'],1);
+        cols.forEach(function(c){s=game.move(s,game.turn(s),c);});return game.status(s,"""
+        + NAMES
+        + """);}
+      return [st([0,1,0,1,0,1,0]).winners, st([0,0,1,1,2,2,3]).winners,
+              st([0,1,1,2,2,3,2,3,3,6,3]).winners, st([3,2,2,1,1,0,1,0,0,6,0]).winners];""",
+    )
+    assert r == [["A"], ["A"], ["A"], ["A"]]
+    r = _eval(
+        engine,
+        "connect4.js",
+        """var s=game.setup(['A','B'],1);
+      // a full board without four in a row anywhere
+      var g=[1,0,0,1,1,1,0,0,1,1,0,0,0,1,1,1,1,0,1,0,1,0,0,1,0,1,1,1,0,1,0,1,0,0,0,0,0,1,1,0,1,0];
+      s.g=g; s.t=42; var st=game.status(s,"""
+        + NAMES
+        + """); return [st.over, st.winners, game.winner(s)];""",
+    )
+    assert r[0] is True and r[1] == [] and r[2] is None
+
+
+def test_dots_last_box_decides_and_ties(engine):
+    r = _eval(
+        engine,
+        "dots.js",
+        """var s=game.setup(['A','B'],1);
+      var all=game.all(); var last=all.pop();
+      all.forEach(function(l){s.lines[l]=true;});
+      // all boxes but the last one shared evenly, last box open
+      var k=0; for(var r=0;r<5;r++) for(var c=0;c<5;c++) if(!(r===4&&c===4)) s.boxes[r+','+c]=(k++)%2;
+      var before=game.status(s,"""
+        + NAMES
+        + """).over;
+      s.t=0; s=game.move(s,'A',last); var st=game.status(s,"""
+        + NAMES
+        + """);
+      return [before, st.over, st.winners, s.boxes['4,4']];""",
+    )
+    assert r == [False, True, ["A"], 0]
+    r = _eval(
+        engine,
+        "dots.js",
+        """var s=game.setup(['A','B','C'],1);
+      game.all().forEach(function(l){s.lines[l]=true;});
+      ['0,0','0,1','0,2'].forEach(function(b,i){s.boxes[b]=i;});
+      return game.status(s,"""
+        + NAMES
+        + """).winners;""",
+    )
+    assert r == ["A", "B", "C"]  # three-way tie: everyone shares the win
+
+
+def test_reversi_ends_when_nobody_can_move(engine):
+    r = _eval(
+        engine,
+        "reversi.js",
+        """var s=game.setup(['A','B'],1);
+      var b=[]; for(var i=0;i<64;i++) b.push(0); b[63]=1; s.b=b;   // black everywhere, one white
+      var st=game.status(s,"""
+        + NAMES
+        + """); return [st.over, st.winners, game.moves(s).length];""",
+    )
+    assert r == [True, ["A"], 0]
+    r = _eval(
+        engine,
+        "reversi.js",
+        """var s=game.setup(['A','B'],1);
+      var b=[]; for(var i=0;i<64;i++) b.push(i%2); s.b=b;   // full board 32–32
+      var st=game.status(s,"""
+        + NAMES
+        + """); return [st.over, st.winners];""",
+    )
+    assert r == [True, []]
+
+
+def test_checkers_no_pieces_or_no_moves_loses(engine):
+    r = _eval(
+        engine,
+        "checkers.js",
+        """var s=game.setup(['A','B'],1);
+      var b=[]; for(var i=0;i<64;i++) b.push(null); b[10]='a'; s.b=b; s.side='b';
+      return game.status(s,"""
+        + NAMES
+        + """).winners;""",
+    )
+    assert r == ["A"]  # black has no pieces
+    r = _eval(
+        engine,
+        "checkers.js",
+        """var s=game.setup(['A','B'],1); s.quiet=80;
+      return game.status(s,"""
+        + NAMES
+        + """);""",
+    )
+    assert r["over"] and r["winners"] == []
+
+
+def test_chess_stalemate_and_insufficient_material(engine):
+    r = _eval(
+        engine,
+        "chess.js",
+        """var s=game.setup(['W','B'],1);
+      var b=[]; for(var i=0;i<64;i++) b.push(null);
+      b[game.sq('h8')]='bK'; b[game.sq('f7')]='wQ'; b[game.sq('g6')]='wK';
+      s.b=b; s.side='b'; s.castle=''; var st=game.status(s,{W:'W',B:'B'});
+      var b2=[]; for(var j=0;j<64;j++) b2.push(null); b2[0]='wK'; b2[63]='bK'; b2[20]='wN';
+      var s2=game.setup(['W','B'],1); s2.b=b2; s2.castle='';
+      return [st.text, st.winners, game.status(s2,{W:'W',B:'B'}).text];""",
+    )
+    assert r[0].startswith("Stalemate") and r[1] == [] and r[2].startswith("Draw")
+
+
+def test_ultimate_global_win_and_draw(engine):
+    r = _eval(
+        engine,
+        "uttt.js",
+        """var s=game.setup(['A','B'],1);
+      // A has won boards 0 and 4; finishing board 8 on the diagonal wins the game
+      s.won={'0':0,'4':0};
+      [72,73].forEach(function(i){s.b[i]=0;}); [75,76].forEach(function(i){s.b[i]=1;});
+      s.target=[8]; s.t=4;
+      s=game.move(s,'A',74);   // board 8, cells 0,1,2 -> row
+      var st=game.status(s,"""
+        + NAMES
+        + """); return [st.over, st.winners, game.turn(s)];""",
+    )
+    assert r == [True, ["A"], "-"]
+    r = _eval(
+        engine,
+        "uttt.js",
+        """var s=game.setup(['A','B'],1);
+      // every board decided, no line of three for anyone -> draw
+      var w=[0,1,0,0,1,1,1,0,'d']; for(var i=0;i<9;i++) s.won[String(i)]=w[i];
+      s.won['']= game.judge(s, []); return game.status(s,"""
+        + NAMES
+        + """);""",
+    )
+    assert r["over"] and r["winners"] == []
+
+
+def test_unlimited_k_and_diagonals(engine):
+    r = _eval(
+        engine,
+        "unlimited.js",
+        """
+      function play(k, moves){var s=game.setup(['A','B'],1,{k:k});
+        moves.forEach(function(m){s=game.move(s,game.turn(s),m);}); return game.status(s,"""
+        + NAMES
+        + """);}
+      var diag=play(3,[[0,0],[1,0],[1,1],[2,0],[2,2]]);
+      var anti=play(4,[[0,0],[0,1],[-1,1],[0,2],[-2,2],[0,3],[-3,3]]);
+      var notyet=play(5,[[0,0],[0,1],[1,0],[0,2],[2,0],[0,3],[3,0]]);
+      return [diag.winners, anti.winners, notyet.over];""",
+    )
+    assert r == [["A"], ["A"], False]
+
+
+def test_chess4_last_player_standing(engine):
+    r = _eval(
+        engine,
+        "chess4.js",
+        """var s=game.setup(['R','B','Y','G'],1);
+      s.alive=[true,false,false,true]; s.cur=0;
+      var st=game.status(s,{R:'R',B:'B',Y:'Y',G:'G'}); s.alive=[true,false,false,false];
+      var st2=game.status(s,{R:'R',B:'B',Y:'Y',G:'G'});
+      return [st.over, st2.over, st2.winners, game.turn(s)];""",
+    )
+    assert r == [False, True, ["R"], "-"]
+
+
+def test_gamecheck_passes_for_every_bundled_game():
+    """tools/gamecheck.py (what AIs/people run before sharing a game)."""
+    import subprocess
+    import sys
+
+    tool = Path(__file__).resolve().parents[2] / "tools" / "gamecheck.py"
+    for g in GAMES:
+        r = subprocess.run(
+            [sys.executable, str(tool), str(g), "--games", "3", "--plies", "300"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert r.returncode == 0, f"{g.stem}:\n{r.stdout}{r.stderr}"
+
+
+def test_readme_example_game_is_valid(tmp_path):
+    """games/README.md is what AIs read: its complete example must pass."""
+    import subprocess
+    import sys
+
+    readme = (BUNDLED / "README.md").read_text()
+    code = readme.split("## 8. Complete example")[1].split("```js\n")[1].split("```")[0]
+    f = tmp_path / "nim.js"
+    f.write_text(code)
+    tool = Path(__file__).resolve().parents[2] / "tools" / "gamecheck.py"
+    r = subprocess.run(
+        [sys.executable, str(tool), str(f), "--games", "5"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr

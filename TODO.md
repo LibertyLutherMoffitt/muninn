@@ -154,11 +154,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [x] Unsend a game invitation (creator cancels before/while others join).
 
 ### 2.6d Ideas (2026-10-16, nearer the backlog)
-- [ ] Extensive game testing, especially end/win conditions of every game.
+- [x] Extensive game testing, especially end/win conditions of every game (tools/gamecheck.py + hand-built end positions).
 - [ ] Spectators: everyone in a group can watch a 2-player game live.
 - [ ] Easy game import (pick a .js on desktop/phone) and one-tap "send this
   game to …" so the code spreads through Muninn itself.
-- [ ] GAME_API docs written for AIs: one self-contained document with the
+- [x] GAME_API docs written for AIs (games/README.md, example kept valid by a test): one self-contained document with the
   protocol, plugin contract, canvas subset, examples and a checklist, so a
   model can write a game without reading the repo.
 - [ ] Screen share for group watching (anime etc.), mostly from phones:

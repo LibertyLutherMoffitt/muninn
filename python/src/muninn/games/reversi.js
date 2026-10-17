@@ -69,6 +69,7 @@ var game = {
   input: function (s, v, ev) {
     if (ev.type !== "click") return null;
     var c = v.w / 8, i = Math.floor(ev.y / c) * 8 + Math.floor(ev.x / c);
-    return i >= 0 && i < 64 ? { move: i } : null;
+    if (i < 0 || i >= 64 || ev.x < 0 || ev.x >= v.w) return null;
+    return game.moves(s).indexOf(i) >= 0 ? { move: i } : null;  // only legal squares
   }
 };
