@@ -87,7 +87,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [x] Rich envelope inside encrypted body: text+reply, reaction, edit, delete,
   file manifest, file chunk, file request, group info (reliable), app/game event.
 - [x] `DATAGRAM` frame: encrypted, unreliable, TTL, for real-time games / typing.
-- [ ] PROTOCOL.md updated.
+- [x] PROTOCOL.md updated.
 
 ### 2.3 Core reliability (P0, both clients)
 - [x] Per-peer writer thread + priority queue (control > chat > bulk).
@@ -110,7 +110,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 
 ### 2.5 Games (P2–P3)
 - [x] Game session API over reliable app events + datagrams.
-- [ ] Chess, checkers (both clients).
+- [x] Chess, checkers (both clients).
 - [ ] Real-time demo + latency measurement.
 
 ### 2.6 User requests (2026-10-15)
@@ -136,14 +136,14 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   strangers' devices — e.g. SDP-only probe of phone/computer class devices).
 - [x] Android background discovery + discoverability prompt flow.
 - [x] User-set scan mode (aggressive / balanced / conservative) on all clients.
-- [ ] Shared wire-vector conformance file checked by both languages, byte-offset
+- [x] Shared wire-vector conformance file checked by both languages, byte-offset
   protocol tests, storage/dialer unit tests.
 - [ ] Android screenshot tests without an emulator (Paparazzi).
 - [ ] GUI design tokens + shared PresenceDot/EmptyState, message runs.
-- [ ] CLI `/whoami`, presence in `/peers`, "held for …" for queued sends.
+- [x] CLI `/whoami`, presence in `/peers`, "held for …" for queued sends.
 - [ ] Docs: TESTING.md, REVIEW.md (Linux vs Windows behaviour), PROTOCOL
   validation rules (UTF-8-safe name truncation — v2 has the same bug).
-- [ ] Notifications VISIBILITY_PRIVATE on the lock screen.
+- [x] Notifications VISIBILITY_PRIVATE on the lock screen.
 
 ### 2.6c User requests (2026-10-16) — in progress now
 - [x] NFC tap-to-pair (Android↔Android) — built; needs a hardware test: HCE + reader mode exchange
@@ -174,6 +174,31 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [x] Desktop GUI keeps running in the background with a tray icon (Linux,
   Windows, Nix) so messages arrive with the window closed.
 
+### 2.6e Suggestions (2026-10-17)
+- [ ] **Hardware session** (most valuable next step): tap-to-meet, find mode,
+  laptop-as-middleman direct links, reconnect after walking away, file
+  throughput, battery drain over a few hours with the screen off, and that
+  no phone ever offers magnus as an audio device again.
+- [ ] **Protocol versioning before others install it** (`CAPS` / feature
+  bits in HELLO): today a v2 node refuses any other version outright, so a
+  friend who hasn't updated can't talk to you mid-flight. Make HELLO carry
+  a feature set, accept older peers, and degrade features per link.
+- [ ] `:doctor` / Settings → "Check before the flight": Bluetooth on,
+  permissions, battery optimisation off, background running, version vs
+  friends', last time each friend was seen, whether find mode is needed.
+- [ ] Play games in the terminal: generic (list legal `moves()` + status
+  text, optional ASCII board hook) so every plugin works there too.
+- [ ] Privacy toggles: read receipts and typing indicators on/off.
+- [ ] Export / import chat history (moving to a new phone; pairs with
+  linked devices later).
+- [ ] Tap phones to add someone to a room (NFC + group invite).
+- [ ] React / reply from the Android notification.
+- [ ] Desktop font-size / zoom setting (Ctrl +/-) and a light theme.
+- [ ] Real-time game latency over real Bluetooth + relay (pong), and a
+  short note on what's playable.
+- [ ] Windows hardware pass (WinRT): dialing phones without a bond may not
+  work — phones dial the PC; verify, plus tray/notifications.
+
 ### 2.7 Backlog (only after everything else is done & polished)
 - [ ] **Linked devices ("same person")** — phone + laptop act as one contact.
   Sketch:
@@ -192,7 +217,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
     chunked file transfer (DB export), then stays in sync incrementally.
   - Unlink: re-signed record without the device (old device can't read new
     messages since senders stop encrypting to it).
-- [ ] Terminal client as a real TUI (comparable usability to the GUI).
+- [x] Terminal client as a real TUI (comparable usability to the GUI).
 
 ---
 
