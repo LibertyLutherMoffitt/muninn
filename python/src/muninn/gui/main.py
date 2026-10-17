@@ -22,20 +22,52 @@ from .vim import VimEditor
 
 _QML_DIR = pathlib.Path(__file__).parent / "qml"
 
-_THEME = {
-    "bg": "#0f1115",
-    "surface": "#151820",
-    "surfaceRaised": "#1b1f2a",
-    "textPrimary": "#e5e7eb",
-    "textMuted": "#9ca3af",
-    "accent": "#7c3aed",
-    "accentSoft": "#2a1f4a",
-    "incomingBubble": "#1f2330",
-    "outgoingBubble": "#3b2a6a",
-    "success": "#10b981",
-    "warning": "#f59e0b",
-    "error": "#ef4444",
+THEMES = {
+    "dark": {
+        "bg": "#0f1115",
+        "surface": "#151820",
+        "surfaceRaised": "#1b1f2a",
+        "textPrimary": "#e5e7eb",
+        "textMuted": "#9ca3af",
+        "accent": "#7c3aed",
+        "accentSoft": "#2a1f4a",
+        "incomingBubble": "#1f2330",
+        "outgoingBubble": "#3b2a6a",
+        "success": "#10b981",
+        "warning": "#f59e0b",
+        "error": "#ef4444",
+        "scrim": "#e60f1115",
+    },
+    "light": {
+        "bg": "#f6f7fb",
+        "surface": "#ffffff",
+        "surfaceRaised": "#eceef5",
+        "textPrimary": "#1f2330",
+        "textMuted": "#6b7280",
+        "accent": "#7c3aed",
+        "accentSoft": "#e4dcfd",
+        "incomingBubble": "#ffffff",
+        "outgoingBubble": "#ddd6fe",
+        "success": "#059669",
+        "warning": "#d97706",
+        "error": "#dc2626",
+        "scrim": "#e6f6f7fb",
+    },
 }
+
+
+def theme_for(choice: str) -> dict:
+    """ "dark" | "light" | "system" (follows the desktop's colour scheme)."""
+    if choice == "system":
+        try:
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QGuiApplication
+
+            light = QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Light
+            choice = "light" if light else "dark"
+        except Exception:
+            choice = "dark"
+    return THEMES.get(choice, THEMES["dark"])
 
 
 def _ensure_renderer() -> None:
@@ -95,7 +127,12 @@ def main() -> None:
     ctx.setContextProperty("peerModel", peer_model)
     ctx.setContextProperty("msgModel", msg_model)
     ctx.setContextProperty("vimEditor", vim)
-    ctx.setContextProperty("Theme", _THEME)
+    ctx.setContextProperty(
+        "Theme", theme_for(node.storage.get_setting("theme", "dark") or "dark")
+    )
+    bridge.themeRequested.connect(
+        lambda c: ctx.setContextProperty("Theme", theme_for(c))
+    )
     engine.load(QUrl.fromLocalFile(str(_QML_DIR / "Main.qml")))
     if not engine.rootObjects():
         sys.exit(1)

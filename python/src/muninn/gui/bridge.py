@@ -64,6 +64,7 @@ class ChatBridge(QObject):
     selectionChanged = Signal(int)  # row index to scroll to
     messageSent = Signal()  # the chat view jumps to the bottom
     removeRequested = Signal(list, str)  # convs, how — QML asks to confirm
+    themeRequested = Signal(str)  # dark | light | system
     trayShowRequested = Signal()
     gameImportRequested = Signal()
     keepRunningChanged = Signal()
@@ -920,6 +921,7 @@ class ChatBridge(QObject):
         "doctor",
         "zoom",
         "photos",
+        "theme",
         "sharegame",
         "find",
         "background",
@@ -1265,6 +1267,16 @@ class ChatBridge(QObject):
                     "usage: :zoom [percent]  (or Ctrl +/-/0)"
                 )
             self.setUiScale(pct / 100 if pct > 3 else pct)
+        elif head == "theme":
+            choice = (
+                args[0] if args and args[0] in ("dark", "light", "system") else None
+            )
+            if choice is None:
+                cur = self.node.storage.get_setting("theme", "dark") or "dark"
+                choice = "light" if cur == "dark" else "dark"  # bare :theme toggles
+            self.node.storage.set_setting("theme", choice)
+            self.themeRequested.emit(choice)
+            self.notify.emit(f"theme: {choice}")
         elif head == "photos":
             from muninn import media
 

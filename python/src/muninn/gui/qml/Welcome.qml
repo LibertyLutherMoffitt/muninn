@@ -5,7 +5,7 @@ import QtQuick.Layouts
 // First run: ask for a display name (peers otherwise see a bare id).
 Rectangle {
     id: root
-    color: "#e60f1115"
+    color: Theme.scrim
     visible: opacity > 0
     opacity: bridge.localName === "" ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 160 } }

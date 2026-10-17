@@ -16,7 +16,7 @@ ApplicationWindow {
     onClosing: (close) => {
         if (bridge.keepRunning) { close.accepted = false; root.hide(); bridge.wentToBackground() }
     }
-    color: "#0f1115"
+    color: Theme.bg
 
     // Helper to check if we are in navigation mode
     property bool isNormalMode: vimEditor && vimEditor.mode === "NORMAL"
@@ -434,7 +434,7 @@ ApplicationWindow {
         Text {
             id: toastLabel
             anchors.centerIn: parent
-            color: "white"
+            color: toast.isError ? "white" : Theme.textPrimary
             font.pixelSize: 12
             elide: Text.ElideRight
             width: Math.min(parent.parent.width - 80, implicitWidth)

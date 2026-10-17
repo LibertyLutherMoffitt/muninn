@@ -128,7 +128,7 @@ Rectangle {
                 id: blockCursor
                 width: 8
                 height: 16
-                color: root.activeFocus || edit.activeFocus ? (vimEditor && vimEditor.mode === "INSERT" ? Theme.accent : "white") : Theme.textMuted
+                color: root.activeFocus || edit.activeFocus ? (vimEditor && vimEditor.mode === "INSERT" ? Theme.accent : Theme.textPrimary) : Theme.textMuted
                 opacity: 0.7
                 visible: true // Always visible in the box
                 x: edit.cursorRectangle.x

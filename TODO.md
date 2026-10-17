@@ -196,7 +196,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   linked devices later).
 - [ ] Tap phones to add someone to a room (NFC + group invite).
 - [x] React / reply from the Android notification (👍 + reply).
-- [x] Desktop zoom (Ctrl +/-/0, :zoom). Light theme still open.
+- [x] Desktop zoom (Ctrl +/-/0, :zoom) and light theme (:theme light|dark|system).
 - [ ] Real-time game latency over real Bluetooth + relay (pong), and a
   short note on what's playable.
 - [ ] Windows hardware pass (WinRT): dialing phones without a bond may not

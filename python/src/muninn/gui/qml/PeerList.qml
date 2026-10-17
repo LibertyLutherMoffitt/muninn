@@ -237,7 +237,7 @@ Rectangle {
                         anchors.centerIn: parent
                         text: model.unreadCount > 0 ? (model.unreadCount > 99 ? "99+" : model.unreadCount)
                                                     : "◌" + model.pending
-                        color: "white"
+                        color: model.unreadCount > 0 ? "white" : Theme.textMuted
                         font.pixelSize: 11
                         font.bold: true
                     }
