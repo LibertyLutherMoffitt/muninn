@@ -46,6 +46,25 @@ object Devices {
         }
     }
 
+    fun leaveBody(account: String, nodeId: String, joined: Long) = "muninn-leave\n$account\n$nodeId\n$joined".toByteArray()
+
+    /** A device's own signed statement that it left [account] (the membership
+     *  that started at [joined]); valid without the first device (see devices.py). */
+    class Leave(val account: String, val nodeId: String, val joined: Long, val sig: ByteArray) {
+        fun toJson(): String = Json.write(mapOf("leave" to mapOf("a" to account, "n" to nodeId, "j" to joined, "s" to sig.hex())))
+        companion object {
+            fun fromObj(j: Map<String, Any?>) = Leave(j.str("a"), j.str("n"), j.long("j"), j.str("s").unhex())
+        }
+    }
+
+    fun makeLeave(priv: ByteArray, account: String, nodeId: String, joined: Long) =
+        Leave(account, nodeId, joined, XEdDSA.sign(priv, leaveBody(account, nodeId, joined)))
+
+    fun checkLeave(lv: Leave, pinned: (String) -> ByteArray?): Boolean {
+        val pk = pinned(lv.nodeId) ?: return false
+        return XEdDSA.verify(pk, leaveBody(lv.account, lv.nodeId, lv.joined), lv.sig)
+    }
+
     fun consentBody(account: String, nodeId: String, joined: Long) = "muninn-join\n$account\n$nodeId\n$joined".toByteArray()
 
     fun makeConsent(priv: ByteArray, account: String, nodeId: String, joined: Long) =
@@ -72,7 +91,7 @@ object Devices {
 
     /** All valid sets we know, and which person each device is. Immutable:
      *  the mesh swaps in a new one on change. */
-    class Index(val sets: Map<String, DeviceSet> = emptyMap(), val left: Map<String, Long> = emptyMap(), val me: String = "") {
+    class Index(val sets: Map<String, DeviceSet> = emptyMap(), val revoked: Map<Pair<String, String>, Long> = emptyMap()) {
         fun newer(ds: DeviceSet) = (sets[ds.account]?.version ?: 0) < ds.version
 
         fun owner(nodeId: String): String {
@@ -81,7 +100,7 @@ object Devices {
             for (ds in sets.values) {
                 val e = ds.entry(nodeId) ?: continue
                 if (ds.entries.size < 2) continue
-                if (nodeId == me && (left[ds.account] ?: -1L) >= e.joined) continue // we asked to leave
+                if ((revoked[ds.account to nodeId] ?: -1L) >= e.joined) continue // it left (a newer consent brings it back)
                 if (e.joined > bestTs) { best = ds.account; bestTs = e.joined }
             }
             return best

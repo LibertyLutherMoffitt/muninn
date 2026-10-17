@@ -349,3 +349,58 @@ def test_restart_keeps_link(lab, cast):
     assert phone2.mesh.me == lap.node_id
     bob.mesh.send_text(dm_conv(lap.node_id), "after restart")
     wait_until(lambda: "after restart" in texts(phone2, dm_conv(bob.node_id)), 40)
+
+
+# --------------------------------------------------------------------- first device gone
+
+
+def test_reach_a_linked_phone_when_its_laptop_is_off(lab):
+    """Reported: Ann's laptop is her first device and the only way you ever
+    reached her phone. The laptop goes off, the phone walks into range — you
+    must connect to it (its address came from the laptop as a hint), message
+    it, and not show it as 'waiting' or as a second person."""
+    me = lab.node("me", (0, 0))
+    lap = lab.node("lap", (4, 0))
+    phone = lab.node("phone", (8, 0))  # out of my range: only via the laptop
+    meet(lab, me, lap, phone)
+    assert phone.node_id not in me.mesh.connected()
+    link(lap, phone)
+    wait_until(lambda: me.mesh.person(phone.node_id) == lap.node_id, 15)
+    lab.move("phone", (1, 0))
+    lab.stop_node("lap")
+    wait_until(lambda: phone.node_id in me.mesh.connected(), 60, msg="dial the hint")
+    ann = lap.node_id
+    me.mesh.send_text(dm_conv(ann), "laptop's off?")
+    wait_until(lambda: "laptop's off?" in texts(phone, dm_conv(me.node_id)), 20)
+    wait_until(
+        lambda: me.mesh.pending_count(ann) == 0,
+        15,
+        msg="copy for the laptop isn't 'waiting'",
+    )
+    people = [p.node_id for p in me.mesh.active_peers()]
+    assert people == [ann]
+    assert "·" not in me.mesh.display_name(ann)  # no clash with her own phone
+
+
+def test_leave_without_the_first_device(lab, cast):
+    """The phone can stand alone again even if the laptop never comes back
+    (signed leave); when the laptop does return it drops the phone too."""
+    lap, phone, bob = cast
+    link(lap, phone)
+    wait_until(lambda: bob.mesh.person(phone.node_id) == lap.node_id, 15)
+    lab.stop_node("lap")
+    phone.mesh.unlink(phone.node_id)
+    assert phone.mesh.me == phone.node_id
+    wait_until(lambda: bob.mesh.person(phone.node_id) == phone.node_id, 15)
+    bob.mesh.send_text(dm_conv(phone.node_id), "just the phone")
+    wait_until(lambda: "just the phone" in texts(phone, dm_conv(bob.node_id)), 15)
+    lap2 = lab.node("lap", (0, 0))
+    wait_until(lambda: lap2.mesh.siblings() == [], 30, msg="laptop learns of the leave")
+    # a forged leave (signed by someone else) changes nothing
+    from muninn import protocol as P
+
+    lv = D.make_leave(bytes(bob.mesh.private_key), lap2.node_id, phone.node_id, 10**10)
+    bob.mesh._broadcast(P.encode_frame(P.T_DEVICES, lv.to_json().encode()))
+    # …and the phone can link again later (a newer consent outranks its leave)
+    link(lap2, phone)
+    wait_until(lambda: bob.mesh.person(phone.node_id) == lap2.node_id, 15)

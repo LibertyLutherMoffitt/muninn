@@ -269,7 +269,8 @@ class Mesh:
         self.typing: dict[tuple[str, str], float] = {}  # (conv, node) -> until
         self._pings: dict[str, list] = {}  # session -> [event, sent, rtt]
         # linked devices (muninn.devices): sets by account, who's who
-        self.devidx = D.Index(me=node_id)
+        self.devidx = D.Index()
+        self._leaves: dict[tuple[str, str], D.Leave] = {}
         self._link_code: list | None = None  # [code, expires, tries left]
         self._link_pending: dict[str, float] = {}  # primary -> expires
         self.auto_download_max = AUTO_DOWNLOAD_MAX
@@ -322,11 +323,21 @@ class Mesh:
                 sets[ds.account] = ds
             except Exception as e:
                 self._log(f"bad stored device set {key}: {e!r}")
-        left = {
-            k[len("devleft:") :]: int(v)
-            for k, v in self.storage.settings_with_prefix("devleft:").items()
-        }
-        self.devidx = D.Index(sets, left, self.node_id)
+        revoked: dict[tuple[str, str], int] = {}
+        self._leaves: dict[tuple[str, str], D.Leave] = {}
+        for key, val in self.storage.settings_with_prefix("devleave:").items():
+            try:
+                lv = D.Leave.from_obj(json.loads(val)["leave"])
+                self._leaves[(lv.account, lv.node_id)] = lv
+                revoked[(lv.account, lv.node_id)] = lv.joined
+            except Exception as e:
+                self._log(f"bad stored leave {key}: {e!r}")
+        for k, v in self.storage.settings_with_prefix(
+            "devleft:"
+        ).items():  # ≤ 0.8 (unsigned, local)
+            if int(v) >= 0:
+                revoked.setdefault((k[len("devleft:") :], self.node_id), int(v))
+        self.devidx = D.Index(sets, revoked)
 
     def reload(self) -> None:
         """Pick up rows added to storage behind our back (backup import)."""
@@ -451,6 +462,8 @@ class Mesh:
         link.send(P.encode_addrs(self._link_addrs()), PRIO_CONTROL)
         for ds in list(self.devidx.sets.values()):
             link.send(P.encode_frame(P.T_DEVICES, ds.to_json().encode()), PRIO_CONTROL)
+        for lv in list(self._leaves.values()):
+            link.send(P.encode_frame(P.T_DEVICES, lv.to_json().encode()), PRIO_CONTROL)
         if changed:
             self._gossip(changed, exclude=hello.node_id)
         # Tell our other neighbours where the newcomer can be reached: they
@@ -749,8 +762,8 @@ class Mesh:
         if label != node_id and not p.override:
             with self.lock:
                 clash = (
-                    any(
-                        q.node_id != node_id
+                    any(  # another person (not one of theirs, not mine) with that name
+                        self.devidx.owner(q.node_id) not in (node_id, self.me)
                         and not q.replaced_by
                         and q.display.lower() == label.lower()
                         for q in self.peers.values()
@@ -1451,6 +1464,15 @@ class Mesh:
         hs = [h for d in self.devices_of(person) if (h := self.hops(d)) is not None]
         return min(hs) if hs else None
 
+    def nearest_device(self, person: str) -> str:
+        """The person's closest reachable device (themselves if none is)."""
+        reach = [
+            (h, d)
+            for d in self.devices_of(self.person(person))
+            if (h := self.hops(d)) is not None
+        ]
+        return min(reach)[1] if reach else person
+
     def person_reachable(self, person: str) -> bool:
         return self.person_hops(person) is not None
 
@@ -1462,6 +1484,10 @@ class Mesh:
 
     def _on_devices(self, payload: bytes, via: str | None) -> None:
         try:
+            obj = json.loads(payload)
+            if "leave" in obj:
+                self._install_leave(D.Leave.from_obj(obj["leave"]), via)
+                return
             ds = D.DeviceSet.from_json(payload)
         except Exception:
             return
@@ -1486,7 +1512,7 @@ class Mesh:
             before_me, before_sibs = self.me, set(self.siblings())
             sets = dict(self.devidx.sets)
             sets[ds.account] = ds
-            self.devidx = D.Index(sets, self.devidx.left, self.node_id)
+            self.devidx = D.Index(sets, self.devidx.revoked)
         self.storage.set_setting("devset:" + ds.account, ds.to_json())
         self._log(f"device set {ds.account} v{ds.version}: {ds.devices}")
         frame = P.encode_frame(P.T_DEVICES, ds.to_json().encode())
@@ -1541,8 +1567,10 @@ class Mesh:
             raise ValueError("unlink this device's other devices first")
         if prim not in self.peers:
             raise ValueError("unknown device")
-        last = max(
-            (e.joined for d in self.devidx.sets.values() for e in d.entries), default=0
+        last = max(  # newer than any membership — and any leave — we know of
+            [e.joined for d in self.devidx.sets.values() for e in d.entries]
+            + list(self.devidx.revoked.values()),
+            default=0,
         )
         joined = max(int(time.time()), last + 1)
         consent = D.make_consent(bytes(self.private_key), prim, self.node_id, joined)
@@ -1559,24 +1587,63 @@ class Mesh:
         """Primary: drop a device from my set. Other device: leave (the
         primary confirms when reachable; we stop acting linked right away)."""
         if device == self.node_id and self.me != self.node_id:
-            ds = self.devidx.sets.get(self.me)
-            e = ds.entry(self.node_id) if ds else None
             prim = self.me
-            if e is not None:
-                with self.lock:
-                    left = dict(self.devidx.left)
-                    left[prim] = e.joined
-                    self.devidx = D.Index(self.devidx.sets, left, self.node_id)
-                self.storage.set_setting(f"devleft:{prim}", str(e.joined))
-            self._send_body([prim], C.Body(C.K_LINK, {"o": "leave"}))
-            self._emit("peers")
-            self._emit("devices")
+            ds = self.devidx.sets.get(prim)
+            e = ds.entry(self.node_id) if ds else None
+            if e is None:
+                return
+            # signed, so everyone honours it even if the first device never
+            # answers (lost laptop); the primary also republishes its set
+            lv = D.make_leave(bytes(self.private_key), prim, self.node_id, e.joined)
+            self._install_leave(lv)
+            self._send_body(
+                [prim], C.Body(C.K_LINK, {"o": "leave", "lv": lv.to_json()})
+            )
             return
         if self.me != self.node_id:
             raise ValueError(
                 f"only {self.display_name(self.me)}'s first device can unlink others"
             )
         self._drop_device(device)
+
+    def _install_leave(self, lv: D.Leave, via: str | None = None) -> None:
+        """A device left an account (its own signature): it is its own
+        person again everywhere; the account's first device drops it."""
+        key = (lv.account, lv.node_id)
+        with self.lock:
+            if self.devidx.revoked.get(key, -1) >= lv.joined:
+                return
+        if not D.check_leave(lv, self._pinned):
+            self._log(f"ignoring leave of {lv.node_id}: bad signature")
+            return
+        with self.lock:
+            before_sibs = set(self.siblings())
+            revoked = dict(self.devidx.revoked)
+            revoked[key] = lv.joined
+            self._leaves[key] = lv
+            self.devidx = D.Index(self.devidx.sets, revoked)
+        self.storage.set_setting(f"devleave:{lv.account}|{lv.node_id}", lv.to_json())
+        self._log(f"{lv.node_id} left {lv.account}")
+        self._broadcast(P.encode_frame(P.T_DEVICES, lv.to_json().encode()), exclude=via)
+        self._drop_if_left(lv)
+        if before_sibs != set(self.siblings()):
+            with self.lock:  # don't keep feeding a device that left
+                self.outbox = {
+                    k: v for k, v in self.outbox.items() if v.dst != lv.node_id
+                }
+        self._emit("peers")
+        self._emit("devices")
+
+    def _drop_if_left(self, lv: D.Leave) -> None:
+        """First device: drop a device that left — unless it has joined again
+        since (a late leave must not undo a newer link)."""
+        cur = self.devidx.sets.get(self.node_id)
+        e = cur.entry(lv.node_id) if cur and lv.account == self.node_id else None
+        if e is not None and e.joined <= lv.joined:
+            try:
+                self._drop_device(lv.node_id)
+            except ValueError:
+                pass
 
     def _drop_device(self, device: str) -> None:
         cur = self.devidx.sets.get(self.node_id)
@@ -1609,19 +1676,19 @@ class Mesh:
                 self._log(f"link from {src}: {why}")
                 self._emit("link", "error", why)
                 return
-            with self.lock:  # joined again after leaving: forget the leave
-                left = {k: v for k, v in self.devidx.left.items() if k != src}
-                self.devidx = D.Index(self.devidx.sets, left, self.node_id)
-            self.storage.set_setting(f"devleft:{src}", "-1")
-            self._install_set(ds)
+            self._install_set(ds)  # a newer join outranks any earlier leave
             self._emit("link", "ok", src)
         elif op == "no":
             if self._link_pending.pop(src, None) is not None:
                 self._emit("link", "error", str(m.get("e", "refused")))
         elif op == "leave":
-            cur = self.devidx.sets.get(self.node_id)
-            if cur is not None and cur.entry(src) is not None and src != self.node_id:
-                self._drop_device(src)
+            try:
+                lv = D.Leave.from_obj(json.loads(str(m["lv"]))["leave"])
+            except Exception:
+                return  # unsigned (≤ 0.8): ignore — the device floods a signed leave
+            if lv.node_id == src:
+                self._install_leave(lv)
+                self._drop_if_left(lv)
 
     def _on_link_req(self, src: str, m: dict) -> None:
         def no(why: str) -> None:
@@ -2239,7 +2306,9 @@ class Mesh:
     ) -> list[float | None]:
         """End-to-end round trips (seconds; None = lost) over the same
         unreliable real-time path games use, relays included. `size` pads
-        each datagram to measure larger game updates."""
+        each datagram to measure larger game updates. A linked person is
+        pinged on their nearest reachable device."""
+        dst = self.nearest_device(dst)
         out: list[float | None] = []
         for _ in range(count):
             sid = os.urandom(6).hex()
@@ -2351,10 +2420,24 @@ class Mesh:
     # ------------------------------------------------------------------ introspection
 
     def pending_count(self, dst: str | None = None) -> int:
-        """Queued packets (to a person: any of their devices)."""
-        devs = set(self.devices_of(dst)) | {dst} if dst else None
+        """Queued packets; for a person: messages none of their devices has
+        received yet (a copy still waiting for their switched-off laptop
+        doesn't count once their phone got it)."""
+        if dst is None:
+            with self.lock:
+                return len(self.outbox)
+        person = self.person(dst)
+        devs = set(self.devices_of(person)) | {dst}
         with self.lock:
-            return sum(1 for i in self.outbox.values() if devs is None or i.dst in devs)
+            mids = {
+                i.msg_id for i in self.outbox.values() if i.dst in devs and i.msg_id
+            }
+        waiting = 0
+        for mid in mids:
+            m = self.storage.get_message(mid)
+            if m is None or m.status.get(person, "sent") == "sent":
+                waiting += 1
+        return waiting
 
     def status(self) -> dict:
         with self.lock:

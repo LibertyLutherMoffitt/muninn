@@ -164,13 +164,20 @@ class Node(
         val linkedNodes = mesh.connected().toSet()
         val out = LinkedHashMap<String, Boolean>()
         val h = HashSet<String>()
+        val people = mesh.activePeers().map { it.nodeId }.toSet() + mesh.siblings()
         for ((node, addr, lastOk) in storage.loadTransports()) {
             if (node in linkedNodes || addr in out) continue
             if (lastOk == 0L) {
-                // Gossiped by a neighbour, never connected there: only worth
-                // a try while they're a short relay away (probably in range).
+                // Gossiped by a neighbour (it had a live Muninn link there),
+                // never connected ourselves: worth a try while they're a short
+                // relay away — or when someone we know / one of our own devices
+                // can't be reached any other way (a linked phone we only ever
+                // reached through its laptop, which is now off). See node.py.
                 val hops = mesh.hops(node)
-                if (hops == null || hops > HINT_MAX_HOPS) continue
+                val person = mesh.person(node)
+                val stranded = ((person in people || node in people) && !mesh.personReachable(person)) ||
+                    (node in people && hops == null)
+                if (!stranded && (hops == null || hops > HINT_MAX_HOPS)) continue
                 h.add(addr)
             }
             out[addr] = false

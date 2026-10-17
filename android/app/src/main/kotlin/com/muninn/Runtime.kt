@@ -78,7 +78,10 @@ object Runtime {
                 }
             }
             override fun onUpdate(msgId: ByteArray) = bump()
-            override fun onPeers() = bump()
+            override fun onPeers() {
+                bump()
+                if (n.mesh.siblings().isNotEmpty()) Notifications.clearRead(app, n.mesh.storage.unreadCounts())
+            }
             override fun onGroup(groupId: ByteArray) = bump()
             override fun onFile(fileId: ByteArray) = bump()
             override fun onTyping(conv: String, node: String) = bump()

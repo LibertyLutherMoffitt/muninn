@@ -95,9 +95,20 @@ object Notifications {
             .addAction(Notification.Action.Builder(null, "Mark read", readIntent).build())
             .build()
         ctx.getSystemService(NotificationManager::class.java).notify(conv.hashCode(), n)
+        shown.add(conv)
     }
 
-    fun cancel(ctx: Context, conv: String) = ctx.getSystemService(NotificationManager::class.java).cancel(conv.hashCode())
+    private val shown = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    fun cancel(ctx: Context, conv: String) {
+        shown.remove(conv)
+        ctx.getSystemService(NotificationManager::class.java).cancel(conv.hashCode())
+    }
+
+    /** Chats read elsewhere (another of my linked devices): drop their notifications. */
+    fun clearRead(ctx: Context, unread: Map<String, Int>) {
+        for (conv in shown.toList()) if ((unread[conv] ?: 0) == 0) cancel(ctx, conv)
+    }
 
     fun gameInvite(ctx: Context, ev: AppEvent, host: GameHost) {
         val info = host.sessionInfo(ev.session)

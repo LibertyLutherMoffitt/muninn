@@ -414,3 +414,37 @@ def test_linked_devices_kotlin_primary_python_secondary(lab, jvm):
     lap.mesh.unlink(lap.node_id)
     wait_until(lambda: phone("status")["devices"] == [phone.node_id], 20)
     wait_until(lambda: bob.mesh.person(lap.node_id) == lap.node_id, 20)
+
+
+def test_linked_phone_reached_by_kotlin_when_laptop_is_off(lab, jvm):
+    """The reported case with a Kotlin (Android) 'me': Ann's phone was only
+    ever reached through her laptop; the laptop goes off and the phone walks
+    into range — the Kotlin dialer must try the gossiped address. Then the
+    phone leaves without the laptop (signed leave) and Kotlin honours it."""
+    me = jvm("me", (0, 0))
+    lap = lab.node("lap", (4, 0))
+    phone = lab.node("phone", (8, 0))
+    wait_until(lambda: me.reachable(phone.node_id) and me.reachable(lap.node_id), 60)
+    code = lap.mesh.link_code()
+    phone.mesh.link_to(lap.node_id, code)
+    wait_until(lambda: phone.mesh.me == lap.node_id, 30)
+    wait_until(lambda: [p["id"] for p in me("people")] == [lap.node_id], 30)
+    lab.move("phone", (1, 0))
+    lab.stop_node("lap")
+    wait_until(
+        lambda: (
+            phone.node_id in me("status")["reachable"]
+            and any(lk["node"] == phone.node_id for lk in me("status")["links"])
+        ),
+        90,
+    )
+    me("send", to=lap.node_id, text="laptop's off?")
+    wait_until(lambda: "laptop's off?" in py_texts(phone, dm_conv(me.node_id)), 30)
+    phone.mesh.unlink(phone.node_id)
+    wait_until(
+        lambda: (
+            sorted(p["id"] for p in me("people"))
+            == sorted([lap.node_id, phone.node_id])
+        ),
+        30,
+    )

@@ -144,7 +144,8 @@ class Mesh(
     private fun setHidden(ids: Set<String>) { hidden = ids; storage.setSetting("forgotten_ids", Json.write(ids.sorted())) }
 
     // linked devices (Devices.kt): sets by account, who's who
-    @Volatile var devidx = Devices.Index(me = nodeId); private set
+    @Volatile var devidx = Devices.Index(); private set
+    private val leaves = ConcurrentHashMap<Pair<String, String>, Devices.Leave>()
     private var linkCode: Triple<String, Double, Int>? = null // code, expires, tries left
     private val linkPending = ConcurrentHashMap<String, Double>() // primary -> expires
     val stats = ConcurrentHashMap<String, AtomicLong>()
@@ -177,8 +178,14 @@ class Mesh(
         val sets = HashMap<String, Devices.DeviceSet>()
         for ((k, v) in storage.settingsWithPrefix("devset:"))
             runCatching { Devices.DeviceSet.fromJson(v) }.onSuccess { sets[it.account] = it }.onFailure { log("bad stored set $k") }
-        val left = storage.settingsWithPrefix("devleft:").mapKeys { it.key.removePrefix("devleft:") }.mapValues { it.value.toLong() }
-        devidx = Devices.Index(sets, left, nodeId)
+        val revoked = HashMap<Pair<String, String>, Long>()
+        for ((k, v) in storage.settingsWithPrefix("devleave:")) runCatching {
+            val lv = Devices.Leave.fromObj(Json.obj(v)["leave"] as Map<String, Any?>)
+            leaves[lv.account to lv.nodeId] = lv; revoked[lv.account to lv.nodeId] = lv.joined
+        }.onFailure { log("bad stored leave $k") }
+        for ((k, v) in storage.settingsWithPrefix("devleft:")) // ≤ 0.8 (unsigned, local)
+            v.toLongOrNull()?.takeIf { it >= 0 }?.let { revoked.putIfAbsent(k.removePrefix("devleft:") to nodeId, it) }
+        devidx = Devices.Index(sets, revoked)
     }
 
     /** Pick up rows added to storage behind our back (history sync). */
@@ -358,6 +365,7 @@ class Mesh(
         link.send(routesFrameFor(hello.nodeId), Tun.PRIO_CONTROL)
         link.send(P.encodeAddrs(linkAddrs()), Tun.PRIO_CONTROL)
         for (ds in devidx.sets.values) link.send(P.frame(P.T_DEVICES, ds.toJson().toByteArray()), Tun.PRIO_CONTROL)
+        for (lv in leaves.values) link.send(P.frame(P.T_DEVICES, lv.toJson().toByteArray()), Tun.PRIO_CONTROL)
         if (changed.isNotEmpty()) gossip(changed, hello.nodeId)
         // Our other neighbours are probably in range of the newcomer too:
         // tell them where to dial it directly instead of relaying via us.
@@ -576,7 +584,9 @@ class Mesh(
             val p = peers[node] ?: return@synchronized node
             val label = p.override?.takeIf { it.isNotEmpty() } ?: pname.ifEmpty { node }
             if (label == node || p.override != null) return@synchronized label
-            val clash = peers.values.any { it.nodeId != node && it.replacedBy == null && it.display.equals(label, true) } ||
+            val idx = devidx; val m = me
+            // another person (not one of theirs, not mine) with that name
+            val clash = peers.values.any { idx.owner(it.nodeId) != node && idx.owner(it.nodeId) != m && it.replacedBy == null && it.display.equals(label, true) } ||
                 label.equals(name, true)
             if (clash) "$label ·" + node.replace(":", "").takeLast(4) else label
         }
@@ -1059,10 +1069,16 @@ class Mesh(
     /** Nearest of a person's devices (1 = direct). */
     fun personHops(person: String): Int? = devicesOf(person).mapNotNull { hops(it) }.minOrNull()
     fun personReachable(person: String) = personHops(person) != null
+    /** The person's closest reachable device (themselves if none is). */
+    fun nearestDevice(person: String): String =
+        devicesOf(person(person)).mapNotNull { d -> hops(d)?.let { it to d } }.minByOrNull { it.first }?.second ?: person
 
     private fun pinned(id: String): ByteArray? = if (id == nodeId) pubkey else synchronized(lock) { peers[id]?.pubkey }
 
+    @Suppress("UNCHECKED_CAST")
     private fun onDevices(payload: ByteArray, via: String?) {
+        val obj = runCatching { Json.obj(String(payload)) }.getOrNull() ?: return
+        (obj["leave"] as? Map<String, Any?>)?.let { l -> runCatching { installLeave(Devices.Leave.fromObj(l), via) }; return }
         val ds = runCatching { Devices.DeviceSet.fromJson(String(payload)) }.getOrNull() ?: return
         if (!devidx.newer(ds)) return
         Devices.check(ds, ::pinned)?.let { log("ignoring device set for ${ds.account}: $it"); return }
@@ -1077,7 +1093,7 @@ class Mesh(
         synchronized(lock) {
             if (!devidx.newer(ds)) return
             beforeMe = me; beforeSibs = siblings().toSet()
-            devidx = Devices.Index(devidx.sets + (ds.account to ds), devidx.left, nodeId)
+            devidx = Devices.Index(devidx.sets + (ds.account to ds), devidx.revoked)
         }
         storage.setSetting("devset:${ds.account}", ds.toJson())
         log("device set ${ds.account} v${ds.version}: ${ds.devices}")
@@ -1121,7 +1137,8 @@ class Mesh(
         if (prim == me) throw IllegalArgumentException("that's already you")
         if (devicesOf(me).size > 1) throw IllegalArgumentException("unlink this device's other devices first")
         if (synchronized(lock) { prim !in peers }) throw IllegalArgumentException("unknown device")
-        val last = devidx.sets.values.flatMap { d -> d.entries.map { it.joined } }.maxOrNull() ?: 0L
+        // newer than any membership — and any leave — we know of
+        val last = (devidx.sets.values.flatMap { d -> d.entries.map { it.joined } } + devidx.revoked.values).maxOrNull() ?: 0L
         val joined = maxOf(P.now(), last + 1)
         val consent = Devices.makeConsent(secret, prim, nodeId, joined)
         linkPending[prim] = mono() + LINK_CODE_TTL
@@ -1134,17 +1151,44 @@ class Mesh(
         if (device == nodeId && me != nodeId) {
             val prim = me
             val e = devidx.sets[prim]?.entry(nodeId)
-            if (e != null) {
-                synchronized(lock) { devidx = Devices.Index(devidx.sets, devidx.left + (prim to e.joined), nodeId) }
-                storage.setSetting("devleft:$prim", e.joined.toString())
-            }
-            sendBody(listOf(prim), Body.B(Body.LINK, mapOf("o" to "leave")))
-            emit { it.onPeers() }
-            emit { it.onDevices() }
+            // signed, so everyone honours it even if the first device never answers
+            if (e == null) return
+            val lv = Devices.makeLeave(secret, prim, nodeId, e.joined)
+            installLeave(lv)
+            sendBody(listOf(prim), Body.B(Body.LINK, mapOf("o" to "leave", "lv" to lv.toJson())))
             return
         }
         if (me != nodeId) throw IllegalArgumentException("only ${displayName(me)}'s first device can unlink others")
         dropDevice(device)
+    }
+
+    /** A device left an account (its own signature): its own person again
+     *  everywhere; the account's first device drops it (see mesh.py). */
+    private fun installLeave(lv: Devices.Leave, via: String? = null) {
+        val key = lv.account to lv.nodeId
+        if ((devidx.revoked[key] ?: -1L) >= lv.joined) return
+        if (!Devices.checkLeave(lv, ::pinned)) { log("ignoring leave of ${lv.nodeId}: bad signature"); return }
+        val beforeSibs: Set<String>
+        synchronized(lock) {
+            beforeSibs = siblings().toSet()
+            leaves[key] = lv
+            devidx = Devices.Index(devidx.sets, devidx.revoked + (key to lv.joined))
+        }
+        storage.setSetting("devleave:${lv.account}|${lv.nodeId}", lv.toJson())
+        log("${lv.nodeId} left ${lv.account}")
+        broadcast(P.frame(P.T_DEVICES, lv.toJson().toByteArray()), via)
+        dropIfLeft(lv)
+        if (beforeSibs != siblings().toSet()) synchronized(lock) { outbox.values.removeIf { it.dst == lv.nodeId } }
+        emit { it.onPeers() }
+        emit { it.onDevices() }
+    }
+
+    /** First device: drop a device that left — unless it joined again since
+     *  (a late leave must not undo a newer link). */
+    private fun dropIfLeft(lv: Devices.Leave) {
+        if (lv.account != nodeId) return
+        val e = devidx.sets[nodeId]?.entry(lv.nodeId) ?: return
+        if (e.joined <= lv.joined) runCatching { dropDevice(lv.nodeId) }
     }
 
     private fun dropDevice(device: String) {
@@ -1162,15 +1206,14 @@ class Mesh(
                 val ds = runCatching { Devices.DeviceSet.fromJson(m.str("r")) }.getOrNull() ?: return
                 if (ds.account != src || ds.entry(nodeId) == null) return
                 Devices.check(ds, ::pinned)?.let { why -> log("link from $src: $why"); emit { it.onDevices("error", why) }; return }
-                synchronized(lock) { devidx = Devices.Index(devidx.sets, devidx.left - src, nodeId) } // joined again after leaving
-                storage.setSetting("devleft:$src", "-1")
                 installSet(ds)
                 emit { it.onDevices("ok", src) }
             }
             "no" -> if (linkPending.remove(src) != null) emit { it.onDevices("error", m.str("e").ifEmpty { "refused" }) }
-            "leave" -> {
-                val cur = devidx.sets[nodeId]
-                if (cur?.entry(src) != null && src != nodeId) dropDevice(src)
+            "leave" -> { // signed (≤ 0.8 sent none: ignored, the device floods one anyway)
+                @Suppress("UNCHECKED_CAST")
+                val lv = runCatching { Devices.Leave.fromObj(Json.obj(m.str("lv"))["leave"] as Map<String, Any?>) }.getOrNull() ?: return
+                if (lv.nodeId == src) { installLeave(lv); dropIfLeft(lv) }
             }
         }
     }
@@ -1545,7 +1588,12 @@ class Mesh(
 
     /** End-to-end round trips in ms (null = lost) over the real-time datagram
      *  path games use, relays included; [size] pads each datagram. Blocks. */
-    fun ping(dst: String, count: Int = 5, size: Int = 0, timeoutMs: Long = 3000): List<Double?> = (1..count).map {
+    fun ping(person: String, count: Int = 5, size: Int = 0, timeoutMs: Long = 3000): List<Double?> {
+        val dst = nearestDevice(person) // a linked person: their closest reachable device
+        return (1..count).map { pingOnce(dst, size, timeoutMs) }
+    }
+
+    private fun pingOnce(dst: String, size: Int, timeoutMs: Long): Double? = run {
         val sid = Nacl.randomBytes(6).hex()
         val p = Ping(System.nanoTime()).also { pings[sid] = it }
         sendBody(listOf(dst), Body.B(Body.RT, mapOf("a" to PING_APP, "s" to sid, "b" to "ping"), ByteArray(size)))
@@ -1631,9 +1679,15 @@ class Mesh(
     // ================================================================ introspection
 
     /** Queued packets (to a person: any of their devices). */
+    /** Queued packets; for a person: messages none of their devices has received
+     *  yet (a copy waiting for their switched-off laptop doesn't count once their
+     *  phone got it). */
     fun pendingCount(dst: String? = null): Int {
-        val devs = dst?.let { devicesOf(it).toSet() + it }
-        return synchronized(lock) { outbox.values.count { devs == null || it.dst in devs } }
+        if (dst == null) return synchronized(lock) { outbox.size }
+        val person = person(dst)
+        val devs = devicesOf(person).toSet() + dst
+        val mids = synchronized(lock) { outbox.values.filter { it.dst in devs }.mapNotNull { it.msgId?.hex() }.toSet() }
+        return mids.count { storage.getMessage(it.unhex())?.status?.get(person) ?: "sent" == "sent" }
     }
 
     fun status(): Map<String, Any?> = synchronized(lock) {

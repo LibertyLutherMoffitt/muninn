@@ -76,6 +76,55 @@ def make_consent(priv: bytes, account: str, node_id: str, joined: int) -> bytes:
     return xeddsa.sign(priv, consent_body(account, node_id, joined))
 
 
+def leave_body(account: str, node_id: str, joined: int) -> bytes:
+    return f"muninn-leave\n{account}\n{node_id}\n{joined}".encode()
+
+
+@dataclass(frozen=True)
+class Leave:
+    """A device's own signed statement that it left `account` (the membership
+    that started at `joined`). Valid without the first device, so a phone can
+    stand alone again even if the laptop it was linked to is lost."""
+
+    account: str
+    node_id: str
+    joined: int
+    sig: bytes
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "leave": {
+                    "a": self.account,
+                    "n": self.node_id,
+                    "j": self.joined,
+                    "s": self.sig.hex(),
+                }
+            },
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def from_obj(j: dict) -> Leave:
+        return Leave(str(j["a"]), str(j["n"]), int(j["j"]), bytes.fromhex(j["s"]))
+
+
+def make_leave(priv: bytes, account: str, node_id: str, joined: int) -> Leave:
+    return Leave(
+        account,
+        node_id,
+        joined,
+        xeddsa.sign(priv, leave_body(account, node_id, joined)),
+    )
+
+
+def check_leave(lv: Leave, pinned: Callable[[str], bytes | None]) -> bool:
+    pk = pinned(lv.node_id)
+    return pk is not None and xeddsa.verify(
+        pk, leave_body(lv.account, lv.node_id, lv.joined), lv.sig
+    )
+
+
 def sign(ds: DeviceSet, priv: bytes) -> DeviceSet:
     ds.entries = sorted(ds.entries, key=lambda e: e.node_id)
     ds.sig = xeddsa.sign(priv, ds.body())
@@ -114,9 +163,8 @@ class Index:
     """All valid sets we know, and which person each device is."""
 
     sets: dict[str, DeviceSet] = field(default_factory=dict)
-    # a device's own record of having left an account: account -> joined ts
-    left: dict[str, int] = field(default_factory=dict)
-    me: str = ""  # this device's node id (for `left`)
+    # signed leaves: (account, device) -> the join ts the device walked away from
+    revoked: dict[tuple[str, str], int] = field(default_factory=dict)
 
     def newer(self, ds: DeviceSet) -> bool:
         cur = self.sets.get(ds.account)
@@ -129,8 +177,8 @@ class Index:
             e = ds.entry(node_id)
             if e is None or len(ds.entries) < 2:
                 continue
-            if node_id == self.me and self.left.get(ds.account, -1) >= e.joined:
-                continue  # we asked to leave; the primary just hasn't said so yet
+            if self.revoked.get((ds.account, node_id), -1) >= e.joined:
+                continue  # it left (a newer consent would bring it back)
             if e.joined > best_ts:
                 best, best_ts = ds.account, e.joined
         return best

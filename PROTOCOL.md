@@ -133,6 +133,18 @@ wins. A device listed in two accounts belongs to the one with the newer join
 ts (its own latest consent). Sent to a neighbour after HELLO and re-flooded
 on change; a set with only the primary means "no other devices".
 
+A DEVICES frame may instead carry a **leave**, signed by the departing device
+alone (so it works when the first device is gone):
+
+```
+{"leave": {"a": account, "n": node id, "j": join ts it walks away from, "s": sig hex}}
+```
+
+signature over `"muninn-leave\n{a}\n{n}\n{j}"`. Receivers then ignore that
+device's entry in that account while its join ts ≤ `j` (a later consent wins);
+the account's first device republishes its set without it. Leaves are stored
+and flooded like sets.
+
 ## Mesh frames
 
 ### PACKET (0x10)
@@ -198,7 +210,7 @@ kind u8 meta_len u16 meta(JSON object) blob(rest)
 | 12 | TYPING     |   | `g`? |
 | 13 | GROUP_REQ  |   | `g` — "I got a message for a group I don't know" |
 | 14 | REPLACED   | ✓ | `o` old node id, `n` new node id (reinstall notice) |
-| 15 | LINK       | ✓ | `o` op: `req` (`c` code, `t` join ts, `k` consent hex) · `ok` (`r` device set) · `no` (`e` reason) · `leave` |
+| 15 | LINK       | ✓ | `o` op: `req` (`c` code, `t` join ts, `k` consent hex) · `ok` (`r` device set) · `no` (`e` reason) · `leave` (`lv` the signed leave, see DEVICES; the first device drops the device only if it hasn't joined again since) |
 
 A group message is sent as one PACKET per member, each encrypted for that
 member; all copies share the message id `i`. A DM has no `g`.

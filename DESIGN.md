@@ -85,8 +85,17 @@ code for 5 minutes; on the other device `:link <name> <code>` sends a LINK
 request (encrypted to the primary) carrying its consent. The primary checks
 the code (5 tries), adds the device, signs the new version and floods it.
 Unlinking: the primary publishes a version without the device; a device can
-ask to leave, and stops treating itself as linked immediately. Losing the
-primary means the set can't change any more (out of scope — keep it).
+leave on its own with a signed *leave* that everyone honours, so a phone can
+stand alone again even if the laptop it was linked to is lost (the primary
+drops it from the set when it hears). Losing the primary otherwise freezes
+the set — no new devices can join that account.
+
+A linked person is reachable when *any* device is: presence, ping and "waiting
+to send" all look at their best device. If a person (or one of my own
+devices) can't be reached any other way, Muninn also dials the radio
+addresses neighbours passed on for their devices — e.g. a phone you only ever
+reached through its laptop, after the laptop is switched off. Those
+addresses always belong to devices that were running Muninn.
 
 ### Links
 

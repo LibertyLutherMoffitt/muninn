@@ -245,14 +245,24 @@ class Node:
         out: list[tuple[str, bool]] = []
         seen: set[str] = set()
         hints: set[str] = set()
+        m = self.mesh
+        people = {p.node_id for p in m.active_peers()} | set(m.siblings())
         for node_id, addr, last_ok in self.storage.load_transports():
             if node_id in linked_nodes or addr in seen:
                 continue
             if not last_ok:
-                # Gossiped by a neighbour, never connected there yet: worth a
-                # try only while they're close (a short relay away).
-                h = self.mesh.hops(node_id)
-                if not h or h > HINT_MAX_HOPS:
+                # Gossiped by a neighbour (it had a live Muninn link there),
+                # never connected ourselves. Worth a try while they're close (a
+                # short relay away) — or when someone we know, or one of our own
+                # devices, can't be reached any other way: e.g. a linked phone
+                # we only ever reached through its laptop, which is now off.
+                h = m.hops(node_id)
+                person = m.person(node_id)
+                stranded = (
+                    (person in people or node_id in people)
+                    and not m.person_reachable(person)
+                ) or (node_id in people and h is None)
+                if not stranded and (not h or h > HINT_MAX_HOPS):
                     continue
                 hints.add(addr)
             out.append((addr, False))

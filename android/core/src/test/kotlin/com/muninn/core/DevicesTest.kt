@@ -27,11 +27,16 @@ class DevicesTest {
         assertNull(Devices.check(ds, ::pin))
         val back = Devices.DeviceSet.fromJson(ds.toJson())
         assertNull(Devices.check(back, ::pin))
-        val idx = Devices.Index(mapOf(ds.account to ds), me = phone.id)
+        val idx = Devices.Index(mapOf(ds.account to ds))
         assertEquals(lap.id, idx.owner(phone.id))
         assertEquals(listOf(lap.id, phone.id), idx.devices(lap.id))
-        // the phone asked to leave: it is itself again locally
-        assertEquals(phone.id, Devices.Index(mapOf(ds.account to ds), mapOf(lap.id to joined), phone.id).owner(phone.id))
+        // the phone left (its own signature): it is itself again, for everyone
+        val lv = Devices.makeLeave(phone.priv, lap.id, phone.id, joined)
+        assertTrue(Devices.checkLeave(lv, ::pin))
+        assertTrue(!Devices.checkLeave(Devices.makeLeave(mal.priv, lap.id, phone.id, joined), ::pin)) // forged
+        val back2 = Devices.Leave.fromObj(Json.obj(lv.toJson())["leave"] as Map<String, Any?>)
+        assertTrue(Devices.checkLeave(back2, ::pin))
+        assertEquals(phone.id, Devices.Index(mapOf(ds.account to ds), mapOf((lap.id to phone.id) to joined)).owner(phone.id))
     }
 
     @Test fun forgeriesAreRejected() {
