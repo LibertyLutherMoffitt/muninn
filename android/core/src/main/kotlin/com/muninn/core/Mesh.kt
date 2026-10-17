@@ -21,6 +21,9 @@ import java.util.concurrent.atomic.AtomicLong
 
 /** K_RT app reserved for end-to-end round trips ([Mesh.ping]). */
 const val PING_APP = "~ping"
+const val LINK_CODE_TTL = 300.0
+const val LINK_CODE_TRIES = 5
+const val SYNC_MAX_FILES = 32L * 1024 * 1024 // attachments carried in a history sync
 const val ZERO_GROUP_HEX = "00000000000000000000000000000000"
 
 fun dmConv(node: String) = "dm:$node"
@@ -83,6 +86,8 @@ interface MeshListener {
     fun onApp(ev: AppEvent) {}
     fun onRt(src: String, app: String, session: String, body: Any?, blob: ByteArray) {}
     fun onTyping(conv: String, node: String) {}
+    /** Linked devices changed (or a link attempt finished: [what] ok|error). */
+    fun onDevices(what: String = "", detail: String = "") {}
 }
 
 class Mesh(
@@ -137,6 +142,11 @@ class Mesh(
     }
 
     private fun setHidden(ids: Set<String>) { hidden = ids; storage.setSetting("forgotten_ids", Json.write(ids.sorted())) }
+
+    // linked devices (Devices.kt): sets by account, who's who
+    @Volatile var devidx = Devices.Index(me = nodeId); private set
+    private var linkCode: Triple<String, Double, Int>? = null // code, expires, tries left
+    private val linkPending = ConcurrentHashMap<String, Double>() // primary -> expires
     val stats = ConcurrentHashMap<String, AtomicLong>()
 
     private val listeners = java.util.concurrent.CopyOnWriteArrayList<MeshListener>()
@@ -164,6 +174,23 @@ class Mesh(
             files[f.fileId.hex()] = f
             if (f.state == "downloading") downloads[f.fileId.hex()] = Download(f)
         }
+        val sets = HashMap<String, Devices.DeviceSet>()
+        for ((k, v) in storage.settingsWithPrefix("devset:"))
+            runCatching { Devices.DeviceSet.fromJson(v) }.onSuccess { sets[it.account] = it }.onFailure { log("bad stored set $k") }
+        val left = storage.settingsWithPrefix("devleft:").mapKeys { it.key.removePrefix("devleft:") }.mapValues { it.value.toLong() }
+        devidx = Devices.Index(sets, left, nodeId)
+    }
+
+    /** Pick up rows added to storage behind our back (history sync). */
+    fun reload() {
+        synchronized(lock) {
+            for (p in storage.loadPeers()) if (p.nodeId !in peers)
+                peers[p.nodeId] = PeerInfo(p.nodeId, p.pubkey, p.name, p.nameTs, p.override, p.lastSeen, p.replacedBy)
+            for (g in storage.loadGroups()) if (g.groupId.hex() !in groups)
+                groups[g.groupId.hex()] = Group(g.groupId, g.name, g.version, g.members.toMutableSet(), g.left)
+            for (f in storage.loadFiles()) files.putIfAbsent(f.fileId.hex(), f)
+        }
+        emit { it.onPeers() }
     }
 
     private fun stat(k: String) = stats.getOrPut(k) { AtomicLong() }.incrementAndGet()
@@ -330,6 +357,7 @@ class Mesh(
         for (f in P.encodeRoster(rosterEntries(exclude = hello.nodeId))) link.send(f, Tun.PRIO_CONTROL)
         link.send(routesFrameFor(hello.nodeId), Tun.PRIO_CONTROL)
         link.send(P.encodeAddrs(linkAddrs()), Tun.PRIO_CONTROL)
+        for (ds in devidx.sets.values) link.send(P.frame(P.T_DEVICES, ds.toJson().toByteArray()), Tun.PRIO_CONTROL)
         if (changed.isNotEmpty()) gossip(changed, hello.nodeId)
         // Our other neighbours are probably in range of the newcomer too:
         // tell them where to dial it directly instead of relaying via us.
@@ -377,10 +405,10 @@ class Mesh(
         if (announce) {
             val others = synchronized(lock) { peers.values.filter { it.replacedBy == null && it.nodeId != old && it.nodeId != new }.map { it.nodeId } }
             sendBody(others, Body.B(Body.REPLACED, mapOf("o" to old, "n" to new)))
-            for (g in touched) if (!g.left && nodeId in g.members) {
+            for (g in touched) if (!g.left && me in g.members) {
                 synchronized(lock) { g.version += 1 }
                 saveGroup(g)
-                sendBody(synchronized(lock) { g.members.filter { it != nodeId } }, groupBody(g))
+                sendBody(expand(synchronized(lock) { g.members.toList() }), groupBody(g))
             }
         }
         emit { it.onPeers() }
@@ -389,7 +417,13 @@ class Mesh(
     fun isMuted(conv: String) = storage.getSetting("mute:$conv") == "1"
     fun setMuted(conv: String, muted: Boolean) { storage.setSetting("mute:$conv", if (muted) "1" else "0"); emit { it.onPeers() } }
 
-    fun activePeers(): List<PeerInfo> = synchronized(lock) { peers.values.filter { it.replacedBy == null && it.nodeId !in hidden } }
+    /** Known people (a linked person once, by account), minus reinstalled ids and me. */
+    fun activePeers(): List<PeerInfo> {
+        val idx = devidx; val m = me
+        return synchronized(lock) {
+            peers.values.filter { it.replacedBy == null && it.nodeId !in hidden && idx.owner(it.nodeId) == it.nodeId && it.nodeId != m }
+        }
+    }
 
     private fun preferNew(old: Link, new: Link): Boolean {
         if (mono() - old.lastRx > Tun.PING_INTERVAL * 2.5) return true
@@ -447,6 +481,7 @@ class Mesh(
             P.T_PONG -> link.ping?.let { (tok, t) -> if (tok.contentEquals(payload)) { link.rtt = mono() - t; link.ping = null } }
             P.T_ROUTES -> onRoutes(link, P.decodeRoutes(payload))
             P.T_ADDRS -> onAddrs(link, P.decodeAddrs(payload))
+            P.T_DEVICES -> onDevices(payload, link.nodeId)
             P.T_ROSTER -> {
                 val changed = P.decodeRoster(payload).flatMap { learnPeer(it) }
                 if (changed.isNotEmpty()) gossip(changed, link.nodeId)
@@ -471,8 +506,15 @@ class Mesh(
             } else return emptyList()
         }
         storage.upsertPeer(e.nodeId, e.pubkey, peer.name, peer.nameTs)
+        if (e.nameTs > nameTs && e.name.isNotEmpty() && e.nodeId in siblings()) adoptName(e.name, e.nameTs) // renamed on my other device
         emit { it.onPeers() }
         return listOf(P.RosterEntry(peer.nodeId, peer.pubkey, peer.name, peer.nameTs))
+    }
+
+    private fun adoptName(n: String, ts: Long) {
+        name = n; nameTs = ts
+        storage.setDisplayName(n, ts)
+        gossip(listOf(P.RosterEntry(nodeId, pubkey, n, ts)), null)
     }
 
     private fun rosterEntries(exclude: String?): List<P.RosterEntry> = synchronized(lock) {
@@ -526,11 +568,13 @@ class Mesh(
         emit { it.onPeers() }
     }
 
-    fun displayName(node: String): String {
-        if (node == nodeId) return name.ifEmpty { "me" }
+    fun displayName(id: String): String {
+        if (id == nodeId || id == me) return name.ifEmpty { "me" }
+        val node = person(id)
+        val pname = personName(node)
         return synchronized(lock) {
             val p = peers[node] ?: return@synchronized node
-            val label = p.display
+            val label = p.override?.takeIf { it.isNotEmpty() } ?: pname.ifEmpty { node }
             if (label == node || p.override != null) return@synchronized label
             val clash = peers.values.any { it.nodeId != node && it.replacedBy == null && it.display.equals(label, true) } ||
                 label.equals(name, true)
@@ -538,7 +582,19 @@ class Mesh(
         }
     }
 
+    /** A linked person's name: the newest one set on any of their devices. */
+    private fun personName(person: String): String = synchronized(lock) {
+        devicesOf(person).mapNotNull { peers[it] }.maxByOrNull { it.nameTs }?.name ?: ""
+    }
+
+    /** Name or id → person id. */
     fun resolve(s: String): String? {
+        val up = s.uppercase()
+        if (up == nodeId || up == me) return me
+        return resolveDevice(s)?.let { person(it) }
+    }
+
+    private fun resolveDevice(s: String): String? {
         val up = s.uppercase()
         val ps = synchronized(lock) { if (up in peers) return up; peers.values.filter { it.replacedBy == null } }
         val low = s.lowercase()
@@ -748,17 +804,23 @@ class Mesh(
         val item = synchronized(lock) { outbox.remove(ack.packetId.hex()) }
         val res = storage.outboxAck(ack.packetId)
         val msgId = item?.msgId ?: res?.second
-        if (msgId != null && storage.markDelivered(msgId, ack.src)) emit { it.onUpdate(msgId) }
+        val who = person(ack.src)
+        if (msgId != null && who != me && storage.markDelivered(msgId, who)) emit { it.onUpdate(msgId) }
     }
 
     // ================================================================ dispatch
 
-    private fun convFor(src: String, meta: Map<String, Any?>): String {
+    private fun convFor(src: String, meta: Map<String, Any?>): String? {
+        val who = person(src)
         val g = meta.str("g")
-        if (g.isEmpty()) return dmConv(src)
+        if (g.isEmpty()) {
+            if (who != me) return dmConv(who)
+            val t = person(meta.str("to")) // my other device: the DM names the other person
+            return if (t.isNotEmpty() && t != me) dmConv(t) else null
+        }
         val known = synchronized(lock) { groups[g] }
         if (known != null) return known.conv
-        val grp = Group(g.unhex(), "group", 0, mutableSetOf(src, nodeId))
+        val grp = Group(g.unhex(), "group", 0, mutableSetOf(who, me))
         synchronized(lock) { groups[g] = grp }
         saveGroup(grp)
         sendBody(listOf(src), Body.B(Body.GROUP_REQ, mapOf("g" to g)))
@@ -769,47 +831,56 @@ class Mesh(
     private fun dispatch(pkt: P.Packet, body: Body.B) {
         val m = body.meta
         val src = pkt.src
-        if (src in blocked) return // acked (so they stop retrying), never shown
-        if (src in hidden && (body.kind == Body.TEXT || body.kind == Body.FILE)) setHidden(hidden - src)
+        val who = person(src) // the person behind that device
+        val mine = who == me // sent by another of my own devices
+        if (src in blocked || who in blocked) return // acked (so they stop retrying), never shown
+        if (who in hidden && (body.kind == Body.TEXT || body.kind == Body.FILE)) setHidden(hidden - who)
         val ts = minOf(pkt.ts, P.now() + 60) // sender clock (app event order)
         val arrived = P.now() // chat is ordered by arrival (see mesh.py)
         when (body.kind) {
             Body.TEXT -> {
+                val conv = convFor(src, m) ?: return
                 val msg = StoredMessage(
-                    m.str("i").unhex(), convFor(src, m), src, arrived, "text", m.str("t"),
+                    m.str("i").unhex(), conv, who, arrived, "text", m.str("t"),
                     m.str("r").takeIf { it.isNotEmpty() }?.unhex(),
                 )
-                if (storage.saveMessage(msg)) {
-                    typing.remove(msg.conv to src)
+                val saved = if (mine) storage.saveMessage(msg, convPeople(conv), read = true) else storage.saveMessage(msg)
+                if (saved) {
+                    typing.remove(msg.conv to who)
                     emit { it.onMessage(msg) }
                 }
             }
             Body.FILE -> onFileOffer(src, arrived, m, body.blob)
             Body.REACT -> {
                 val mid = m.str("m").unhex()
-                storage.setReaction(mid, src, m.str("e").take(32), !m.bool("x"))
+                storage.setReaction(mid, who, m.str("e").take(32), !m.bool("x"))
                 emit { it.onUpdate(mid) }
             }
-            Body.EDIT -> { val mid = m.str("m").unhex(); if (storage.editMessage(mid, src, m.str("t"))) emit { it.onUpdate(mid) } }
-            Body.DELETE -> { val mid = m.str("m").unhex(); if (storage.deleteMessage(mid, src)) emit { it.onUpdate(mid) } }
-            Body.RECEIPT -> for (h in m.list("r")) {
-                val mid = (h as String).unhex()
-                if (storage.markRead(mid, src)) emit { it.onUpdate(mid) }
+            Body.EDIT -> { val mid = m.str("m").unhex(); if (storage.editMessage(mid, who, m.str("t"))) emit { it.onUpdate(mid) } }
+            Body.DELETE -> { val mid = m.str("m").unhex(); if (storage.deleteMessage(mid, who)) emit { it.onUpdate(mid) } }
+            Body.RECEIPT -> {
+                val ids = m.list("r").map { (it as String).unhex() }
+                if (mine) { // read on my other device
+                    if (storage.markReadIds(ids).isNotEmpty()) emit { it.onPeers() }
+                    ids.forEach { mid -> emit { it.onUpdate(mid) } }
+                } else for (mid in ids) if (storage.markRead(mid, who)) emit { it.onUpdate(mid) }
             }
             Body.GROUP -> onGroupInfo(src, m)
             Body.GROUP_REQ -> {
                 val g = synchronized(lock) { groups[m.str("g")] }
-                if (g != null && src in g.members && g.version > 0) sendBody(listOf(src), groupBody(g))
+                if (g != null && who in people(synchronized(lock) { g.members.toList() }) && g.version > 0) sendBody(listOf(src), groupBody(g))
             }
             Body.CHUNK -> onChunk(m, body.blob)
             Body.FILE_REQ -> onFileReq(src, m)
             Body.TYPING -> {
-                val conv = convFor(src, m)
-                typing[conv to src] = mono() + Tun.TYPING_TTL
-                emit { it.onTyping(conv, src) }
+                val conv = convFor(src, m) ?: return
+                if (mine) return
+                typing[conv to who] = mono() + Tun.TYPING_TTL
+                emit { it.onTyping(conv, who) }
             }
             Body.APP -> {
-                val ev = AppEvent(m.str("i").unhex(), m.str("s"), m.str("a"), convFor(src, m), src, m.int("q"), m.str("y"), m["b"], ts)
+                val conv = convFor(src, m) ?: return
+                val ev = AppEvent(m.str("i").unhex(), m.str("s"), m.str("a"), conv, who, m.int("q"), m.str("y"), m["b"], ts)
                 if (storage.saveAppEvent(ev)) emit { it.onApp(ev) }
             }
             Body.REPLACED -> {
@@ -818,22 +889,44 @@ class Mesh(
                 if (pOld != null && pNew != null && (pOld.name.isEmpty() || pOld.name == pNew.name) && !live)
                     supersede(old, new, announce = false)
             }
+            Body.LINK -> onLink(src, m)
             Body.RT -> if (m.str("a") == PING_APP) onPing(src, m.str("s"), m["b"], body.blob)
-                else emit { it.onRt(src, m.str("a"), m.str("s"), m["b"], body.blob) }
+                else emit { it.onRt(who, m.str("a"), m.str("s"), m["b"], body.blob) }
         }
     }
 
     // ================================================================ chat API
 
-    fun convMembers(conv: String): List<String> {
-        if (conv.startsWith("dm:")) return listOf(conv.substring(3))
+    /** The other people in a conversation (person ids, not me). */
+    fun convPeople(conv: String): List<String> {
+        if (conv.startsWith("dm:")) { val p = person(conv.substring(3)); return if (p == me) emptyList() else listOf(p) }
         val gid = convGroupId(conv) ?: return emptyList()
         val g = synchronized(lock) { groups[gid.hex()] } ?: return emptyList()
         if (g.left) return emptyList()
-        return synchronized(lock) { g.members.filter { it != nodeId } }
+        return (people(synchronized(lock) { g.members.toList() }) - me).sorted()
     }
 
-    private fun convMeta(conv: String): Map<String, Any?> = convGroupId(conv)?.let { mapOf("g" to it.hex()) } ?: emptyMap()
+    /** Devices a conversation's bodies go to: every device of the other
+     *  people, plus my own other devices. */
+    fun convMembers(conv: String): List<String> {
+        if (!conv.startsWith("dm:")) {
+            val gid = convGroupId(conv) ?: return emptyList()
+            val g = synchronized(lock) { groups[gid.hex()] } ?: return emptyList()
+            if (g.left) return emptyList()
+        }
+        return expand(convPeople(conv))
+    }
+
+    private fun expand(ps: Collection<String>): List<String> {
+        val out = LinkedHashSet<String>()
+        for (p in ps + me) for (d in devicesOf(person(p))) if (d != nodeId) out.add(d)
+        return out.toList()
+    }
+
+    private fun people(ids: Collection<String>): Set<String> = ids.map { person(it) }.toSet()
+
+    private fun convMeta(conv: String): Map<String, Any?> =
+        convGroupId(conv)?.let { mapOf("g" to it.hex()) } ?: mapOf("to" to person(conv.substring(3))) // "to": for my other devices
 
     fun sendText(conv: String, text: String, replyTo: ByteArray? = null): ByteArray {
         val dsts = convMembers(conv)
@@ -844,15 +937,15 @@ class Mesh(
         if (replyTo != null) meta["r"] = replyTo.hex()
         val body = Body.B(Body.TEXT, meta)
         if (Body.encode(body).size > 60000) throw P.FrameTooLarge("message too long")
-        val msg = StoredMessage(msgId, conv, nodeId, P.now(), "text", text, replyTo)
-        storage.saveMessage(msg, dsts)
+        val msg = StoredMessage(msgId, conv, me, P.now(), "text", text, replyTo)
+        storage.saveMessage(msg, convPeople(conv), read = true)
         emit { it.onMessage(msg) }
         sendBody(dsts, body, msgId)
         return msgId
     }
 
     fun react(conv: String, msgId: ByteArray, emoji: String, remove: Boolean = false) {
-        storage.setReaction(msgId, nodeId, emoji, !remove)
+        storage.setReaction(msgId, me, emoji, !remove)
         emit { it.onUpdate(msgId) }
         val meta = LinkedHashMap<String, Any?>(mapOf("m" to msgId.hex(), "e" to emoji)).apply { putAll(convMeta(conv)) }
         if (remove) meta["x"] = 1
@@ -860,29 +953,39 @@ class Mesh(
     }
 
     fun edit(conv: String, msgId: ByteArray, text: String) {
-        if (!storage.editMessage(msgId, nodeId, text)) return
+        if (!storage.editMessage(msgId, me, text)) return
         emit { it.onUpdate(msgId) }
         sendBody(convMembers(conv), Body.B(Body.EDIT, mapOf("m" to msgId.hex(), "t" to text) + convMeta(conv)))
     }
 
     fun delete(conv: String, msgId: ByteArray) {
-        if (!storage.deleteMessage(msgId, nodeId)) return
+        if (!storage.deleteMessage(msgId, me)) return
         emit { it.onUpdate(msgId) }
         sendBody(convMembers(conv), Body.B(Body.DELETE, mapOf("m" to msgId.hex()) + convMeta(conv)))
     }
 
     fun markRead(conv: String) {
         val bySender = LinkedHashMap<String, MutableList<String>>()
-        for ((mid, sender) in storage.markReadLocal(conv)) if (sender != nodeId) bySender.getOrPut(sender) { ArrayList() }.add(mid.hex())
+        for ((mid, sender) in storage.markReadLocal(conv)) if (sender != me) bySender.getOrPut(sender) { ArrayList() }.add(mid.hex())
+        val sibs = siblings()
+        if (sibs.isNotEmpty()) // my other devices mark them read too (even with receipts off)
+            bySender.values.flatten().chunked(500).forEach { sendBody(sibs, Body.B(Body.RECEIPT, mapOf("r" to it))) }
         if (!privacy("receipts")) return // marked read here, but nobody is told
-        for ((sender, ids) in bySender) ids.chunked(500).forEach { sendBody(listOf(sender), Body.B(Body.RECEIPT, mapOf("r" to it))) }
+        for ((sender, ids) in bySender) {
+            val devs = devicesOf(sender).filter { it != nodeId }
+            ids.chunked(500).forEach { sendBody(devs, Body.B(Body.RECEIPT, mapOf("r" to it))) }
+        }
     }
 
     /** Privacy switches (mirrors mesh.py): "receipts" and "typing", on by default. */
     fun privacy(what: String) = storage.getSetting("privacy_$what") != "off"
     fun setPrivacy(what: String, on: Boolean) = storage.setSetting("privacy_$what", if (on) "on" else "off")
 
-    fun sendTyping(conv: String) { if (privacy("typing")) sendBody(convMembers(conv), Body.B(Body.TYPING, convMeta(conv))) }
+    fun sendTyping(conv: String) {
+        if (!privacy("typing")) return
+        val sibs = siblings().toSet()
+        sendBody(convMembers(conv).filter { it !in sibs }, Body.B(Body.TYPING, convMeta(conv)))
+    }
 
     fun typingIn(conv: String): List<String> {
         val now = mono()
@@ -893,7 +996,7 @@ class Mesh(
 
     private fun groupBody(g: Group): Body.B {
         val members = synchronized(lock) {
-            g.members.sorted().map { id -> listOf(id, if (id == nodeId) pubkey.hex() else peers[id]!!.pubkey.hex()) }
+            g.members.sorted().mapNotNull { id -> pinned(id)?.let { listOf(id, it.hex()) } }
         }
         return Body.B(Body.GROUP, mapOf("g" to g.groupId.hex(), "n" to g.name, "v" to g.version, "m" to members))
     }
@@ -901,19 +1004,19 @@ class Mesh(
     private fun saveGroup(g: Group) = storage.saveGroup(g.groupId, g.name, g.version, synchronized(lock) { g.members.sorted() }, g.left)
 
     private fun system(conv: String, text: String) {
-        val m = StoredMessage(Nacl.randomBytes(16), conv, nodeId, P.now(), "system", text)
+        val m = StoredMessage(Nacl.randomBytes(16), conv, me, P.now(), "system", text)
         storage.saveMessage(m)
         emit { it.onMessage(m) }
     }
 
     fun createGroup(name: String, members: List<String>): ByteArray {
-        val ms = members.filter { it != nodeId }
-        synchronized(lock) { ms.forEach { if (it !in peers) throw IllegalArgumentException("unknown peer $it") } }
-        val g = Group(Nacl.randomBytes(16), name, 1, (ms + nodeId).toMutableSet())
+        synchronized(lock) { members.forEach { if (it !in peers && it != me) throw IllegalArgumentException("unknown peer $it") } }
+        val ms = people(members) - me
+        val g = Group(Nacl.randomBytes(16), name, 1, (ms + me).toMutableSet())
         synchronized(lock) { groups[g.groupId.hex()] = g }
         saveGroup(g)
-        sendBody(ms, groupBody(g))
-        system(g.conv, "${displayName(nodeId)} created group “$name”")
+        sendBody(expand(ms), groupBody(g))
+        system(g.conv, "${displayName(me)} created group “$name”")
         emit { it.onGroup(g.groupId) }
         return g.groupId
     }
@@ -921,28 +1024,231 @@ class Mesh(
     fun updateGroup(gid: ByteArray, name: String? = null, add: List<String> = emptyList(), remove: List<String> = emptyList()) {
         val g: Group
         val old: Set<String>
+        val adds = synchronized(lock) { add.filter { it in peers } }.map { person(it) }
+        val rems = remove.map { person(it) }.toSet()
         synchronized(lock) {
             g = groups[gid.hex()] ?: throw IllegalArgumentException("unknown group")
-            old = HashSet(g.members)
+            old = people(g.members.toList())
             g.version += 1
             if (!name.isNullOrEmpty()) g.name = name
-            g.members.addAll(add.filter { it in peers })
-            g.members.removeAll(remove.toSet())
-            if (nodeId !in g.members) g.left = true
+            g.members.clear(); g.members.addAll((old + adds) - rems)
+            if (me !in g.members) g.left = true
         }
         saveGroup(g)
-        sendBody((old + g.members) - nodeId, groupBody(g))
+        sendBody(expand(old + synchronized(lock) { g.members.toList() }), groupBody(g))
         val bits = ArrayList<String>()
         if (!name.isNullOrEmpty()) bits.add("renamed the group to “$name”")
-        if (add.isNotEmpty()) bits.add("added " + add.joinToString { displayName(it) })
-        val removed = remove.filter { it != nodeId }
+        if (adds.isNotEmpty()) bits.add("added " + adds.joinToString { displayName(it) })
+        val removed = rems.filter { it != me }
         if (removed.isNotEmpty()) bits.add("removed " + removed.joinToString { displayName(it) })
-        if (nodeId in remove) bits.add("left")
-        system(g.conv, "${displayName(nodeId)} " + bits.joinToString(", "))
+        if (me in rems) bits.add("left")
+        system(g.conv, "${displayName(me)} " + bits.joinToString(", "))
         emit { it.onGroup(gid) }
     }
 
-    fun leaveGroup(gid: ByteArray) = updateGroup(gid, remove = listOf(nodeId))
+    fun leaveGroup(gid: ByteArray) = updateGroup(gid, remove = listOf(me))
+
+    // ================================================================ linked devices (mirrors mesh.py)
+
+    /** My person id: the account I'm linked into, else my node id. */
+    val me: String get() = devidx.owner(nodeId)
+    fun person(id: String): String = if (id.isEmpty()) id else devidx.owner(id)
+    fun devicesOf(person: String): List<String> = devidx.devices(person)
+    /** My other devices. */
+    fun siblings(): List<String> = devidx.devices(me).filter { it != nodeId }
+    /** Nearest of a person's devices (1 = direct). */
+    fun personHops(person: String): Int? = devicesOf(person).mapNotNull { hops(it) }.minOrNull()
+    fun personReachable(person: String) = personHops(person) != null
+
+    private fun pinned(id: String): ByteArray? = if (id == nodeId) pubkey else synchronized(lock) { peers[id]?.pubkey }
+
+    private fun onDevices(payload: ByteArray, via: String?) {
+        val ds = runCatching { Devices.DeviceSet.fromJson(String(payload)) }.getOrNull() ?: return
+        if (!devidx.newer(ds)) return
+        Devices.check(ds, ::pinned)?.let { log("ignoring device set for ${ds.account}: $it"); return }
+        installSet(ds, via)
+    }
+
+    private fun installSet(ds: Devices.DeviceSet, exclude: String? = null) {
+        for (e in ds.entries) if (e.nodeId != nodeId && synchronized(lock) { e.nodeId !in peers })
+            learnPeer(P.RosterEntry(e.nodeId, e.pubkey, "", 0))
+        val beforeMe: String
+        val beforeSibs: Set<String>
+        synchronized(lock) {
+            if (!devidx.newer(ds)) return
+            beforeMe = me; beforeSibs = siblings().toSet()
+            devidx = Devices.Index(devidx.sets + (ds.account to ds), devidx.left, nodeId)
+        }
+        storage.setSetting("devset:${ds.account}", ds.toJson())
+        log("device set ${ds.account} v${ds.version}: ${ds.devices}")
+        broadcast(P.frame(P.T_DEVICES, ds.toJson().toByteArray()), exclude)
+        rekey()
+        if (me != beforeMe) log("I am now $me (was $beforeMe)")
+        for (sib in (siblings().toSet() - beforeSibs).sorted()) thread("sync-$sib") { syncTo(sib) }
+        emit { it.onPeers() }
+        emit { it.onDevices() }
+    }
+
+    /** Rows naming a device that belongs to someone (else) → that person. */
+    private fun rekey() {
+        val idx = devidx
+        val mapping = idx.sets.values.flatMap { it.devices }.associateWith { idx.owner(it) }.filter { it.key != it.value }
+        synchronized(lock) {
+            for (g in groups.values) { val ms = g.members.map { idx.owner(it) }.toSet(); g.members.clear(); g.members.addAll(ms) }
+            typing.keys.removeIf { it.second in mapping }
+        }
+        if (mapping.isNotEmpty() && storage.mergeIds(mapping) > 0) synchronized(lock) {
+            for ((k, f) in files.entries.toList()) {
+                val s = mapping[f.sender] ?: f.sender
+                val c = if (f.conv.startsWith("dm:") && mapping[f.conv.substring(3)] != null) dmConv(mapping[f.conv.substring(3)]!!) else f.conv
+                if (s != f.sender || c != f.conv) files[k] = FileRecord(f.fileId, f.msgId, c, s, f.name, f.mime, f.size, f.sha256,
+                    f.chunkSize, f.chunks, f.path, f.state, f.have)
+            }
+        }
+    }
+
+    /** Start linking another device to me: a 6-digit code for 5 minutes. */
+    fun linkCode(): String {
+        if (me != nodeId) throw IllegalArgumentException("link from your first device (${displayName(me)})")
+        val code = "%06d".format(java.security.SecureRandom().nextInt(1_000_000))
+        linkCode = Triple(code, mono() + LINK_CODE_TTL, LINK_CODE_TRIES)
+        return code
+    }
+
+    /** Join [target]'s devices (they ran [linkCode] and showed [code]). */
+    fun linkTo(target: String, code: String) {
+        val prim = person(target)
+        if (prim == me) throw IllegalArgumentException("that's already you")
+        if (devicesOf(me).size > 1) throw IllegalArgumentException("unlink this device's other devices first")
+        if (synchronized(lock) { prim !in peers }) throw IllegalArgumentException("unknown device")
+        val last = devidx.sets.values.flatMap { d -> d.entries.map { it.joined } }.maxOrNull() ?: 0L
+        val joined = maxOf(P.now(), last + 1)
+        val consent = Devices.makeConsent(secret, prim, nodeId, joined)
+        linkPending[prim] = mono() + LINK_CODE_TTL
+        sendBody(listOf(prim), Body.B(Body.LINK, mapOf("o" to "req", "c" to code.trim(), "t" to joined, "k" to consent.hex())))
+    }
+
+    /** Primary: drop a device from my set. Other device: leave (the primary
+     *  confirms when reachable; we stop acting linked right away). */
+    fun unlink(device: String) {
+        if (device == nodeId && me != nodeId) {
+            val prim = me
+            val e = devidx.sets[prim]?.entry(nodeId)
+            if (e != null) {
+                synchronized(lock) { devidx = Devices.Index(devidx.sets, devidx.left + (prim to e.joined), nodeId) }
+                storage.setSetting("devleft:$prim", e.joined.toString())
+            }
+            sendBody(listOf(prim), Body.B(Body.LINK, mapOf("o" to "leave")))
+            emit { it.onPeers() }
+            emit { it.onDevices() }
+            return
+        }
+        if (me != nodeId) throw IllegalArgumentException("only ${displayName(me)}'s first device can unlink others")
+        dropDevice(device)
+    }
+
+    private fun dropDevice(device: String) {
+        val cur = devidx.sets[nodeId]
+        if (cur?.entry(device) == null || device == nodeId) throw IllegalArgumentException("not one of my linked devices")
+        installSet(Devices.DeviceSet(nodeId, cur.version + 1, cur.entries.filter { it.nodeId != device }).sign(secret))
+        synchronized(lock) { outbox.values.removeIf { it.dst == device } } // don't keep feeding it my mail
+    }
+
+    private fun onLink(src: String, m: Map<String, Any?>) {
+        when (m.str("o")) {
+            "req" -> onLinkReq(src, m)
+            "ok" -> {
+                if ((linkPending.remove(src) ?: 0.0) < mono()) return
+                val ds = runCatching { Devices.DeviceSet.fromJson(m.str("r")) }.getOrNull() ?: return
+                if (ds.account != src || ds.entry(nodeId) == null) return
+                Devices.check(ds, ::pinned)?.let { why -> log("link from $src: $why"); emit { it.onDevices("error", why) }; return }
+                synchronized(lock) { devidx = Devices.Index(devidx.sets, devidx.left - src, nodeId) } // joined again after leaving
+                storage.setSetting("devleft:$src", "-1")
+                installSet(ds)
+                emit { it.onDevices("ok", src) }
+            }
+            "no" -> if (linkPending.remove(src) != null) emit { it.onDevices("error", m.str("e").ifEmpty { "refused" }) }
+            "leave" -> {
+                val cur = devidx.sets[nodeId]
+                if (cur?.entry(src) != null && src != nodeId) dropDevice(src)
+            }
+        }
+    }
+
+    private fun onLinkReq(src: String, m: Map<String, Any?>) {
+        fun no(why: String) = sendBody(listOf(src), Body.B(Body.LINK, mapOf("o" to "no", "e" to why)))
+        val lc = linkCode
+        if (me != nodeId || lc == null || lc.second < mono()) { no("no link code is showing on that device"); return }
+        if (!java.security.MessageDigest.isEqual(m.str("c").toByteArray(), lc.first.toByteArray())) {
+            linkCode = if (lc.third <= 1) null else lc.copy(third = lc.third - 1)
+            no("wrong code"); return
+        }
+        if (devicesOf(person(src)).size > 1 && person(src) != me) { no("that device is linked to someone else"); return }
+        val pk = pinned(src)
+        val joined = m.long("t")
+        val consent = runCatching { m.str("k").unhex() }.getOrNull()
+        if (pk == null || consent == null || !XEdDSA.verify(pk, Devices.consentBody(nodeId, src, joined), consent)) { no("bad consent"); return }
+        linkCode = null
+        val cur = devidx.sets[nodeId]
+        val entries = (cur?.entries ?: emptyList()).filter { it.nodeId != src }.toMutableList()
+        if (entries.none { it.nodeId == nodeId }) entries.add(Devices.Entry(nodeId, pubkey, 0, ByteArray(0)))
+        if (entries.size >= Devices.MAX_DEVICES) { no("too many devices"); return }
+        entries.add(Devices.Entry(src, pk, joined, consent))
+        val ds = Devices.DeviceSet(nodeId, (cur?.version ?: 0) + 1, entries).sign(secret)
+        installSet(ds)
+        sendBody(listOf(src), Body.B(Body.LINK, mapOf("o" to "ok", "r" to ds.toJson())))
+        emit { it.onDevices("ok", src) }
+    }
+
+    // ---- history sync between my devices ------------------------------------------
+
+    private fun syncTo(sib: String) {
+        try {
+            val fid = Nacl.randomBytes(16)
+            val dir = File(storage.filesDir, fid.hex()).apply { mkdirs() }
+            val path = File(dir, "history.zip")
+            HistorySync.export(storage, nodeId, name, path, SYNC_MAX_FILES)
+            val size = path.length()
+            if (size > Tun.MAX_FILE_SIZE) { log("history too large to sync"); return }
+            val chunks = maxOf(1, ((size + Tun.CHUNK_SIZE - 1) / Tun.CHUNK_SIZE).toInt())
+            val rec = FileRecord(fid, Nacl.randomBytes(16), "sync:$sib", me, "history.zip", "application/zip", size, sha256(path),
+                Tun.CHUNK_SIZE, chunks, path.path, "complete", ByteArray((chunks + 7) / 8) { 0xff.toByte() })
+            storage.saveFile(rec) // served like any file; never shown
+            synchronized(lock) { files[fid.hex()] = rec }
+            sendBody(listOf(sib), Body.B(Body.FILE, mapOf("i" to rec.msgId.hex(), "f" to fid.hex(), "n" to rec.name, "mt" to rec.mime,
+                "s" to size, "h" to rec.sha256, "cs" to Tun.CHUNK_SIZE, "c" to chunks, "sync" to 1)))
+            log("offered history ($size bytes) to $sib")
+        } catch (e: Throwable) { log("history sync to $sib: $e") }
+    }
+
+    private fun onSyncOffer(src: String, m: Map<String, Any?>) {
+        val fid = m.str("f")
+        synchronized(lock) {
+            if (fid in files) return
+            val chunks = m.int("c")
+            files[fid] = FileRecord(fid.unhex(), m.str("i").unhex(), "sync:$src", me, "history.zip", "application/zip", m.long("s"),
+                m.str("h"), m.int("cs"), chunks, "", "offered", ByteArray((chunks + 7) / 8))
+        }
+        download(fid.unhex())
+    }
+
+    private fun finishSync(rec: FileRecord) {
+        synchronized(lock) { files.remove(rec.fileId.hex()); downloads.remove(rec.fileId.hex()) }
+        val sib = rec.conv.substring(5)
+        try {
+            if (sha256(File(rec.path)) != rec.sha256) throw IllegalStateException("hash mismatch")
+            val added = HistorySync.import(storage, File(rec.path), setOf(sib))
+            log("merged history from $sib: $added messages")
+            rekey()
+            reload()
+            emit { it.onDevices() }
+        } catch (e: Throwable) {
+            log("history sync from $sib: $e")
+        } finally {
+            storage.deleteFileRecord(rec.fileId)
+            File(rec.path).parentFile?.deleteRecursively()
+        }
+    }
 
     // ================================================================ forgetting (mirrors mesh.py)
 
@@ -961,7 +1267,7 @@ class Mesh(
         val doomed = storage.loadHistory(conv, 1_000_000).map { it.msgId.hex() }.toSet()
         val paths = if (gid != null) {
             val g = synchronized(lock) { groups[gid.hex()] }
-            if (g != null && !g.left && nodeId in g.members) runCatching { leaveGroup(gid) }.onFailure { log("leave $conv: $it") }
+            if (g != null && !g.left && me in g.members) runCatching { leaveGroup(gid) }.onFailure { log("leave $conv: $it") }
             synchronized(lock) { groups.remove(gid.hex()) }
             storage.deleteGroup(gid)
         } else storage.deleteConversation(conv)
@@ -972,17 +1278,19 @@ class Mesh(
 
     /** Forget a person (chat, addresses, queue, pinned key); with [block] also
      *  refuse their links and messages. Returns their radio addresses. */
-    fun forget(id: String, block: Boolean = false): List<String> {
-        val addrs = storage.loadTransports().filter { it.first == id }.map { it.second }
-        if (block) { blocked.add(id); storage.setBlocked(blocked.toSet()) }
-        setHidden(hidden + id)
-        val link = synchronized(lock) {
-            peers.remove(id)
-            outbox.values.removeIf { it.dst == id }
-            links[id]
+    fun forget(who: String, block: Boolean = false): List<String> {
+        val id = person(who)
+        val devs = devicesOf(id).toSet() + id
+        val addrs = storage.loadTransports().filter { it.first in devs }.map { it.second }
+        if (block) { blocked.addAll(devs); storage.setBlocked(blocked.toSet()) }
+        setHidden(hidden + devs)
+        val ls = synchronized(lock) {
+            devs.forEach { peers.remove(it) }
+            outbox.values.removeIf { it.dst in devs }
+            devs.mapNotNull { links[it] }
         }
-        if (block) link?.close()
-        dropFiles(storage.forgetPeer(id))
+        if (block) ls.forEach { it.close() }
+        for (d in devs.sortedBy { it != id }) dropFiles(storage.forgetPeer(d))
         log("forgot $id${if (block) " (blocked)" else ""}")
         emit { it.onPeers() }
         return addrs
@@ -998,18 +1306,20 @@ class Mesh(
         val version = m.int("v")
         val members = LinkedHashMap<String, ByteArray>()
         for (e in m.list("m")) { val l = e as List<*>; members[l[0] as String] = (l[1] as String).unhex() }
+        val sender = person(src)
         val prev = synchronized(lock) { groups[gidHex] }
         if (prev != null && prev.version >= version) return
-        if (prev != null && prev.version > 0 && src !in prev.members) return
+        if (prev != null && prev.version > 0 && sender !in people(synchronized(lock) { prev.members.toList() })) return
         for ((id, pk) in members) if (id != nodeId && synchronized(lock) { id !in peers }) learnPeer(P.RosterEntry(id, pk, "", 0))
         val isNew = prev == null || prev.version == 0
-        val prevMembers = if (prev != null && prev.version > 0) HashSet(prev.members) else HashSet()
-        val g = Group(gidHex.unhex(), m.str("n"), version, members.keys.toMutableSet())
-        g.left = nodeId !in g.members
+        val prevMembers = if (prev != null && prev.version > 0) people(synchronized(lock) { prev.members.toList() }) else emptySet()
+        val g = Group(gidHex.unhex(), m.str("n"), version, people(members.keys).toMutableSet())
+        g.left = me !in g.members
         synchronized(lock) { groups[gidHex] = g }
         saveGroup(g)
-        val who = displayName(src)
-        if (isNew) system(g.conv, "$who added you to “${g.name}”")
+        val who = displayName(sender)
+        if (isNew && sender != me) system(g.conv, "$who added you to “${g.name}”")
+        else if (isNew) system(g.conv, "you created “${g.name}”")
         else {
             val parts = ArrayList<String>()
             val added = g.members - prevMembers
@@ -1038,7 +1348,7 @@ class Mesh(
         file.copyTo(dest, overwrite = true)
         val sha = sha256(dest)
         val chunks = maxOf(1, ((size + Tun.CHUNK_SIZE - 1) / Tun.CHUNK_SIZE).toInt())
-        val rec = FileRecord(fileId, msgId, conv, nodeId, name, mime, size, sha, Tun.CHUNK_SIZE, chunks, dest.path, "complete",
+        val rec = FileRecord(fileId, msgId, conv, me, name, mime, size, sha, Tun.CHUNK_SIZE, chunks, dest.path, "complete",
             ByteArray((chunks + 7) / 8) { 0xff.toByte() })
         storage.saveFile(rec)
         synchronized(lock) { files[fileId.hex()] = rec }
@@ -1050,10 +1360,10 @@ class Mesh(
         if (caption.isNotEmpty()) meta["t"] = caption
         if (replyTo != null) meta["r"] = replyTo.hex()
         val t = if (thumb.size <= 12000) thumb else ByteArray(0)
-        val localMeta = LinkedHashMap(meta.filterKeys { it != "i" && it != "g" })
+        val localMeta = LinkedHashMap(meta.filterKeys { it != "i" && it != "g" && it != "to" })
         if (t.isNotEmpty()) localMeta["thumb"] = saveThumb(fileId, t)
-        val msg = StoredMessage(msgId, conv, nodeId, P.now(), "file", caption, replyTo, localMeta)
-        storage.saveMessage(msg, dsts)
+        val msg = StoredMessage(msgId, conv, me, P.now(), "file", caption, replyTo, localMeta)
+        storage.saveMessage(msg, convPeople(conv), read = true)
         emit { it.onMessage(msg) }
         sendBody(dsts, Body.B(Body.FILE, meta, t), msgId)
         return msgId
@@ -1062,15 +1372,18 @@ class Mesh(
     private fun onFileOffer(src: String, ts: Long, m: Map<String, Any?>, thumb: ByteArray) {
         val fileId = m.str("f").unhex()
         val msgId = m.str("i").unhex()
-        val conv = convFor(src, m)
+        val who = person(src)
         val size = m.long("s")
         val chunks = m.int("c")
         if (size > Tun.MAX_FILE_SIZE || chunks > 100000) return
-        val meta = LinkedHashMap(m.filterKeys { it != "i" && it != "g" })
+        if (m.int("sync") == 1) { if (who == me && src != nodeId) onSyncOffer(src, m); return }
+        val conv = convFor(src, m) ?: return
+        val meta = LinkedHashMap(m.filterKeys { it != "i" && it != "g" && it != "to" })
         if (thumb.isNotEmpty()) meta["thumb"] = saveThumb(fileId, thumb)
-        val msg = StoredMessage(msgId, conv, src, ts, "file", m.str("t"), m.str("r").takeIf { it.isNotEmpty() }?.unhex(), meta)
-        if (!storage.saveMessage(msg)) return
-        val rec = FileRecord(fileId, msgId, conv, src, m.str("n"), m.str("mt"), size, m.str("h"), m.int("cs"), chunks, "", "offered",
+        val msg = StoredMessage(msgId, conv, who, ts, "file", m.str("t"), m.str("r").takeIf { it.isNotEmpty() }?.unhex(), meta)
+        val saved = if (who == me) storage.saveMessage(msg, convPeople(conv), read = true) else storage.saveMessage(msg)
+        if (!saved) return
+        val rec = FileRecord(fileId, msgId, conv, who, m.str("n"), m.str("mt"), size, m.str("h"), m.int("cs"), chunks, "", "offered",
             ByteArray((chunks + 7) / 8))
         synchronized(lock) { files[fileId.hex()] = rec }
         storage.saveFile(rec)
@@ -1099,8 +1412,11 @@ class Mesh(
         return Triple(r.haveCount, r.chunks, r.state)
     }
 
-    private fun fileSource(rec: FileRecord): String? =
-        (listOf(rec.sender) + convMembers(rec.conv).filter { it != rec.sender }).firstOrNull { reachable(it) }
+    private fun fileSource(rec: FileRecord): String? {
+        if (rec.conv.startsWith("sync:")) return rec.conv.substring(5).takeIf { reachable(it) }
+        val c = devicesOf(rec.sender).filter { it != nodeId }
+        return (c + convMembers(rec.conv).filter { it !in c }).firstOrNull { reachable(it) }
+    }
 
     private fun requestChunks(fileId: ByteArray) {
         val want = ArrayList<Int>()
@@ -1126,7 +1442,8 @@ class Mesh(
         synchronized(lock) {
             val rec = files[fid] ?: return
             if (rec.state != "complete") return
-            if (src !in convMembers(rec.conv) && src != rec.sender) return
+            val who = person(src)
+            if (who != me && who != rec.sender && who !in convPeople(rec.conv)) return
             for (x in m.list("w").take(Tun.FILE_WINDOW * 2)) {
                 val i = (x as Number).toInt()
                 if (i in 0 until rec.chunks && serveQ.none { it.first == src && it.second.contentEquals(rec.fileId) && it.third == i })
@@ -1185,6 +1502,7 @@ class Mesh(
     }
 
     private fun finishDownload(rec: FileRecord) {
+        if (rec.conv.startsWith("sync:")) { finishSync(rec); return }
         if (sha256(File(rec.path)) != rec.sha256) {
             log("file ${rec.name}: hash mismatch, restarting")
             rec.have = ByteArray(rec.have.size); rec.state = "offered"
@@ -1209,7 +1527,7 @@ class Mesh(
     // ================================================================ apps
 
     fun appEvent(conv: String, app: String, session: String, type: String, body: Any?, seq: Int = 0): AppEvent {
-        val ev = AppEvent(Nacl.randomBytes(16), session, app, conv, nodeId, seq, type, body, P.now())
+        val ev = AppEvent(Nacl.randomBytes(16), session, app, conv, me, seq, type, body, P.now())
         storage.saveAppEvent(ev)
         emit { it.onApp(ev) }
         val meta = LinkedHashMap<String, Any?>(mapOf("i" to ev.eventId.hex(), "a" to app, "s" to session, "y" to type, "b" to body, "q" to seq))
@@ -1312,11 +1630,15 @@ class Mesh(
 
     // ================================================================ introspection
 
-    fun pendingCount(dst: String? = null): Int = synchronized(lock) { outbox.values.count { dst == null || it.dst == dst } }
+    /** Queued packets (to a person: any of their devices). */
+    fun pendingCount(dst: String? = null): Int {
+        val devs = dst?.let { devicesOf(it).toSet() + it }
+        return synchronized(lock) { outbox.values.count { devs == null || it.dst in devs } }
+    }
 
     fun status(): Map<String, Any?> = synchronized(lock) {
         mapOf(
-            "node" to nodeId, "name" to name, "links" to linkInfo(),
+            "node" to nodeId, "me" to me, "devices" to devicesOf(me), "name" to name, "links" to linkInfo(),
             "routes" to routes.mapValues { (_, v) -> v.mapValues { it.value.first } },
             "reachable" to reachableSet.sorted(), "outbox" to outbox.size,
             "downloads" to downloads.mapValues { listOf(it.value.rec.haveCount, it.value.rec.chunks) },

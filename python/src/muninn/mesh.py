@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from nacl.public import PrivateKey
 
 from muninn import content as C
+from muninn import devices as D
 from muninn import protocol as P
 from muninn.crypto import BoxCache
 from muninn.storage import (
@@ -61,6 +62,9 @@ RELAY_MAX_AGE = 6 * 3600
 RELAY_MAX_ROWS = 5000
 TYPING_TTL = 6.0
 PING_APP = "~ping"  # K_RT app reserved for end-to-end round trips (Mesh.ping)
+LINK_CODE_TTL = 300.0
+LINK_CODE_TRIES = 5
+SYNC_MAX_FILES = 32 * 1024 * 1024  # attachments carried in a history sync
 
 # file transfer
 CHUNK_SIZE = 16000
@@ -264,6 +268,10 @@ class Mesh:
         self._serve_q: list[tuple[str, bytes, int]] = []  # (requester, file_id, idx)
         self.typing: dict[tuple[str, str], float] = {}  # (conv, node) -> until
         self._pings: dict[str, list] = {}  # session -> [event, sent, rtt]
+        # linked devices (muninn.devices): sets by account, who's who
+        self.devidx = D.Index(me=node_id)
+        self._link_code: list | None = None  # [code, expires, tries left]
+        self._link_pending: dict[str, float] = {}  # primary -> expires
         self.auto_download_max = AUTO_DOWNLOAD_MAX
         self.stats = defaultdict(int)
         self.blocked: set[str] = storage.blocked()
@@ -307,6 +315,18 @@ class Mesh:
             self.files[f.file_id] = f
             if f.state == "downloading":
                 self.downloads[f.file_id] = Download(f)
+        sets = {}
+        for key, val in self.storage.settings_with_prefix("devset:").items():
+            try:
+                ds = D.DeviceSet.from_json(val)
+                sets[ds.account] = ds
+            except Exception as e:
+                self._log(f"bad stored device set {key}: {e!r}")
+        left = {
+            k[len("devleft:") :]: int(v)
+            for k, v in self.storage.settings_with_prefix("devleft:").items()
+        }
+        self.devidx = D.Index(sets, left, self.node_id)
 
     def reload(self) -> None:
         """Pick up rows added to storage behind our back (backup import)."""
@@ -429,6 +449,8 @@ class Mesh:
             link.send(frame, PRIO_CONTROL)
         link.send(self._routes_frame_for(hello.node_id), PRIO_CONTROL)
         link.send(P.encode_addrs(self._link_addrs()), PRIO_CONTROL)
+        for ds in list(self.devidx.sets.values()):
+            link.send(P.encode_frame(P.T_DEVICES, ds.to_json().encode()), PRIO_CONTROL)
         if changed:
             self._gossip(changed, exclude=hello.node_id)
         # Tell our other neighbours where the newcomer can be reached: they
@@ -540,11 +562,11 @@ class Mesh:
                 ]
             self._send_body(others, C.Body(C.K_REPLACED, {"o": old, "n": new}))
             for g in groups:
-                if not g.left and self.node_id in g.members:
+                if not g.left and self.me in g.members:
                     with self.lock:
                         g.version += 1
                     self._save_group(g)
-                    self._send_body(g.members - {self.node_id}, self._group_body(g))
+                    self._send_body(self._expand(g.members), self._group_body(g))
         self._emit("peers")
 
     def connected(self) -> list[str]:
@@ -592,6 +614,8 @@ class Mesh:
             self._on_routes(link, P.decode_routes(payload))
         elif ftype == P.T_ADDRS:
             self._on_addrs(link, P.decode_addrs(payload))
+        elif ftype == P.T_DEVICES:
+            self._on_devices(payload, link.node_id)
         elif ftype == P.T_ROSTER:
             changed = []
             for e in P.decode_roster(payload):
@@ -617,8 +641,15 @@ class Mesh:
             else:
                 return []
         self.storage.upsert_peer(e.node_id, e.pubkey, peer.name, peer.name_ts)
+        if e.name_ts > self.name_ts and e.name and e.node_id in self.siblings():
+            self._adopt_name(e.name, e.name_ts)  # renamed on my other device
         self._emit("peers")
         return [P.RosterEntry(peer.node_id, peer.pubkey, peer.name, peer.name_ts)]
+
+    def _adopt_name(self, name: str, ts: int) -> None:
+        self.name, self.name_ts = name, ts
+        self.storage.set_display_name(name, ts)
+        self._gossip([P.RosterEntry(self.node_id, self.pubkey, name, ts)], None)
 
     def _roster_entries(self, exclude: str | None = None) -> list[P.RosterEntry]:
         with self.lock:
@@ -700,16 +731,21 @@ class Mesh:
             return [
                 p
                 for p in self.peers.values()
-                if not p.replaced_by and p.node_id not in self.hidden
+                if not p.replaced_by
+                and p.node_id not in self.hidden
+                and self.devidx.owner(p.node_id)
+                == p.node_id  # a person, not a 2nd device
+                and p.node_id != self.me
             ]
 
     def display_name(self, node_id: str) -> str:
-        if node_id == self.node_id:
+        if node_id in (self.node_id, self.me):
             return self.name or "me"
+        node_id = self.person(node_id)
         p = self.peers.get(node_id)
         if p is None:
             return node_id
-        label = p.display
+        label = p.override or self._person_name(node_id) or node_id
         if label != node_id and not p.override:
             with self.lock:
                 clash = (
@@ -725,10 +761,24 @@ class Mesh:
                 label += " ·" + node_id.replace(":", "")[-4:]
         return label
 
+    def _person_name(self, person: str) -> str:
+        """A linked person's name: the newest one set on any of their devices."""
+        with self.lock:
+            named = [self.peers[d] for d in self.devices_of(person) if d in self.peers]
+        best = max(named, key=lambda q: q.name_ts, default=None)
+        return best.name if best else ""
+
     def resolve(self, name_or_id: str) -> str | None:
+        """Name or id → person id."""
+        r = self._resolve_device(name_or_id)
+        return self.person(r) if r else None
+
+    def _resolve_device(self, name_or_id: str) -> str | None:
         up = name_or_id.upper()
-        if up in self.peers or up == self.node_id:
-            return up
+        if up == self.node_id or up == self.me:
+            return self.me
+        if up in self.peers:
+            return self.person(up)
         low = name_or_id.lower()
         with self.lock:
             peers = [p for p in self.peers.values() if not p.replaced_by]
@@ -1011,21 +1061,31 @@ class Mesh:
             item = self.outbox.pop(ack.packet_id, None)
         res = self.storage.outbox_ack(ack.packet_id)
         msg_id = item.msg_id if item else (res[1] if res else None)
-        if msg_id is not None and self.storage.mark_delivered(msg_id, ack.src):
+        who = self.person(ack.src)
+        if (
+            msg_id is not None
+            and who != self.me
+            and self.storage.mark_delivered(msg_id, who)
+        ):
             self._emit("update", msg_id)
 
     # ------------------------------------------------------------------ dispatch
 
-    def _conv_for(self, src: str, meta: dict) -> str:
+    def _conv_for(self, src: str, meta: dict) -> str | None:
+        who = self.person(src)
         g = meta.get("g")
         if not g:
-            return dm_conv(src)
+            if who != self.me:
+                return dm_conv(who)
+            # my other device: the DM carries the other person
+            t = self.person(str(meta.get("to") or ""))
+            return dm_conv(t) if t and t != self.me else None
         gid = bytes.fromhex(g)
         with self.lock:
             group = self.groups.get(gid)
         if group is None:
             # Message for a group we haven't heard about yet: placeholder, ask.
-            group = Group(gid, "group", 0, {src, self.node_id})
+            group = Group(gid, "group", 0, {who, self.me})
             with self.lock:
                 self.groups[gid] = group
             self._save_group(group)
@@ -1035,45 +1095,61 @@ class Mesh:
 
     def _dispatch(self, pkt: P.Packet, body: C.Body) -> None:
         k, m, src = body.kind, body.meta, pkt.src
-        if src in self.blocked:
+        who = self.person(src)  # the person behind that device
+        mine = who == self.me  # sent by another of my own devices
+        if src in self.blocked or who in self.blocked:
             return  # acked (so they stop retrying), never shown
-        if src in self.hidden and k in (C.K_TEXT, C.K_FILE):
-            self._set_hidden(self.hidden - {src})  # forgotten, but wrote again
+        if who in self.hidden and k in (C.K_TEXT, C.K_FILE):
+            self._set_hidden(self.hidden - {who})  # forgotten, but wrote again
         ts = min(pkt.ts, int(time.time()) + 60)  # sender clock (app event order)
         # Chat is ordered by arrival: a wrong clock on the sender's device or a
         # long wait at a relay can't bury a new message in the history.
         arrived = int(time.time())
         if k == C.K_TEXT:
+            conv = self._conv_for(src, m)
+            if conv is None:
+                return
             msg = StoredMessage(
                 msg_id=bytes.fromhex(m["i"]),
-                conv=self._conv_for(src, m),
-                sender=src,
+                conv=conv,
+                sender=who,
                 ts=arrived,
                 kind="text",
                 text=str(m.get("t", "")),
                 reply_to=bytes.fromhex(m["r"]) if m.get("r") else None,
             )
-            if self.storage.save_message(msg):
-                self.typing.pop((msg.conv, src), None)
+            saved = (
+                self.storage.save_message(msg, self.conv_people(conv), read=True)
+                if mine
+                else self.storage.save_message(msg)
+            )
+            if saved:
+                self.typing.pop((msg.conv, who), None)
                 self._emit("message", msg)
         elif k == C.K_FILE:
             self._on_file_offer(src, arrived, m, body.blob)
         elif k == C.K_REACT:
             mid = bytes.fromhex(m["m"])
-            self.storage.set_reaction(mid, src, str(m["e"])[:32], not m.get("x"))
+            self.storage.set_reaction(mid, who, str(m["e"])[:32], not m.get("x"))
             self._emit("update", mid)
         elif k == C.K_EDIT:
             mid = bytes.fromhex(m["m"])
-            if self.storage.edit_message(mid, src, str(m["t"])):
+            if self.storage.edit_message(mid, who, str(m["t"])):
                 self._emit("update", mid)
         elif k == C.K_DELETE:
             mid = bytes.fromhex(m["m"])
-            if self.storage.delete_message(mid, src):
+            if self.storage.delete_message(mid, who):
                 self._emit("update", mid)
         elif k == C.K_RECEIPT:
-            for h in m.get("r", []):
-                mid = bytes.fromhex(h)
-                if self.storage.mark_read(mid, src):
+            ids = [bytes.fromhex(h) for h in m.get("r", [])]
+            if mine:  # read on my other device
+                if self.storage.mark_read_ids(ids):
+                    self._emit("peers")
+                for mid in ids:
+                    self._emit("update", mid)
+                return
+            for mid in ids:
+                if self.storage.mark_read(mid, who):
                     self._emit("update", mid)
         elif k == C.K_GROUP:
             self._on_group_info(src, m)
@@ -1081,7 +1157,7 @@ class Mesh:
             gid = bytes.fromhex(m["g"])
             with self.lock:
                 g = self.groups.get(gid)
-            if g is not None and src in g.members and g.version > 0:
+            if g is not None and who in self._people(g.members) and g.version > 0:
                 self._send_body([src], self._group_body(g))
         elif k == C.K_CHUNK:
             self._on_chunk(src, m, body.blob)
@@ -1089,15 +1165,20 @@ class Mesh:
             self._on_file_req(src, m)
         elif k == C.K_TYPING:
             conv = self._conv_for(src, m)
-            self.typing[(conv, src)] = time.monotonic() + TYPING_TTL
-            self._emit("typing", conv, src)
+            if mine or conv is None:
+                return
+            self.typing[(conv, who)] = time.monotonic() + TYPING_TTL
+            self._emit("typing", conv, who)
         elif k == C.K_APP:
+            conv = self._conv_for(src, m)
+            if conv is None:
+                return
             ev = AppEvent(
                 bytes.fromhex(m["i"]),
                 str(m["s"]),
                 str(m["a"]),
-                self._conv_for(src, m),
-                src,
+                conv,
+                who,
                 int(m.get("q", 0)),
                 str(m["y"]),
                 m.get("b"),
@@ -1112,29 +1193,57 @@ class Mesh:
             same_name = p_old and p_new and (not p_old.name or p_old.name == p_new.name)
             if same_name and old not in self.links:
                 self._supersede(old, new, announce=False)
+        elif k == C.K_LINK:
+            self._on_link(src, m)
         elif k == C.K_RT:
             if m.get("a") == PING_APP:
                 self._on_ping(src, str(m.get("s")), m.get("b"), body.blob)
                 return
             self._emit(
-                "rt", src, str(m.get("a")), str(m.get("s")), m.get("b"), body.blob
+                "rt", who, str(m.get("a")), str(m.get("s")), m.get("b"), body.blob
             )
 
     # ------------------------------------------------------------------ chat API
 
-    def conv_members(self, conv: str) -> list[str]:
+    def conv_people(self, conv: str) -> list[str]:
+        """The other people in a conversation (person ids, not me)."""
         if conv.startswith("dm:"):
-            return [conv[3:]]
+            p = self.person(conv[3:])
+            return [] if p == self.me else [p]
         gid = conv_group_id(conv)
         with self.lock:
             g = self.groups.get(gid) if gid else None
         if g is None or g.left:
             return []
-        return [m for m in g.members if m != self.node_id]
+        return sorted(self._people(g.members) - {self.me})
+
+    def conv_members(self, conv: str) -> list[str]:
+        """Devices a conversation's bodies go to: every device of the other
+        people, plus my own other devices."""
+        if not conv.startswith("dm:"):
+            gid = conv_group_id(conv)
+            with self.lock:
+                g = self.groups.get(gid) if gid else None
+            if g is None or g.left:
+                return []
+        return self._expand(self.conv_people(conv))
+
+    def _expand(self, people) -> list[str]:
+        out: list[str] = []
+        for p in list(people) + [self.me]:
+            for d in self.devices_of(self.person(p)):
+                if d != self.node_id and d not in out:
+                    out.append(d)
+        return out
+
+    def _people(self, ids) -> set[str]:
+        return {self.person(i) for i in ids}
 
     def _conv_meta(self, conv: str) -> dict:
         gid = conv_group_id(conv)
-        return {"g": gid.hex()} if gid else {}
+        if gid:
+            return {"g": gid.hex()}
+        return {"to": self.person(conv[3:])}  # for my other devices
 
     def send_text(self, conv: str, text: str, reply_to: bytes | None = None) -> bytes:
         dsts = self.conv_members(conv)
@@ -1148,15 +1257,15 @@ class Mesh:
         if len(C.encode_body(body)) > 60000:
             raise P.FrameTooLarge("message too long")
         msg = StoredMessage(
-            msg_id, conv, self.node_id, int(time.time()), "text", text, reply_to
+            msg_id, conv, self.me, int(time.time()), "text", text, reply_to
         )
-        self.storage.save_message(msg, dsts)
+        self.storage.save_message(msg, self.conv_people(conv), read=True)
         self._emit("message", msg)
         self._send_body(dsts, body, msg_id)
         return msg_id
 
     def react(self, conv: str, msg_id: bytes, emoji: str, remove: bool = False) -> None:
-        self.storage.set_reaction(msg_id, self.node_id, emoji, not remove)
+        self.storage.set_reaction(msg_id, self.me, emoji, not remove)
         self._emit("update", msg_id)
         meta = {"m": msg_id.hex(), "e": emoji, **self._conv_meta(conv)}
         if remove:
@@ -1164,7 +1273,7 @@ class Mesh:
         self._send_body(self.conv_members(conv), C.Body(C.K_REACT, meta))
 
     def edit(self, conv: str, msg_id: bytes, text: str) -> None:
-        if self.storage.edit_message(msg_id, self.node_id, text):
+        if self.storage.edit_message(msg_id, self.me, text):
             self._emit("update", msg_id)
             self._send_body(
                 self.conv_members(conv),
@@ -1174,7 +1283,7 @@ class Mesh:
             )
 
     def delete(self, conv: str, msg_id: bytes) -> None:
-        if self.storage.delete_message(msg_id, self.node_id):
+        if self.storage.delete_message(msg_id, self.me):
             self._emit("update", msg_id)
             self._send_body(
                 self.conv_members(conv),
@@ -1185,13 +1294,19 @@ class Mesh:
         """Local user viewed conv: send read receipts to the senders."""
         by_sender: dict[str, list[str]] = defaultdict(list)
         for mid, sender in self.storage.mark_read_local(conv):
-            if sender != self.node_id:
+            if sender != self.me:
                 by_sender[sender].append(mid.hex())
+        sibs = self.siblings()
+        if sibs:  # my other devices mark them read too (even with receipts off)
+            ids = [h for v in by_sender.values() for h in v]
+            for i in range(0, len(ids), 500):
+                self._send_body(sibs, C.Body(C.K_RECEIPT, {"r": ids[i : i + 500]}))
         if not self.privacy("receipts"):
             return  # marked read here, but nobody is told
         for sender, ids in by_sender.items():
+            devs = [d for d in self.devices_of(sender) if d != self.node_id]
             for i in range(0, len(ids), 500):
-                self._send_body([sender], C.Body(C.K_RECEIPT, {"r": ids[i : i + 500]}))
+                self._send_body(devs, C.Body(C.K_RECEIPT, {"r": ids[i : i + 500]}))
 
     def privacy(self, what: str) -> bool:
         """Privacy switches: "receipts" (tell senders you read their
@@ -1204,8 +1319,10 @@ class Mesh:
     def send_typing(self, conv: str) -> None:
         if not self.privacy("typing"):
             return
+        sibs = set(self.siblings())
         self._send_body(
-            self.conv_members(conv), C.Body(C.K_TYPING, self._conv_meta(conv))
+            [d for d in self.conv_members(conv) if d not in sibs],
+            C.Body(C.K_TYPING, self._conv_meta(conv)),
         )
 
     def typing_in(self, conv: str) -> list[str]:
@@ -1221,7 +1338,9 @@ class Mesh:
     def _group_body(self, g: Group) -> C.Body:
         members = []
         for nid in sorted(g.members):
-            pk = self.pubkey if nid == self.node_id else self.peers[nid].pubkey
+            pk = self._pinned(nid)
+            if pk is None:
+                continue
             members.append([nid, pk.hex()])
         return C.Body(
             C.K_GROUP,
@@ -1235,24 +1354,22 @@ class Mesh:
 
     def _system(self, conv: str, text: str) -> None:
         msg = StoredMessage(
-            os.urandom(16), conv, self.node_id, int(time.time()), "system", text
+            os.urandom(16), conv, self.me, int(time.time()), "system", text
         )
         self.storage.save_message(msg)
         self._emit("message", msg)
 
     def create_group(self, name: str, members: list[str]) -> bytes:
-        members = [m for m in members if m != self.node_id]
         for m in members:
-            if m not in self.peers:
+            if m not in self.peers and m != self.me:
                 raise ValueError(f"unknown peer {m}")
-        g = Group(os.urandom(16), name, 1, set(members) | {self.node_id})
+        people = self._people(members) - {self.me}
+        g = Group(os.urandom(16), name, 1, people | {self.me})
         with self.lock:
             self.groups[g.group_id] = g
         self._save_group(g)
-        self._send_body(members, self._group_body(g))
-        self._system(
-            g.conv, f"{self.display_name(self.node_id)} created group “{name}”"
-        )
+        self._send_body(self._expand(people), self._group_body(g))
+        self._system(g.conv, f"{self.display_name(self.me)} created group “{name}”")
         self._emit("group", g.group_id)
         return g.group_id
 
@@ -1263,34 +1380,393 @@ class Mesh:
         add: list[str] | None = None,
         remove: list[str] | None = None,
     ) -> None:
-        add, remove = add or [], remove or []
+        adds = [self.person(a) for a in add or [] if a in self.peers]
+        rems = {self.person(x) for x in remove or []}
         with self.lock:
             g = self.groups[gid]
-            old_members = set(g.members)
+            old_members = self._people(g.members)
             g.version += 1
             if name:
                 g.name = name
-            g.members |= {a for a in add if a in self.peers}
-            g.members -= set(remove)
-            if self.node_id not in g.members:
+            g.members = (old_members | set(adds)) - rems
+            if self.me not in g.members:
                 g.left = True
         self._save_group(g)
-        self._send_body((old_members | g.members) - {self.node_id}, self._group_body(g))
+        self._send_body(self._expand(old_members | g.members), self._group_body(g))
         bits = []
         if name:
             bits.append(f"renamed the group to “{name}”")
-        if add:
-            bits.append("added " + ", ".join(self.display_name(a) for a in add))
-        removed = [r for r in remove if r != self.node_id]
+        if adds:
+            bits.append("added " + ", ".join(self.display_name(a) for a in adds))
+        removed = [r for r in rems if r != self.me]
         if removed:
             bits.append("removed " + ", ".join(self.display_name(r) for r in removed))
-        if self.node_id in remove:
+        if self.me in rems:
             bits.append("left")
-        self._system(g.conv, f"{self.display_name(self.node_id)} " + ", ".join(bits))
+        self._system(g.conv, f"{self.display_name(self.me)} " + ", ".join(bits))
         self._emit("group", gid)
 
     def leave_group(self, gid: bytes) -> None:
-        self.update_group(gid, remove=[self.node_id])
+        self.update_group(gid, remove=[self.me])
+
+    # ------------------------------------------------------------------ linked devices
+
+    @property
+    def me(self) -> str:
+        """My person id: the account I'm linked into, else my node id."""
+        return self.devidx.owner(self.node_id)
+
+    def person(self, node_id: str) -> str:
+        return self.devidx.owner(node_id) if node_id else node_id
+
+    def devices_of(self, person: str) -> list[str]:
+        return self.devidx.devices(person)
+
+    def siblings(self) -> list[str]:
+        """My other devices."""
+        return [d for d in self.devidx.devices(self.me) if d != self.node_id]
+
+    def device_label(self, device: str) -> str:
+        """Tell my devices apart (they share one name): name · id tail."""
+        tail = device.replace(":", "")[-4:]
+        if device == self.node_id:
+            return f"this device · {tail}"
+        p = self.peers.get(device)
+        return f"{(p.name if p else '') or 'device'} · {tail}"
+
+    def find_device(self, s: str) -> str | None:
+        """One of my devices by id, id tail or label."""
+        s = s.strip().lower().replace(":", "")
+        for d in self.devices_of(self.me):
+            if d.replace(":", "").lower() in (s,) or d.replace(
+                ":", ""
+            ).lower().endswith(s):
+                return d
+            if self.device_label(d).lower().startswith(s):
+                return d
+        return None
+
+    def person_hops(self, person: str) -> int | None:
+        """Nearest of a person's devices (1 = direct)."""
+        hs = [h for d in self.devices_of(person) if (h := self.hops(d)) is not None]
+        return min(hs) if hs else None
+
+    def person_reachable(self, person: str) -> bool:
+        return self.person_hops(person) is not None
+
+    def _pinned(self, node_id: str) -> bytes | None:
+        if node_id == self.node_id:
+            return self.pubkey
+        p = self.peers.get(node_id)
+        return p.pubkey if p else None
+
+    def _on_devices(self, payload: bytes, via: str | None) -> None:
+        try:
+            ds = D.DeviceSet.from_json(payload)
+        except Exception:
+            return
+        with self.lock:
+            if not self.devidx.newer(ds):
+                return
+        why = D.check(ds, self._pinned)
+        if why:
+            self._log(f"ignoring device set for {ds.account}: {why}")
+            return
+        self._install_set(ds, exclude=via)
+
+    def _install_set(self, ds: D.DeviceSet, exclude: str | None = None) -> None:
+        """A newer valid set: learn its devices, re-key history to persons,
+        flood it on, start syncing with any new device of mine."""
+        for e in ds.entries:
+            if e.node_id != self.node_id and e.node_id not in self.peers:
+                self._learn_peer(P.RosterEntry(e.node_id, e.pubkey, "", 0))
+        with self.lock:
+            if not self.devidx.newer(ds):
+                return
+            before_me, before_sibs = self.me, set(self.siblings())
+            sets = dict(self.devidx.sets)
+            sets[ds.account] = ds
+            self.devidx = D.Index(sets, self.devidx.left, self.node_id)
+        self.storage.set_setting("devset:" + ds.account, ds.to_json())
+        self._log(f"device set {ds.account} v{ds.version}: {ds.devices}")
+        frame = P.encode_frame(P.T_DEVICES, ds.to_json().encode())
+        self._broadcast(frame, exclude=exclude)
+        self._rekey()
+        new_sibs = set(self.siblings()) - before_sibs
+        if self.me != before_me:
+            self._log(f"I am now {self.me} (was {before_me})")
+        for sib in sorted(new_sibs):
+            threading.Thread(target=self._sync_to, args=(sib,), daemon=True).start()
+        self._emit("peers")
+        self._emit("devices")
+
+    def _rekey(self) -> None:
+        """Rows naming a device that belongs to someone (else) → that person."""
+        with self.lock:
+            mapping = {
+                d: self.devidx.owner(d)
+                for ds in self.devidx.sets.values()
+                for d in ds.devices
+                if self.devidx.owner(d) != d
+            }
+            for g in self.groups.values():
+                g.members = self._people(g.members)
+            for k in [k for k in self.typing if k[1] in mapping]:
+                self.typing.pop(k, None)
+        if mapping and self.storage.merge_ids(mapping):
+            with self.lock:
+                for f in self.files.values():
+                    f.sender = mapping.get(f.sender, f.sender)
+                    if f.conv.startswith("dm:") and f.conv[3:] in mapping:
+                        f.conv = dm_conv(mapping[f.conv[3:]])
+
+    def link_code(self) -> str:
+        """Start linking another device to me: a 6-digit code for 5 min."""
+        if self.me != self.node_id:
+            raise ValueError(
+                f"link from your first device ({self.display_name(self.me)})"
+            )
+        import secrets
+
+        code = f"{secrets.randbelow(10**6):06d}"
+        self._link_code = [code, time.monotonic() + LINK_CODE_TTL, LINK_CODE_TRIES]
+        return code
+
+    def link_to(self, target: str, code: str) -> None:
+        """Join `target`'s devices (they ran link_code and showed `code`)."""
+        prim = self.person(target)
+        if prim == self.me:
+            raise ValueError("that's already you")
+        if len(self.devices_of(self.me)) > 1:
+            raise ValueError("unlink this device's other devices first")
+        if prim not in self.peers:
+            raise ValueError("unknown device")
+        last = max(
+            (e.joined for d in self.devidx.sets.values() for e in d.entries), default=0
+        )
+        joined = max(int(time.time()), last + 1)
+        consent = D.make_consent(bytes(self.private_key), prim, self.node_id, joined)
+        self._link_pending[prim] = time.monotonic() + LINK_CODE_TTL
+        self._send_body(
+            [prim],
+            C.Body(
+                C.K_LINK,
+                {"o": "req", "c": code.strip(), "t": joined, "k": consent.hex()},
+            ),
+        )
+
+    def unlink(self, device: str) -> None:
+        """Primary: drop a device from my set. Other device: leave (the
+        primary confirms when reachable; we stop acting linked right away)."""
+        if device == self.node_id and self.me != self.node_id:
+            ds = self.devidx.sets.get(self.me)
+            e = ds.entry(self.node_id) if ds else None
+            prim = self.me
+            if e is not None:
+                with self.lock:
+                    left = dict(self.devidx.left)
+                    left[prim] = e.joined
+                    self.devidx = D.Index(self.devidx.sets, left, self.node_id)
+                self.storage.set_setting(f"devleft:{prim}", str(e.joined))
+            self._send_body([prim], C.Body(C.K_LINK, {"o": "leave"}))
+            self._emit("peers")
+            self._emit("devices")
+            return
+        if self.me != self.node_id:
+            raise ValueError(
+                f"only {self.display_name(self.me)}'s first device can unlink others"
+            )
+        self._drop_device(device)
+
+    def _drop_device(self, device: str) -> None:
+        cur = self.devidx.sets.get(self.node_id)
+        if cur is None or cur.entry(device) is None or device == self.node_id:
+            raise ValueError("not one of my linked devices")
+        ds = D.DeviceSet(
+            self.node_id,
+            cur.version + 1,
+            [e for e in cur.entries if e.node_id != device],
+        )
+        self._install_set(D.sign(ds, bytes(self.private_key)))
+        with self.lock:  # don't keep feeding it my mail
+            self.outbox = {k: v for k, v in self.outbox.items() if v.dst != device}
+
+    def _on_link(self, src: str, m: dict) -> None:
+        op = m.get("o")
+        if op == "req":
+            self._on_link_req(src, m)
+        elif op == "ok":
+            if self._link_pending.pop(src, 0) < time.monotonic():
+                return
+            try:
+                ds = D.DeviceSet.from_json(str(m["r"]))
+            except Exception:
+                return
+            if ds.account != src or ds.entry(self.node_id) is None:
+                return
+            why = D.check(ds, self._pinned)
+            if why:
+                self._log(f"link from {src}: {why}")
+                self._emit("link", "error", why)
+                return
+            with self.lock:  # joined again after leaving: forget the leave
+                left = {k: v for k, v in self.devidx.left.items() if k != src}
+                self.devidx = D.Index(self.devidx.sets, left, self.node_id)
+            self.storage.set_setting(f"devleft:{src}", "-1")
+            self._install_set(ds)
+            self._emit("link", "ok", src)
+        elif op == "no":
+            if self._link_pending.pop(src, None) is not None:
+                self._emit("link", "error", str(m.get("e", "refused")))
+        elif op == "leave":
+            cur = self.devidx.sets.get(self.node_id)
+            if cur is not None and cur.entry(src) is not None and src != self.node_id:
+                self._drop_device(src)
+
+    def _on_link_req(self, src: str, m: dict) -> None:
+        def no(why: str) -> None:
+            self._send_body([src], C.Body(C.K_LINK, {"o": "no", "e": why}))
+
+        lc = self._link_code
+        if self.me != self.node_id or lc is None or lc[1] < time.monotonic():
+            return no("no link code is showing on that device")
+        import hmac
+
+        if not hmac.compare_digest(str(m.get("c", "")), lc[0]):
+            lc[2] -= 1
+            if lc[2] <= 0:
+                self._link_code = None
+            return no("wrong code")
+        if len(self.devices_of(self.person(src))) > 1 and self.person(src) != self.me:
+            return no("that device is linked to someone else")
+        pk = self._pinned(src)
+        try:
+            joined, consent = int(m["t"]), bytes.fromhex(str(m["k"]))
+        except (KeyError, ValueError):
+            return no("bad request")
+        from muninn import xeddsa
+
+        if pk is None or not xeddsa.verify(
+            pk, D.consent_body(self.node_id, src, joined), consent
+        ):
+            return no("bad consent")
+        self._link_code = None
+        cur = self.devidx.sets.get(self.node_id)
+        entries = [e for e in (cur.entries if cur else []) if e.node_id != src]
+        if not any(e.node_id == self.node_id for e in entries):
+            entries.append(D.Entry(self.node_id, self.pubkey, 0, b""))
+        if len(entries) >= D.MAX_DEVICES:
+            return no("too many devices")
+        entries.append(D.Entry(src, pk, joined, consent))
+        ds = D.sign(
+            D.DeviceSet(self.node_id, (cur.version if cur else 0) + 1, entries),
+            bytes(self.private_key),
+        )
+        self._install_set(ds)
+        self._send_body([src], C.Body(C.K_LINK, {"o": "ok", "r": ds.to_json()}))
+        self._emit("link", "ok", src)
+
+    # --- history sync between my devices ---------------------------------------
+
+    def _sync_to(self, sib: str) -> None:
+        """Send my history to a newly linked device of mine (a backup file
+        over the normal chunked transfer; it merges, never duplicates)."""
+        from muninn import backup
+
+        try:
+            fid = os.urandom(16)
+            store = self.storage.files_dir / fid.hex()
+            store.mkdir(parents=True, exist_ok=True)
+            path = store / "history.zip"
+            backup.export(self.storage, path, max_files=SYNC_MAX_FILES)
+            data = path.read_bytes()
+            if len(data) > MAX_FILE_SIZE:
+                self._log("history too large to sync")
+                return
+            chunks = max(1, -(-len(data) // CHUNK_SIZE))
+            rec = FileRecord(
+                fid,
+                os.urandom(16),
+                "sync:" + sib,
+                self.me,
+                "history.zip",
+                "application/zip",
+                len(data),
+                hashlib.sha256(data).hexdigest(),
+                CHUNK_SIZE,
+                chunks,
+                str(path),
+                "complete",
+                bytearray(b"\xff" * (-(-chunks // 8))),
+            )
+            self.storage.save_file(rec)  # served like any file; never shown
+            with self.lock:
+                self.files[fid] = rec
+            meta = {
+                "i": rec.msg_id.hex(),
+                "f": fid.hex(),
+                "n": rec.name,
+                "mt": rec.mime,
+                "s": rec.size,
+                "h": rec.sha256,
+                "cs": CHUNK_SIZE,
+                "c": chunks,
+                "sync": 1,
+            }
+            self._send_body([sib], C.Body(C.K_FILE, meta))
+            self._log(f"offered history ({len(data)} bytes) to {sib}")
+        except Exception as e:
+            self._log(f"history sync to {sib}: {e!r}")
+
+    def _on_sync_offer(self, src: str, m: dict) -> None:
+        fid = bytes.fromhex(m["f"])
+        with self.lock:
+            if fid in self.files:
+                return
+            chunks = int(m["c"])
+            rec = FileRecord(
+                fid,
+                bytes.fromhex(m["i"]),
+                "sync:" + src,
+                self.me,
+                "history.zip",
+                "application/zip",
+                int(m["s"]),
+                str(m["h"]),
+                int(m["cs"]),
+                chunks,
+                "",
+                "offered",
+                bytearray(-(-chunks // 8)),
+            )
+            self.files[fid] = rec
+        self.download(fid)
+
+    def _finish_sync(self, rec: FileRecord) -> None:
+        from muninn import backup
+
+        h = hashlib.sha256(open(rec.path, "rb").read()).hexdigest()
+        with self.lock:
+            self.files.pop(rec.file_id, None)
+            self.downloads.pop(rec.file_id, None)
+        try:
+            if h != rec.sha256:
+                raise ValueError("hash mismatch")
+            sib = rec.conv[5:]
+            res = backup.import_(
+                self.storage, rec.path, allow_from={sib}, skip_system=True
+            )
+            self._log(f"merged history from {sib}: {res['added']}")
+            self._rekey()
+            self.reload()
+            self._emit("devices")
+        except Exception as e:
+            self._log(f"history sync from {rec.conv[5:]}: {e!r}")
+        finally:
+            self.storage.delete_file_record(rec.file_id)
+            import shutil
+
+            shutil.rmtree(os.path.dirname(rec.path), ignore_errors=True)
 
     # ------------------------------------------------------------------ forgetting
 
@@ -1313,7 +1789,7 @@ class Mesh:
         doomed = {m.msg_id for m in self.storage.load_history(conv, 1_000_000)}
         if gid is not None:
             g = self.groups.get(gid)
-            if g is not None and not g.left and self.node_id in g.members:
+            if g is not None and not g.left and self.me in g.members:
                 try:
                     self.leave_group(gid)
                 except Exception as e:
@@ -1338,18 +1814,23 @@ class Mesh:
         if they get in touch again — unless `block`, which also refuses
         their links and messages. Returns their radio addresses (so the
         transport can drop an OS-level Bluetooth pairing)."""
-        addrs = [a for n, a, _ in self.storage.load_transports() if n == node_id]
+        node_id = self.person(node_id)
+        devs = set(self.devices_of(node_id)) | {node_id}
+        addrs = [a for n, a, _ in self.storage.load_transports() if n in devs]
         if block:
-            self.blocked.add(node_id)
+            self.blocked |= devs
             self.storage.set_blocked(self.blocked)
-        self._set_hidden(self.hidden | {node_id})
+        self._set_hidden(self.hidden | devs)
         with self.lock:
-            link = self.links.get(node_id)
-            self.peers.pop(node_id, None)
-            self.outbox = {k: v for k, v in self.outbox.items() if v.dst != node_id}
-        if link is not None and block:
-            link.close()
-        self._drop_files(self.storage.forget_peer(node_id))
+            links = [self.links[d] for d in devs if d in self.links]
+            for d in devs:
+                self.peers.pop(d, None)
+            self.outbox = {k: v for k, v in self.outbox.items() if v.dst not in devs}
+        if block:
+            for link in links:
+                link.close()
+        for d in sorted(devs, key=lambda d: d != node_id):  # the person's chat first
+            self._drop_files(self.storage.forget_peer(d))
         self._log(f"forgot {node_id}{' (blocked)' if block else ''}")
         self._emit("peers")
         return addrs
@@ -1369,25 +1850,32 @@ class Mesh:
         members = {}
         for nid, pkhex in m["m"]:
             members[nid] = bytes.fromhex(pkhex)
+        sender = self.person(src)
         with self.lock:
             g = self.groups.get(gid)
             if g is not None and g.version >= version:
                 return
-            if g is not None and src not in g.members and g.version > 0:
+            if (
+                g is not None
+                and sender not in self._people(g.members)
+                and g.version > 0
+            ):
                 return  # only members may change a group
         for nid, pk in members.items():
             if nid != self.node_id and nid not in self.peers:
                 self._learn_peer(P.RosterEntry(nid, pk, "", 0))
         new = g is None or g.version == 0
         with self.lock:
-            prev_members = set(g.members) if g and g.version else set()
-            g = Group(gid, str(m["n"]), version, set(members))
-            g.left = self.node_id not in g.members
+            prev_members = self._people(g.members) if g and g.version else set()
+            g = Group(gid, str(m["n"]), version, self._people(members))
+            g.left = self.me not in g.members
             self.groups[gid] = g
         self._save_group(g)
-        who = self.display_name(src)
-        if new:
+        who = self.display_name(sender)
+        if new and sender != self.me:
             self._system(g.conv, f"{who} added you to “{g.name}”")
+        elif new:
+            self._system(g.conv, f"you created “{g.name}”")
         else:
             added = g.members - prev_members
             removed = prev_members - g.members
@@ -1424,6 +1912,7 @@ class Mesh:
         name = name or os.path.basename(path)
         file_id = os.urandom(16)
         msg_id = os.urandom(16)
+        people = self.conv_people(conv)
         store = self.storage.files_dir / file_id.hex()
         store.mkdir(parents=True, exist_ok=True)
         dest = store / _safe_name(name)
@@ -1433,7 +1922,7 @@ class Mesh:
             file_id,
             msg_id,
             conv,
-            self.node_id,
+            self.me,
             name,
             mime,
             len(data),
@@ -1467,16 +1956,16 @@ class Mesh:
         msg = StoredMessage(
             msg_id,
             conv,
-            self.node_id,
+            self.me,
             int(time.time()),
             "file",
             caption,
             reply_to,
-            meta={k: v for k, v in meta.items() if k not in ("i", "g")},
+            meta={k: v for k, v in meta.items() if k not in ("i", "g", "to")},
         )
         if thumb:
             msg.meta["thumb"] = _save_thumb(self.storage, file_id, thumb)
-        self.storage.save_message(msg, dsts)
+        self.storage.save_message(msg, people, read=True)
         self._emit("message", msg)
         self._send_body(dsts, C.Body(C.K_FILE, meta, thumb), msg_id)
         return msg_id
@@ -1484,31 +1973,44 @@ class Mesh:
     def _on_file_offer(self, src: str, ts: int, m: dict, thumb: bytes) -> None:
         file_id = bytes.fromhex(m["f"])
         msg_id = bytes.fromhex(m["i"])
-        conv = self._conv_for(src, m)
+        who = self.person(src)
         size = int(m["s"])
         chunks = int(m["c"])
         if size > MAX_FILE_SIZE or chunks > 100000:
             return
-        meta = {k: v for k, v in m.items() if k not in ("i", "g")}
+        if m.get("sync"):
+            if who == self.me and src != self.node_id:
+                self._on_sync_offer(src, m)
+            return
+        conv = self._conv_for(src, m)
+        if conv is None:
+            return
+        meta = {k: v for k, v in m.items() if k not in ("i", "g", "to")}
         if thumb:
             meta["thumb"] = _save_thumb(self.storage, file_id, thumb)
         msg = StoredMessage(
             msg_id,
             conv,
-            src,
+            who,
             ts,
             "file",
             str(m.get("t", "")),
             bytes.fromhex(m["r"]) if m.get("r") else None,
             meta=meta,
         )
-        if not self.storage.save_message(msg):
+        mine = who == self.me
+        saved = (
+            self.storage.save_message(msg, self.conv_people(conv), read=True)
+            if mine
+            else self.storage.save_message(msg)
+        )
+        if not saved:
             return
         rec = FileRecord(
             file_id,
             msg_id,
             conv,
-            src,
+            who,
             str(m["n"]),
             str(m.get("mt", "")),
             size,
@@ -1550,9 +2052,11 @@ class Mesh:
         return rec.have_count, rec.chunks, rec.state
 
     def _file_source(self, rec: FileRecord) -> str | None:
-        cands = [rec.sender] + [
-            m for m in self.conv_members(rec.conv) if m != rec.sender
-        ]
+        if rec.conv.startswith("sync:"):
+            cands = [rec.conv[5:]]
+        else:
+            cands = [d for d in self.devices_of(rec.sender) if d != self.node_id]
+            cands += [m for m in self.conv_members(rec.conv) if m not in cands]
         for c in cands:
             if self.reachable(c):
                 return c
@@ -1593,7 +2097,11 @@ class Mesh:
             rec = self.files.get(file_id)
             if rec is None or rec.state != "complete":
                 return
-            if src not in self.conv_members(rec.conv) and src != rec.sender:
+            who = self.person(src)
+            allowed = (
+                who == self.me or who == rec.sender or who in self.conv_people(rec.conv)
+            )
+            if not allowed:
                 return
             queued = set(self._serve_q)
             for i in m.get("w", [])[: FILE_WINDOW * 2]:
@@ -1660,6 +2168,9 @@ class Mesh:
         self._emit("file", file_id)
 
     def _finish_download(self, rec: FileRecord) -> None:
+        if rec.conv.startswith("sync:"):
+            self._finish_sync(rec)
+            return
         h = hashlib.sha256()
         with open(rec.path, "rb") as f:
             for block in iter(lambda: f.read(1 << 20), b""):
@@ -1690,7 +2201,7 @@ class Mesh:
             session,
             app,
             conv,
-            self.node_id,
+            self.me,
             seq,
             type_,
             body,
@@ -1840,13 +2351,17 @@ class Mesh:
     # ------------------------------------------------------------------ introspection
 
     def pending_count(self, dst: str | None = None) -> int:
+        """Queued packets (to a person: any of their devices)."""
+        devs = set(self.devices_of(dst)) | {dst} if dst else None
         with self.lock:
-            return sum(1 for i in self.outbox.values() if dst is None or i.dst == dst)
+            return sum(1 for i in self.outbox.values() if devs is None or i.dst in devs)
 
     def status(self) -> dict:
         with self.lock:
             return {
                 "node": self.node_id,
+                "me": self.me,
+                "devices": self.devices_of(self.me),
                 "name": self.name,
                 "links": self.link_info(),
                 "routes": {

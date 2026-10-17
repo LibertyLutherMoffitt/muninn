@@ -25,6 +25,7 @@ T_PONG = 0x03
 T_ROUTES = 0x04
 T_ROSTER = 0x05
 T_ADDRS = 0x06
+T_DEVICES = 0x07  # one linked-device set, JSON (muninn.devices)
 T_PACKET = 0x10
 T_ACK = 0x11
 

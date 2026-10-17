@@ -203,8 +203,13 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   work — phones dial the PC; verify, plus tray/notifications.
 
 ### 2.7 Backlog (only after everything else is done & polished)
-- [ ] **Linked devices ("same person")** — phone + laptop act as one contact.
-  Sketch:
+- [x] **Linked devices ("same person")** — phone + laptop act as one contact.
+  Done as designed in DESIGN.md "Linked devices" (primary-signed sets +
+  per-device consent, XEdDSA with the existing keys; persons everywhere;
+  fan-out incl. own devices; history sync as a backup over file transfer).
+  `:link`/`:unlink`/`:devices`, `/link…`, Android Settings → Linked devices.
+  Tests: tests/test_devices.py (11), interop both directions, Kotlin unit.
+  Original sketch:
   - Each device keeps its own node id + keypair. A *device set* record
     `{account: <primary node id>, devices: [ids], v, sig}` signed by every
     member's key (cross-signature = consent) is created by a LINK flow:

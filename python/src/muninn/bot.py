@@ -15,6 +15,7 @@ Behaviours:
 Control port commands (one JSON object per line, reply is one JSON line):
   {"cmd":"status"}  {"cmd":"send","to":"name|id","text":"…"}
   {"cmd":"group","name":"g","members":["a","b"]}  {"cmd":"gsend","group":"g","text":"…"}
+  {"cmd":"linkcode"}  {"cmd":"link","to":"name|id","code":"123456"}  {"cmd":"unlink","device":"id"}
   {"cmd":"history","conv":"dm:ID"}  {"cmd":"file","to":"name","path":"/x"}
   {"cmd":"game","to":"name","game":"tictactoe"}  {"cmd":"name","name":"new"}
 """
@@ -179,7 +180,7 @@ def main() -> None:
     gamebot = GameBot(reg) if a.play else None
 
     def on_message(m):
-        if m.sender == mesh.node_id or m.kind not in ("text", "file"):
+        if m.sender == mesh.me or m.kind not in ("text", "file"):
             return
         print(
             f"[{a.name}] {mesh.display_name(m.sender)} @ {m.conv}: {m.text}", flush=True
@@ -268,6 +269,14 @@ def start_control(node: Node, reg: GameRegistry, port: int) -> None:
             return {"session": reg.invite(dm_conv(peer(c["to"])), c["game"])}
         if cmd == "name":
             mesh.set_name(c["name"])
+            return {}
+        if cmd == "linkcode":
+            return {"code": mesh.link_code()}
+        if cmd == "link":
+            mesh.link_to(peer(c["to"]), str(c["code"]))
+            return {}
+        if cmd == "unlink":
+            mesh.unlink(c["device"])
             return {}
         raise ValueError(f"unknown cmd {cmd}")
 

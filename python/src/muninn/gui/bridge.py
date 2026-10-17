@@ -48,6 +48,7 @@ class ChatBridge(QObject):
     _sigFile = Signal(object)
     _sigTyping = Signal(str, str)
     _sigApp = Signal(object)
+    _sigLink = Signal(str, str)
     _sigRt = Signal(str, str, str, QVariant)
 
     peerChanged = Signal(str, bool)
@@ -117,22 +118,34 @@ class ChatBridge(QObject):
         self._sigFile.connect(self._on_file)
         self._sigTyping.connect(self._on_typing)
         self._sigApp.connect(self._on_app)
+        m.on("link", lambda what, detail: self._sigLink.emit(what, str(detail)))
+        m.on("devices", lambda: self._sigPeers.emit())
+        self._sigLink.connect(self._on_link)
         self._sigRt.connect(self._on_rt)
         self._peers.refresh()
 
     # ------------------------------------------------------------------ events
 
+    def _on_link(self, what: str, detail: str) -> None:
+        if what == "ok":
+            self.notify.emit(
+                f"linked with {self.mesh.device_label(detail)} — one person now; history is syncing"
+            )
+        else:
+            self.errorOccurred.emit(f"link: {detail}")
+        self._peers.refresh()
+
     def _on_message(self, m: StoredMessage) -> None:
         self._peers.update_conv(m.conv)
         if m.conv == self._active:
             self._msgs.append(m)
-            if m.sender == self.mesh.node_id:  # text, file or sticker we sent
+            if m.sender == self.mesh.me:  # text, file or sticker we sent
                 self.messageSent.emit()
-            if m.sender != self.mesh.node_id and self._window_focused():
+            if m.sender != self.mesh.me and self._window_focused():
                 self.mesh.mark_read(m.conv)
                 self._peers.update_conv(m.conv)
         if (
-            m.sender != self.mesh.node_id
+            m.sender != self.mesh.me
             and m.kind in ("text", "file")
             and not self.mesh.is_muted(m.conv)
         ):
@@ -175,7 +188,7 @@ class ChatBridge(QObject):
     def _on_app(self, ev: AppEvent) -> None:
         self.games.on_event(ev)
         self.gameEvent.emit(ev.session)
-        if ev.type == "invite" and ev.sender != self.mesh.node_id:
+        if ev.type == "invite" and ev.sender != self.mesh.me:
             info = self.games.session_info(ev.session)
             who = self.mesh.display_name(ev.sender)
             notifications.notify(who, f"🎮 invites you to {info.get('name', ev.app)}")
@@ -222,7 +235,11 @@ class ChatBridge(QObject):
     @Property(int, notify=statusChanged)
     def reachablePeerCount(self) -> int:
         return len(
-            [p for p in self.mesh.active_peers() if self.mesh.reachable(p.node_id)]
+            [
+                p
+                for p in self.mesh.active_peers()
+                if self.mesh.person_reachable(p.node_id)
+            ]
         )
 
     @Property(str, constant=True)
@@ -251,12 +268,12 @@ class ChatBridge(QObject):
             names = [
                 self.mesh.display_name(x)
                 for x in sorted(g.members)
-                if x != self.mesh.node_id
+                if x != self.mesh.me
             ]
             here = sum(
                 1
                 for x in g.members
-                if x != self.mesh.node_id and self.mesh.reachable(x)
+                if x != self.mesh.me and self.mesh.person_reachable(x)
             )
             return f"{here}/{len(names)} in range · " + ", ".join(names)
         return ""
@@ -473,7 +490,7 @@ class ChatBridge(QObject):
         m = self.mesh.storage.get_message(bytes.fromhex(msg_id))
         if m is None:
             return
-        mine = self.mesh.node_id in m.reactions.get(emo, [])
+        mine = self.mesh.me in m.reactions.get(emo, [])
         self.mesh.react(self._active, m.msg_id, emo, remove=mine)
 
     @Slot(str)
@@ -804,7 +821,7 @@ class ChatBridge(QObject):
         return ""
 
     def _score_text(self, g: dict) -> str:
-        me = self.mesh.node_id
+        me = self.mesh.me
         parts = [
             f"{'you' if n == me else self.mesh.display_name(n)} {w}"
             for n, w in sorted(g["wins"].items(), key=lambda kv: -kv[1])
@@ -923,6 +940,9 @@ class ChatBridge(QObject):
         "photos",
         "theme",
         "ping",
+        "link",
+        "unlink",
+        "devices",
         "export",
         "import",
         "sharegame",
@@ -1005,6 +1025,29 @@ class ChatBridge(QObject):
             ":reconnect [fast|saver]",
             "retry known people now / how eagerly to redial them",
         ),
+        (":theme [dark|light|system]", "colour theme (bare :theme toggles)"),
+        (
+            ":photos [compressed|original]",
+            "shrink photos before sending (default) or send them as they are",
+        ),
+        (
+            ":export [file] [pw=…]",
+            "back up your chats (pw= also saves your identity, encrypted)",
+        ),
+        (
+            ":import <file> [pw=…]",
+            "add chats from a backup (pw= restores your identity on a fresh install)",
+        ),
+        (
+            ":ping [name] [n]",
+            "round-trip time to someone, relays included (default: this chat)",
+        ),
+        (
+            ":link [device code]",
+            "use several devices as one person (no args: show a code)",
+        ),
+        (":unlink [device|me]", "remove a linked device (me: this one leaves)"),
+        (":devices", "your linked devices"),
         (":whoami", "your name, id, radio and scan mode"),
         (":history [N]", "load more history"),
         (":next / :prev", "cycle conversations (Ctrl-N / Ctrl-P)"),
@@ -1347,6 +1390,76 @@ class ChatBridge(QObject):
                     )
                 ],
             )
+        elif head == "link":
+            mesh = self.mesh
+            try:
+                if not args:
+                    code = mesh.link_code()
+                    self._info(
+                        "Link another device",
+                        [
+                            (f"code  {code[:3]} {code[3:]}", "valid for 5 minutes"),
+                            (
+                                "on your other desktop",
+                                f":link {mesh.name or mesh.node_id} {code}",
+                            ),
+                            (
+                                "on your phone",
+                                "Settings → Linked devices → Join, pick this device, enter the code",
+                            ),
+                            (
+                                "then",
+                                "both act as one person: chats, groups and games follow you",
+                            ),
+                        ],
+                    )
+                elif len(args) >= 2:
+                    target = self._resolve_or_err(" ".join(args[:-1]))
+                    if target:
+                        mesh.link_to(target, args[-1])
+                        self.notify.emit(f"asking {mesh.display_name(target)}…")
+                else:
+                    self.errorOccurred.emit(
+                        "usage: :link  (show a code)  or  :link <device> <code>"
+                    )
+            except ValueError as e:
+                self.errorOccurred.emit(f"link: {e}")
+        elif head == "unlink":
+            mesh = self.mesh
+            try:
+                if not args or args[0] in ("me", "this"):
+                    if mesh.me == mesh.node_id:
+                        self.errorOccurred.emit(
+                            "usage: :unlink <device>  (see :devices)"
+                        )
+                    else:
+                        mesh.unlink(mesh.node_id)
+                        self.notify.emit("this device is on its own again")
+                else:
+                    d = mesh.find_device(" ".join(args))
+                    if d is None:
+                        self.errorOccurred.emit("no such device (see :devices)")
+                    else:
+                        mesh.unlink(d)
+                        self.notify.emit(f"unlinked {mesh.device_label(d)}")
+            except ValueError as e:
+                self.errorOccurred.emit(f"unlink: {e}")
+        elif head == "devices":
+            mesh = self.mesh
+            devs = mesh.devices_of(mesh.me)
+            if len(devs) < 2:
+                self._info(
+                    "Linked devices",
+                    [("just this one", "':link' shows a code to add another")],
+                )
+            else:
+                rows = []
+                for d in devs:
+                    sub = "first device" if d == mesh.me else "linked"
+                    if d != mesh.node_id:
+                        sub += " · " + self.node._device_presence(d)["text"]
+                    rows.append((mesh.device_label(d), sub))
+                self._info("Linked devices", rows)
         elif head == "ping":
             dst = (
                 self._resolve_or_err(args[0])
@@ -1518,7 +1631,7 @@ class ChatBridge(QObject):
             q = " ".join(args)
             rows = []
             for m in mesh.storage.search(q, 60):
-                who = "you" if m.sender == mesh.node_id else mesh.display_name(m.sender)
+                who = "you" if m.sender == mesh.me else mesh.display_name(m.sender)
                 when = time.strftime("%d %b %H:%M", time.localtime(m.ts))
                 text = m.text or m.meta.get("n", "")
                 rows.append(
@@ -1580,7 +1693,7 @@ class ChatBridge(QObject):
             g = mesh.groups[gid]
             rows = []
             for nid in sorted(g.members, key=lambda n: mesh.display_name(n).lower()):
-                if nid == mesh.node_id:
+                if nid == mesh.me:
                     rows.append(("you", "member", ""))
                     continue
                 rows.append(
@@ -1768,11 +1881,11 @@ class ChatBridge(QObject):
         out = []
         for p in self.mesh.active_peers():
             nid = p.node_id
-            h = self.mesh.hops(nid)
+            h = self.mesh.person_hops(nid)
             out.append(
                 {
                     "mac": nid,
-                    "name": p.display,
+                    "name": self.mesh.display_name(nid),
                     "status": "direct" if h == 1 else ("relay" if h else "offline"),
                 }
             )

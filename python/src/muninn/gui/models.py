@@ -90,7 +90,7 @@ class PeerListModel(QAbstractListModel):
                 return "(deleted)", msg.ts
             if msg.kind == "file":
                 return "📎 " + (msg.text or msg.meta.get("n", "file")), msg.ts
-            who = "you: " if msg.sender == m.node_id and msg.kind != "system" else ""
+            who = "you: " if msg.sender == m.me and msg.kind != "system" else ""
             return who + msg.text.replace("\n", " "), msg.ts
 
         peers = m.active_peers()
@@ -98,7 +98,7 @@ class PeerListModel(QAbstractListModel):
             groups = list(m.groups.values())
         for p in peers:
             conv = dm_conv(p.node_id)
-            h = m.hops(p.node_id)
+            h = m.person_hops(p.node_id)
             pres = self.presence(p.node_id) if self.presence else None
             status = (
                 pres["state"]
@@ -117,7 +117,7 @@ class PeerListModel(QAbstractListModel):
             items.append(
                 {
                     "mac": p.node_id,
-                    "displayName": p.display,
+                    "displayName": m.display_name(p.node_id),
                     "convId": conv,
                     "convType": "dm",
                     "lastMessage": text,
@@ -133,7 +133,7 @@ class PeerListModel(QAbstractListModel):
         for g in groups:
             conv = g.conv
             text, ts = preview(conv)
-            online = sum(1 for x in g.members if x != m.node_id and m.reachable(x))
+            online = sum(1 for x in g.members if x != m.me and m.person_reachable(x))
             items.append(
                 {
                     "mac": g.group_id.hex(),
@@ -231,7 +231,7 @@ class MessageListModel(QAbstractListModel):
 
     def _row(self, m: StoredMessage, prev: StoredMessage | None) -> dict:
         mesh = self.mesh
-        me = mesh.node_id
+        me = mesh.me
         reply_name = reply_text = ""
         if m.reply_to:
             o = mesh.storage.get_message(m.reply_to)

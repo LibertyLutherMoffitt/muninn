@@ -91,7 +91,14 @@ interface Storage {
     fun saveGroup(groupId: ByteArray, name: String, version: Int, members: List<String>, left: Boolean)
     fun loadGroups(): List<GroupRow>
 
-    fun saveMessage(m: StoredMessage, recipients: List<String> = emptyList()): Boolean
+    /** Outgoing (has recipients) is saved read; [read] overrides (own message from another of my devices). */
+    fun saveMessage(m: StoredMessage, recipients: List<String> = emptyList(), read: Boolean? = null): Boolean
+    /** Another of my devices read these: mark read here. Returns convs touched. */
+    fun markReadIds(ids: List<ByteArray>): List<String>
+    /** Linked devices: rows naming a device as a person → that person (see mesh.py). */
+    fun mergeIds(mapping: Map<String, String>): Int
+    fun deleteFileRecord(fileId: ByteArray)
+    fun settingsWithPrefix(prefix: String): Map<String, String>
     fun markDelivered(msgId: ByteArray, nodeId: String): Boolean
     fun markRead(msgId: ByteArray, nodeId: String): Boolean
     fun markReadLocal(conv: String): List<Pair<ByteArray, String>>
@@ -226,12 +233,53 @@ class MemStorage(override val filesDir: File) : Storage {
         return m.copy(status = HashMap(st), reactions = re)
     }
 
-    override fun saveMessage(m: StoredMessage, recipients: List<String>) = synchronized(lock) {
+    override fun saveMessage(m: StoredMessage, recipients: List<String>, read: Boolean?) = synchronized(lock) {
         if (messages.containsKey(m.idHex)) return@synchronized false
-        messages[m.idHex] = m.copy(readLocal = recipients.isNotEmpty())
+        messages[m.idHex] = m.copy(readLocal = read ?: recipients.isNotEmpty())
         if (recipients.isNotEmpty()) this.recipients[m.idHex] = recipients.associateWith { "sent" }.toMutableMap()
         true
     }
+    override fun markReadIds(ids: List<ByteArray>) = synchronized(lock) {
+        val convs = sortedSetOf<String>()
+        for (id in ids) {
+            val m = messages[id.hex()] ?: continue
+            if (!m.readLocal) { messages[id.hex()] = m.copy(readLocal = true); convs.add(m.conv) }
+        }
+        convs.toList()
+    }
+
+    override fun mergeIds(mapping: Map<String, String>): Int = synchronized(lock) {
+        var n = 0
+        fun conv(c: String) = if (c.startsWith("dm:") && mapping[c.substring(3)] != null) "dm:" + mapping[c.substring(3)] else c
+        for ((k, m) in messages.entries.toList()) {
+            val x = m.copy(conv = conv(m.conv), sender = mapping[m.sender] ?: m.sender)
+            if (x != m) { messages[k] = x; n++ }
+        }
+        for (r in recipients.values) for ((old, new) in mapping) r.remove(old)?.let { r.putIfAbsent(new, it); n++ }
+        for (l in reactions.values) {
+            val mapped = l.map { (node, e) -> (mapping[node] ?: node) to e }.distinct()
+            if (mapped != l) { l.clear(); l.addAll(mapped); n++ }
+        }
+        for ((k, g) in groups.entries.toList()) {
+            val ms = g.members.map { mapping[it] ?: it }.distinct()
+            if (ms != g.members) { groups[k] = g.copy(members = ms); n++ }
+        }
+        for ((k, ev) in appEvents.entries.toList()) {
+            val s = mapping[ev.sender] ?: ev.sender; val c = conv(ev.conv)
+            if (s != ev.sender || c != ev.conv) { appEvents[k] = AppEvent(ev.eventId, ev.session, ev.app, c, s, ev.seq, ev.type, ev.body, ev.ts); n++ }
+        }
+        for ((k, f) in files.entries.toList()) {
+            val s = mapping[f.sender] ?: f.sender; val c = conv(f.conv)
+            if (s != f.sender || c != f.conv) {
+                files[k] = FileRecord(f.fileId, f.msgId, c, s, f.name, f.mime, f.size, f.sha256, f.chunkSize, f.chunks, f.path, f.state, f.have); n++
+            }
+        }
+        n
+    }
+
+    override fun deleteFileRecord(fileId: ByteArray) = synchronized(lock) { files.remove(fileId.hex()); Unit }
+    override fun settingsWithPrefix(prefix: String) = synchronized(lock) { settings.filterKeys { it.startsWith(prefix) } }
+
     override fun markDelivered(msgId: ByteArray, nodeId: String) = synchronized(lock) {
         val r = recipients[msgId.hex()] ?: return@synchronized false
         if (r[nodeId] == "sent") { r[nodeId] = "delivered"; true } else false

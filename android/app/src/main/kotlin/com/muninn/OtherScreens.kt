@@ -91,9 +91,92 @@ fun scoreLine(g: com.muninn.core.GameHost.Score?): String {
     g ?: return ""
     val m = Runtime.node?.mesh
     val parts = g.wins.entries.sortedByDescending { it.value }
-        .map { (n, w) -> (if (n == m?.nodeId) "you" else m?.displayName(n) ?: n) + " $w" }.toMutableList()
+        .map { (n, w) -> (if (n == m?.me) "you" else m?.displayName(n) ?: n) + " $w" }.toMutableList()
     if (g.draws > 0) parts += "${g.draws} draw" + if (g.draws > 1) "s" else ""
     return parts.joinToString(" · ")
+}
+
+// ---------------------------------------------------------------- linked devices
+
+/** "this device · 3B21", "Ann · 48EE": my devices share one name. */
+fun deviceLabel(m: com.muninn.core.Mesh, d: String): String {
+    val tail = d.replace(":", "").takeLast(4)
+    if (d == m.nodeId) return "This phone · $tail"
+    val name = synchronized(m.lock) { m.peers[d]?.name }.orEmpty().ifEmpty { "device" }
+    return "$name · $tail"
+}
+
+@Composable
+fun LinkedDevicesCard() {
+    val tick by Runtime.tick.collectAsState()
+    val scope = rememberCoroutineScope()
+    val node = Runtime.node ?: return
+    val m = node.mesh
+    var code by remember { mutableStateOf<String?>(null) }
+    var joining by remember { mutableStateOf(false) }
+    var target by remember { mutableStateOf<String?>(null) }
+    var entered by remember { mutableStateOf("") }
+    val devs = remember(tick) { m.devicesOf(m.me) }
+    val primary = m.me == m.nodeId
+    LaunchedEffect(code) { if (code != null) { delay(300_000); code = null } }
+    LaunchedEffect(devs.size) { if (devs.size > 1) { code = null; joining = false } }
+    Text("Linked devices", style = MaterialTheme.typography.titleSmall)
+    Text("Use this phone and your laptop as one person: chats, rooms and games follow you to both, and friends see " +
+        "a single contact. History is copied over when you link.",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (devs.size > 1) for (d in devs) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(deviceLabel(m, d))
+            Text((if (d == m.me) "first device" else "linked") + if (d != m.nodeId) " · " + node.devicePresence(d).text else "",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (primary && d != m.nodeId) TextButton(onClick = {
+            scope.launch(Dispatchers.IO) { runCatching { m.unlink(d) }.onFailure { Runtime.toast("Unlink: ${it.message}") } }
+        }) { Text("Unlink") }
+        if (!primary && d == m.nodeId) TextButton(onClick = {
+            scope.launch(Dispatchers.IO) { m.unlink(m.nodeId); Runtime.toast("This phone is on its own again") }
+        }) { Text("Leave") }
+    }
+    val c = code
+    when {
+        c != null -> Column {
+            Text("${c.take(3)} ${c.drop(3)}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("On your other device: Join, pick “${m.name.ifEmpty { "this phone" }}”, enter the code. " +
+                "Desktop: :link ${m.name.ifEmpty { m.nodeId }} $c — valid 5 minutes.",
+                style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { code = null }) { Text("Done") }
+        }
+        joining -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Which of your devices? (it shows the code)", style = MaterialTheme.typography.bodySmall)
+            val people = remember(tick) { m.activePeers().map { it.nodeId to m.displayName(it.nodeId) }.sortedBy { it.second.lowercase() } }
+            if (people.isEmpty()) Text("Nobody nearby yet — connect to your other device first (Nearby).",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            for ((id, name) in people) Row(Modifier.fillMaxWidth().clickable { target = id }.padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.RadioButton(selected = target == id, onClick = { target = id })
+                Text(name)
+            }
+            OutlinedTextField(entered, { entered = it.filter(Char::isDigit).take(6) }, singleLine = true,
+                label = { Text("6-digit code") }, modifier = Modifier.fillMaxWidth())
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { joining = false }) { Text("Cancel") }
+                Button(enabled = target != null && entered.length == 6, onClick = {
+                    val t = target!!; val k = entered
+                    scope.launch(Dispatchers.IO) {
+                        runCatching { m.linkTo(t, k) }
+                            .onSuccess { Runtime.toast("Asking ${m.displayName(t)}…") }
+                            .onFailure { Runtime.toast("Link: ${it.message}") }
+                    }
+                }) { Text("Join") }
+            }
+        }
+        devs.size < 2 || primary -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (primary) OutlinedButton(onClick = {
+                runCatching { m.linkCode() }.onSuccess { code = it }.onFailure { Runtime.toast("Link: ${it.message}") }
+            }) { Text("Link another device") }
+            if (devs.size < 2) OutlinedButton(onClick = { joining = true; entered = ""; target = null }) { Text("Join…") }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- backup
@@ -479,13 +562,13 @@ private fun PeerChecklist(selected: Set<String>, exclude: Set<String> = emptySet
     val peers by produceState(emptyList<Pair<String, String>>(), tick) {
         value = withContext(Dispatchers.IO) {
             val m = Runtime.node?.mesh ?: return@withContext emptyList()
-            m.activePeers().map { it.nodeId to it.display }.filter { it.first !in exclude }.sortedBy { it.second.lowercase() }
+            m.activePeers().map { it.nodeId to m.displayName(it.nodeId) }.filter { it.first !in exclude }.sortedBy { it.second.lowercase() }
         }
     }
     if (peers.isEmpty()) Text("You don't know anyone yet — connect to someone first.", Modifier.padding(16.dp))
     LazyColumn {
         items(peers, key = { it.first }) { (id, name) ->
-            val reach = Runtime.node?.mesh?.reachable(id) == true
+            val reach = Runtime.node?.mesh?.personReachable(id) == true
             Row(Modifier.fillMaxWidth().clickable { onToggle(id) }.padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = id in selected, onCheckedChange = { onToggle(id) })
@@ -558,8 +641,8 @@ fun GroupInfoScreen(conv: String) {
                 LazyColumn(Modifier.weight(1f)) {
                     items(members) { id ->
                         val m = Runtime.node?.mesh
-                        val me = id == Runtime.node?.nodeId
-                        val h = m?.hops(id)
+                        val me = id == m?.me
+                        val h = m?.personHops(id)
                         Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                             Avatar(m?.displayName(id) ?: id, if (me) "direct" else when { h == 1 -> "direct"; h != null -> "relay"; else -> "offline" }, 34)
                             Spacer(Modifier.width(10.dp))
@@ -625,6 +708,8 @@ fun SettingsScreen() {
                 }
                 Switch(checked = fullPhotos, onCheckedChange = { fullPhotos = it; p.edit().putBoolean("photo_original", it).apply() })
             }
+            HorizontalDivider()
+            LinkedDevicesCard()
             HorizontalDivider()
             BackupCard()
             HorizontalDivider()
@@ -829,7 +914,7 @@ fun SearchScreen() {
             LazyColumn {
                 items(results, key = { it.idHex }) { m ->
                     val mesh = Runtime.node?.mesh
-                    val who = if (m.sender == Runtime.node?.nodeId) "You" else mesh?.displayName(m.sender) ?: ""
+                    val who = if (m.sender == Runtime.node?.mesh?.me) "You" else mesh?.displayName(m.sender) ?: ""
                     Column(Modifier.fillMaxWidth().clickable { Nav.go(Screen.Chat(m.conv)) }.padding(horizontal = 16.dp, vertical = 8.dp)) {
                         Text("${Runtime.convTitle(m.conv)} · ${timeLabel(m.ts)}", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)

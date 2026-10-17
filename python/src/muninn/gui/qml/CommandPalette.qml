@@ -332,6 +332,8 @@ Rectangle {
         { icon: "≡",  label: ":list",     sub: "list conversations",               action: "cmd", convId: "", cmd: "list" },
         { icon: "●",  label: ":peers",    sub: "show direct + relay peers",        action: "cmd", convId: "", cmd: "peers" },
         { icon: "○",  label: ":known",    sub: "show every known peer",            action: "cmd", convId: "", cmd: "known" },
+        { icon: "🔗", label: ":link",     sub: "link another device (shows a code)", action: "cmd", convId: "", cmd: "link" },
+        { icon: "💻", label: ":devices",  sub: "your linked devices",              action: "cmd", convId: "", cmd: "devices" },
         { icon: "↻",  label: ":next",     sub: "next conversation (Ctrl-N)",       action: "cmd", convId: "", cmd: "next" },
         { icon: "↺",  label: ":prev",     sub: "previous conversation (Ctrl-P)",   action: "cmd", convId: "", cmd: "prev" },
         { icon: "✎",  label: ":nick",     sub: "set your display name",            action: "cmd", convId: "", cmd: "nick " },

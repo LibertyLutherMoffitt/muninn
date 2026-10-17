@@ -50,6 +50,43 @@ tied to a Bluetooth address (Android hides its own; laptops change adapters).
 Keys are pinned on first contact. A reinstall (same radio address, same name,
 new identity) is detected and the conversation migrated.
 
+### Linked devices ("same person")
+
+A laptop and a phone can act as one person. Each device keeps its own node id
+and keypair (routing, ACKs and encryption stay per device); on top sits a
+**device set**: `{account, version, devices}` where the account id is the
+node id of the *primary* (the device the set was created on). The primary
+signs the set; every other device signs a one-time *consent* to join that
+account ("muninn-join", account, its id, join time). Both are XEdDSA
+signatures made with the device's X25519 identity key, so peers verify them
+against keys they already pinned — nobody can add someone else's device to an
+account, and only the primary can change the set. Sets travel as a link frame
+(DEVICES) and flood the mesh like the roster.
+
+Everyone then speaks in *persons*: `person(device)` = the account the device
+belongs to (itself if none). Stored history, senders, receipts, reactions,
+group members and game players are person ids; when a set arrives, rows that
+named a member device are rewritten to the account (like a reinstall
+migration), so earlier separate chats with the laptop and the phone become one.
+Sending fans out at the last moment: a message to a person goes to every one
+of their devices, *and* to the sender's own other devices (a DM carries `to`,
+the other person, so a sibling files it under the right chat). Delivered =
+any device of that person ACKed; read = any device read it. Siblings mirror
+read marks (receipts to siblings are always sent, even with read receipts
+off), see their own messages as "you", and can edit/delete/react on each
+other's behalf because the sender is the person. A new sibling first receives
+each other device's history as a backup file over the normal file transfer;
+after that, fan-out keeps them in step (offline devices catch up through the
+outbox like anyone else).
+
+Linking: on the primary (or a device on its own), `:link` shows a 6-digit
+code for 5 minutes; on the other device `:link <name> <code>` sends a LINK
+request (encrypted to the primary) carrying its consent. The primary checks
+the code (5 tries), adds the device, signs the new version and floods it.
+Unlinking: the primary publishes a version without the device; a device can
+ask to leave, and stops treating itself as linked immediately. Losing the
+primary means the set can't change any more (out of scope — keep it).
+
 ### Links
 
 Any reliable byte stream. HELLO exchanges id, key and name; PING keeps the

@@ -325,6 +325,73 @@ class Storage:
             for r in rows
         ]
 
+    def delete_file_record(self, file_id: bytes) -> None:
+        self._x("DELETE FROM files WHERE file_id = ?", (file_id,))
+
+    def settings_with_prefix(self, prefix: str) -> dict[str, str]:
+        return {
+            r[0]: r[1]
+            for r in self._q(
+                "SELECT key, value FROM settings WHERE substr(key, 1, ?) = ?",
+                (len(prefix), prefix),
+            )
+        }
+
+    def merge_ids(self, mapping: dict[str, str]) -> int:
+        """Linked devices: rows that name a device as a person (chats,
+        senders, receipts, reactions, group members, game moves, files) are
+        rewritten to the person that device belongs to. Returns rows changed."""
+        n = 0
+        with self._lock:
+            c = self._conn
+            c.execute("BEGIN")
+            try:
+                for old, new in mapping.items():
+                    if old == new:
+                        continue
+                    for sql, args in (
+                        (
+                            "UPDATE messages SET conv = ? WHERE conv = ?",
+                            ("dm:" + new, "dm:" + old),
+                        ),
+                        ("UPDATE messages SET sender = ? WHERE sender = ?", (new, old)),
+                        (
+                            "UPDATE OR IGNORE recipients SET node_id = ? WHERE node_id = ?",
+                            (new, old),
+                        ),
+                        (
+                            "UPDATE OR IGNORE reactions SET node_id = ? WHERE node_id = ?",
+                            (new, old),
+                        ),
+                        (
+                            "UPDATE OR IGNORE group_members SET node_id = ? WHERE node_id = ?",
+                            (new, old),
+                        ),
+                        (
+                            "UPDATE app_events SET sender = ? WHERE sender = ?",
+                            (new, old),
+                        ),
+                        (
+                            "UPDATE app_events SET conv = ? WHERE conv = ?",
+                            ("dm:" + new, "dm:" + old),
+                        ),
+                        ("UPDATE files SET sender = ? WHERE sender = ?", (new, old)),
+                        (
+                            "UPDATE files SET conv = ? WHERE conv = ?",
+                            ("dm:" + new, "dm:" + old),
+                        ),
+                    ):
+                        n += c.execute(sql, args).rowcount
+                    # leftovers that collided with an existing row (same msg,
+                    # both devices) are duplicates now
+                    for t in ("recipients", "reactions", "group_members"):
+                        c.execute(f"DELETE FROM {t} WHERE node_id = ?", (old,))
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
+        return n
+
     # --- backup (backup.py) ------------------------------------------------------
 
     def export_rows(self, table: str, cols: list[str]) -> list[dict]:
@@ -499,8 +566,12 @@ class Storage:
 
     # --- messages -------------------------------------------------------------
 
-    def save_message(self, m: StoredMessage, recipients: Sequence[str] = ()) -> bool:
-        """Insert a message. Returns False if msg_id already existed."""
+    def save_message(
+        self, m: StoredMessage, recipients: Sequence[str] = (), read: bool | None = None
+    ) -> bool:
+        """Insert a message. Returns False if msg_id already existed. Outgoing
+        (has recipients) is read; `read` overrides (own message from another
+        of my devices)."""
         with self._lock:
             c = self._conn
             c.execute("BEGIN")
@@ -517,7 +588,7 @@ class Storage:
                         m.text,
                         m.reply_to,
                         json.dumps(m.meta) if m.meta else None,
-                        1 if recipients else 0,
+                        1 if (recipients if read is None else read) else 0,
                     ),
                 )
                 inserted = cur.rowcount > 0
@@ -564,6 +635,18 @@ class Storage:
         )
         self._x("UPDATE messages SET read_local = 1 WHERE conv = ?", (conv,))
         return [(bytes(r[0]), r[1]) for r in rows]
+
+    def mark_read_ids(self, ids: Sequence[bytes]) -> list[str]:
+        """Another of my devices read these: mark read here. Returns convs."""
+        convs = set()
+        for mid in ids:
+            rows = self._q(
+                "SELECT conv FROM messages WHERE msg_id = ? AND read_local = 0", (mid,)
+            )
+            if rows:
+                self._x("UPDATE messages SET read_local = 1 WHERE msg_id = ?", (mid,))
+                convs.add(rows[0][0])
+        return sorted(convs)
 
     def unread_counts(self) -> dict[str, int]:
         return {

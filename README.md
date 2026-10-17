@@ -29,6 +29,10 @@ appears. Everything is end-to-end encrypted.
   tic-tac-toe and real-time pong — any game is one JavaScript file, and the
   code travels with the invite, so the other side doesn't need it installed
 - presence: *connected* / *via a relay* / *nearby, not connecting* / *last seen*
+- linked devices: your phone and laptop act as one person (`:link` shows a
+  code, the other device joins); chats, rooms and games follow you to both
+- backup and restore (`:export` / Settings → Backup), photos shrunk before
+  sending, light and dark themes
 - survives flaky links, app restarts, reinstalls and people walking down the
   aisle; a good Bluetooth citizen (never pairs with or prompts strangers'
   devices, never touches headsets or watches)

@@ -15,6 +15,7 @@ object P {
     const val T_ROUTES: Int = 0x04
     const val T_ROSTER: Int = 0x05
     const val T_ADDRS: Int = 0x06
+    const val T_DEVICES: Int = 0x07 // one linked-device set, JSON (Devices.kt)
     const val T_PACKET: Int = 0x10
     const val T_ACK: Int = 0x11
 
@@ -251,8 +252,9 @@ object Body {
     const val TYPING = 12
     const val GROUP_REQ = 13
     const val REPLACED = 14
+    const val LINK = 15
 
-    val RELIABLE = setOf(TEXT, REACT, EDIT, DELETE, FILE, GROUP, RECEIPT, APP, REPLACED)
+    val RELIABLE = setOf(TEXT, REACT, EDIT, DELETE, FILE, GROUP, RECEIPT, APP, REPLACED, LINK)
 
     class B(val kind: Int, val meta: Map<String, Any?> = emptyMap(), val blob: ByteArray = ByteArray(0)) {
         val reliable get() = kind in RELIABLE

@@ -126,7 +126,18 @@ class Node(
 
     data class Presence(val state: String, val text: String, val hops: Int)
 
-    fun presence(node: String): Presence {
+    /** What the UI should say about a person (a linked person: their best-placed device). */
+    fun presence(id: String): Presence {
+        val devs = mesh.devicesOf(mesh.person(id))
+        if (devs.size < 2) return devicePresence(id)
+        val order = mapOf("direct" to 0, "relay" to 1, "nearby" to 2, "offline" to 3)
+        val best = devs.map { devicePresence(it) }.minWith(compareBy({ order[it.state] }, { if (it.hops == 0) 99 else it.hops }))
+        if (best.state != "offline") return best
+        val last = synchronized(mesh.lock) { devs.mapNotNull { mesh.peers[it]?.lastSeen }.maxOrNull() } ?: 0
+        return Presence("offline", if (last > 0) "last seen ${ago(last)}" else "not seen yet", 0)
+    }
+
+    fun devicePresence(node: String): Presence {
         val h = mesh.hops(node)
         if (h == 1) return Presence("direct", "connected directly", 1)
         if (h != null) return Presence("relay", "in range via ${mesh.displayName(mesh.nextHop(node) ?: "")} · $h hops", h)

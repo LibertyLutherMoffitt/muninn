@@ -313,3 +313,104 @@ def test_ping_both_ways_through_a_relay(lab, jvm):
     assert sum(r is not None for r in rtts) >= 3, rtts
     krtts = k("ping", to=a.node_id, count=3)["rtt_ms"]
     assert sum(r is not None for r in krtts) >= 2, krtts
+
+
+def _kt_reachable_all(k, ids):
+    return all(k.reachable(i) for i in ids)
+
+
+def test_linked_devices_python_laptop_kotlin_phone(lab, jvm, tmp_path):
+    """Ann's laptop (Python, first device) + Ann's phone (Kotlin) act as one
+    person to bob (Python): link, fan-out both ways, mirrored own messages,
+    read marks, and history sync in both directions."""
+    lap = lab.node("lap", (0, 0))
+    bob = lab.node("bob", (1, 0))
+    phone = jvm("phone", (0, 1))
+    wait_until(lambda: _kt_reachable_all(phone, [lap.node_id, bob.node_id]), 40)
+    wait_until(
+        lambda: lap.mesh.reachable(phone.node_id) and bob.mesh.reachable(phone.node_id),
+        40,
+    )
+    # history from before linking, on each side
+    bob.mesh.send_text(dm_conv(lap.node_id), "laptop history")
+    phone("send", to=bob.node_id, text="phone history")
+    wait_until(lambda: "phone history" in py_texts(bob, dm_conv(phone.node_id)), 20)
+
+    code = lap.mesh.link_code()
+    phone("link", to=lap.node_id, code=code)
+    wait_until(lambda: phone("status")["me"] == lap.node_id, 30)
+    assert lap.mesh.siblings() == [phone.node_id]
+    wait_until(lambda: bob.mesh.person(phone.node_id) == lap.node_id, 20)
+    # bob now has one chat with Ann containing both histories
+    wait_until(
+        lambda: (
+            {"laptop history", "phone history"}
+            <= set(py_texts(bob, dm_conv(lap.node_id)))
+        ),
+        20,
+    )
+    # history synced both ways (Python zip → Kotlin, Kotlin zip → Python)
+    wait_until(lambda: "laptop history" in phone.texts(dm_conv(bob.node_id)), 40)
+    wait_until(lambda: "phone history" in py_texts(lap, dm_conv(bob.node_id)), 40)
+
+    # bob → Ann reaches both devices
+    bob.mesh.send_text(dm_conv(lap.node_id), "hi both")
+    wait_until(lambda: "hi both" in phone.texts(dm_conv(bob.node_id)), 20)
+    wait_until(lambda: "hi both" in py_texts(lap, dm_conv(bob.node_id)), 20)
+    # phone replies: bob sees Ann, the laptop sees its own message
+    phone("send", to=bob.node_id, text="from the phone")
+    wait_until(lambda: "from the phone" in py_texts(bob, dm_conv(lap.node_id)), 20)
+    m = next(
+        x
+        for x in bob.storage.load_history(dm_conv(lap.node_id), 100)
+        if x.text == "from the phone"
+    )
+    assert m.sender == lap.node_id
+    wait_until(lambda: "from the phone" in py_texts(lap, dm_conv(bob.node_id)), 20)
+    own = next(
+        x
+        for x in lap.storage.load_history(dm_conv(bob.node_id), 100)
+        if x.text == "from the phone"
+    )
+    assert own.sender == lap.mesh.me
+    # laptop → bob mirrors to the phone as "me"
+    lap.mesh.send_text(dm_conv(bob.node_id), "from the laptop")
+    wait_until(lambda: "from the laptop" in phone.texts(dm_conv(bob.node_id)), 20)
+    hist = phone("history", conv=dm_conv(bob.node_id), n=100)
+    assert (
+        next(h for h in hist if h["text"] == "from the laptop")["sender"] == lap.node_id
+    )
+    # a group made by bob includes both of Ann's devices
+    gid = bob.mesh.create_group("trip", [lap.node_id])
+    bob.mesh.send_text(group_conv(gid), "group hello")
+    wait_until(lambda: "group hello" in phone.texts(group_conv(gid)), 20)
+    phone("gsend", group="trip", text="phone in group")
+    wait_until(lambda: "phone in group" in py_texts(bob, group_conv(gid)), 20)
+    wait_until(lambda: "phone in group" in py_texts(lap, group_conv(gid)), 20)
+    # unlink from the laptop: the phone is itself again
+    lap.mesh.unlink(phone.node_id)
+    wait_until(lambda: phone("status")["me"] == phone.node_id, 20)
+    wait_until(lambda: bob.mesh.person(phone.node_id) == phone.node_id, 20)
+
+
+def test_linked_devices_kotlin_primary_python_secondary(lab, jvm):
+    """The other way round: the phone (Kotlin) is the first device."""
+    phone = jvm("phone", (0, 0))
+    lap = lab.node("lap", (1, 0))
+    bob = lab.node("bob", (0, 1))
+    wait_until(lambda: _kt_reachable_all(phone, [lap.node_id, bob.node_id]), 40)
+    wait_until(lambda: lap.mesh.reachable(bob.node_id), 40)
+    code = phone("linkcode")["code"]
+    lap.mesh.link_to(phone.node_id, code)
+    wait_until(lambda: lap.mesh.me == phone.node_id, 30)
+    wait_until(lambda: bob.mesh.person(lap.node_id) == phone.node_id, 20)
+    bob.mesh.send_text(dm_conv(phone.node_id), "to ann")
+    wait_until(lambda: "to ann" in py_texts(lap, dm_conv(bob.node_id)), 20)
+    wait_until(lambda: "to ann" in phone.texts(dm_conv(bob.node_id)), 20)
+    lap.mesh.send_text(dm_conv(bob.node_id), "laptop says")
+    wait_until(lambda: "laptop says" in py_texts(bob, dm_conv(phone.node_id)), 20)
+    wait_until(lambda: "laptop says" in phone.texts(dm_conv(bob.node_id)), 20)
+    # the laptop leaves on its own
+    lap.mesh.unlink(lap.node_id)
+    wait_until(lambda: phone("status")["devices"] == [phone.node_id], 20)
+    wait_until(lambda: bob.mesh.person(lap.node_id) == lap.node_id, 20)

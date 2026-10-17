@@ -53,10 +53,10 @@ object Notifications {
         val node = Runtime.node ?: return
         val mesh = node.mesh
         val conv = m.conv
-        val unread = mesh.storage.loadHistory(conv, 50).filter { !it.readLocal && it.sender != node.nodeId && (it.kind == "text" || it.kind == "file") }
+        val unread = mesh.storage.loadHistory(conv, 50).filter { !it.readLocal && it.sender != node.mesh.me && (it.kind == "text" || it.kind == "file") }
             .takeLast(8)
         if (unread.isEmpty()) return
-        val me = Person.Builder().setName("You").setKey(node.nodeId).build()
+        val me = Person.Builder().setName("You").setKey(node.mesh.me).build()
         val style = Notification.MessagingStyle(me)
         if (conv.startsWith("group:")) { style.conversationTitle = Runtime.convTitle(conv); style.isGroupConversation = true }
         for (u in unread) {

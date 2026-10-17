@@ -84,6 +84,9 @@ HELP = """\
 /photos [compressed|original]  shrink photos before sending (default)
 /privacy [receipts|typing] [on|off]   send read receipts / typing indicators
 /ping <name> [n]           round-trip time to someone (relays included)
+/link [device code]        use several devices as one person (no args: show a code)
+/unlink [device|me]        remove a linked device (me: this one leaves)
+/devices                   your linked devices
 /doctor                    check everything before a flight
 /unpair                    remove leftover Bluetooth pairings with Muninn people
 /update  /version          install the newest standalone build / show version
@@ -114,6 +117,14 @@ class ChatUI:
         m.on("typing", self._on_typing)
         self._last_peers: set[str] = set()
         m.on("peers", self._on_peers)
+        m.on(
+            "link",
+            lambda what, d: self.out(
+                f"  linked with {m.device_label(d)} — one person now; history is syncing"
+                if what == "ok"
+                else f"! link: {d}"
+            ),
+        )
 
     # --- display -------------------------------------------------------------
 
@@ -148,9 +159,7 @@ class ChatUI:
 
     def _fmt(self, m: StoredMessage) -> str:
         t = time.strftime("%H:%M", time.localtime(m.ts))
-        who = (
-            "you" if m.sender == self.mesh.node_id else self.mesh.display_name(m.sender)
-        )
+        who = "you" if m.sender == self.mesh.me else self.mesh.display_name(m.sender)
         ref = self._ref(m.msg_id)
         if m.kind == "system":
             return f"  {t} · {m.text}"
@@ -176,7 +185,7 @@ class ChatUI:
             if orig:
                 reply = f"↪ {self.mesh.display_name(orig.sender)}: {orig.text[:30]!r} "
         ticks = ""
-        if m.sender == self.mesh.node_id:
+        if m.sender == self.mesh.me:
             ticks = {"sent": " ◌", "delivered": " ✓", "read": " ✓✓"}[m.state]
         reacts = ""
         if m.reactions:
@@ -190,9 +199,9 @@ class ChatUI:
     def _on_message(self, m: StoredMessage) -> None:
         if m.conv == self.conv:
             self.out(self._fmt(m))
-            if m.sender != self.mesh.node_id:
+            if m.sender != self.mesh.me:
                 self.mesh.mark_read(m.conv)
-        elif m.sender != self.mesh.node_id:
+        elif m.sender != self.mesh.me:
             prev = m.text if m.kind != "file" else "📎 " + m.meta.get("n", "file")
             self.out(
                 f"  ✉ {self._conv_name(m.conv)} · {self.mesh.display_name(m.sender)}: {prev[:60]}"
@@ -207,7 +216,7 @@ class ChatUI:
         have, total, state = self.mesh.file_progress(file_id)
         if state == "complete":
             rec = self.mesh.files.get(file_id)
-            if rec and rec.sender != self.mesh.node_id:
+            if rec and rec.sender != self.mesh.me:
                 self.out(f"  📎 saved {rec.name} → {rec.path}")
 
     def _on_typing(self, conv: str, node: str) -> None:
@@ -364,7 +373,7 @@ class ChatUI:
             if mid := self._msg(args[0]):
                 e = emoji.expand(args[1])
                 m = mesh.storage.get_message(mid)
-                mine = m and mesh.node_id in m.reactions.get(e, [])
+                mine = m and mesh.me in m.reactions.get(e, [])
                 mesh.react(self.conv, mid, e, remove=bool(mine))
         elif cmd == "edit" and len(args) >= 2 and self._need_conv():
             if mid := self._msg(args[0]):
@@ -410,7 +419,7 @@ class ChatUI:
                 self.out(f"! no sticker {args[0]} — /sticker to list")
         elif cmd == "search" and args:
             for m in mesh.storage.search(" ".join(args), 30):
-                who = "you" if m.sender == mesh.node_id else mesh.display_name(m.sender)
+                who = "you" if m.sender == mesh.me else mesh.display_name(m.sender)
                 t = time.strftime("%d %b %H:%M", time.localtime(m.ts))
                 self.out(
                     f"  {self._conv_name(m.conv)} · {t} · {who}: {(m.text or m.meta.get('n', ''))[:80]}"
@@ -495,6 +504,55 @@ class ChatUI:
                 ("typing", "typing indicator"),
             ):
                 self.out(f"  {label:17} {'on' if mesh.privacy(w) else 'off'}")
+        elif cmd == "link":
+            mesh = self.mesh
+            try:
+                if not args:
+                    code = mesh.link_code()
+                    self.out(
+                        f"  link code {code[:3]} {code[3:]} (5 minutes). On your other device:"
+                    )
+                    self.out(
+                        f"    /link {mesh.name or mesh.node_id} {code}   (phone: Settings → Linked devices → Join)"
+                    )
+                elif len(args) >= 2:
+                    target = self._peer(" ".join(args[:-1]))
+                    if target:
+                        mesh.link_to(target, args[-1])
+                        self.out(f"  asking {mesh.display_name(target)}…")
+                else:
+                    self.out("! usage: /link  (show a code)  or  /link <device> <code>")
+            except ValueError as e:
+                self.out(f"! link: {e}")
+        elif cmd == "unlink":
+            mesh = self.mesh
+            try:
+                if not args or args[0] in ("me", "this"):
+                    if mesh.me == mesh.node_id:
+                        self.out("! usage: /unlink <device>  (see /devices)")
+                    else:
+                        mesh.unlink(mesh.node_id)
+                        self.out("  this device is on its own again")
+                else:
+                    d = mesh.find_device(" ".join(args))
+                    if d is None:
+                        self.out("! no such device (see /devices)")
+                    else:
+                        mesh.unlink(d)
+                        self.out(f"  unlinked {mesh.device_label(d)}")
+            except ValueError as e:
+                self.out(f"! unlink: {e}")
+        elif cmd == "devices":
+            mesh = self.mesh
+            devs = mesh.devices_of(mesh.me)
+            if len(devs) < 2:
+                self.out("  just this device (/link shows a code to add another)")
+            for d in devs if len(devs) > 1 else []:
+                where = (
+                    "" if d == mesh.node_id else self.node._device_presence(d)["text"]
+                )
+                first = "first device" if d == mesh.me else "linked"
+                self.out(f"  {mesh.device_label(d):24} {first:13} {where}")
         elif cmd == "ping":
             if not args:
                 self.out("! usage: /ping <name> [count]")
@@ -557,7 +615,7 @@ class ChatUI:
             from muninn.gamehost import GameRegistry
 
             board = GameRegistry(self.node).scores(self.conv or None)
-            me = mesh.node_id
+            me = mesh.me
             for g in board:
                 wins = " · ".join(
                     f"{'you' if n == me else mesh.display_name(n)} {w}"
@@ -594,10 +652,8 @@ class ChatUI:
                 for nid in sorted(
                     g.members, key=lambda n: mesh.display_name(n).lower()
                 ):
-                    who = "you" if nid == mesh.node_id else mesh.display_name(nid)
-                    where = (
-                        "" if nid == mesh.node_id else self.node.presence(nid)["text"]
-                    )
+                    who = "you" if nid == mesh.me else mesh.display_name(nid)
+                    where = "" if nid == mesh.me else self.node.presence(nid)["text"]
                     self.out(f"  {who:20} {where}")
         elif cmd == "find":
             if args and args[0] == "off":

@@ -72,7 +72,7 @@ object Runtime {
         n.mesh.addListener(object : MeshListener {
             override fun onMessage(m: StoredMessage) {
                 bump()
-                if (m.sender != n.nodeId && (m.kind == "text" || m.kind == "file")) {
+                if (m.sender != n.mesh.me && (m.kind == "text" || m.kind == "file")) {
                     if (foreground && visibleConv == m.conv) n.mesh.markRead(m.conv)
                     else if (!n.mesh.isMuted(m.conv)) Notifications.message(app, m)
                 }
@@ -82,9 +82,14 @@ object Runtime {
             override fun onGroup(groupId: ByteArray) = bump()
             override fun onFile(fileId: ByteArray) = bump()
             override fun onTyping(conv: String, node: String) = bump()
+            override fun onDevices(what: String, detail: String) {
+                bump()
+                if (what == "ok") Runtime.toast("Linked with ${deviceLabel(n.mesh, detail)} — one person now; copying history")
+                else if (what == "error") Runtime.toast("Link: $detail")
+            }
             override fun onApp(ev: AppEvent) {
                 bump()
-                if (ev.type == "invite" && ev.sender != n.nodeId) Notifications.gameInvite(app, ev, gh)
+                if (ev.type == "invite" && ev.sender != n.mesh.me) Notifications.gameInvite(app, ev, gh)
             }
             override fun onRt(src: String, app: String, session: String, body: Any?, blob: ByteArray) {
                 _rt.value = Triple(session, src, body)
@@ -122,7 +127,7 @@ object Runtime {
         val unread = m.storage.unreadCounts()
         fun preview(conv: String): Pair<String, Long> {
             val msg = last[conv] ?: return "" to 0L
-            val who = if (msg.sender == n.nodeId && msg.kind != "system") "You: " else ""
+            val who = if (msg.sender == m.me && msg.kind != "system") "You: " else ""
             return when {
                 msg.deleted -> "message deleted" to msg.ts
                 msg.kind == "file" -> who + "📎 " + (msg.text.ifEmpty { msg.meta["n"] as? String ?: "file" }) to msg.ts
@@ -137,13 +142,13 @@ object Runtime {
             val pres = n.presence(p.nodeId)
             val (text, ts) = preview(conv)
             if (ts == 0L && pres.state == "offline" && (unread[conv] ?: 0) == 0) continue
-            out.add(ConvItem(conv, p.display, false, text, if (ts > 0) ts else p.lastSeen, unread[conv] ?: 0, pres.state,
+            out.add(ConvItem(conv, m.displayName(p.nodeId), false, text, if (ts > 0) ts else p.lastSeen, unread[conv] ?: 0, pres.state,
                 m.typingIn(conv).isNotEmpty(), m.pendingCount(p.nodeId), pres.text))
         }
         for (g in groups) {
             val (text, ts) = preview(g.conv)
-            val members = synchronized(m.lock) { g.members.toList() }.filter { it != n.nodeId }
-            val here = members.count { m.reachable(it) }
+            val members = synchronized(m.lock) { g.members.toList() }.filter { it != m.me }
+            val here = members.count { m.personReachable(it) }
             out.add(ConvItem(g.conv, g.name + if (g.left) " (left)" else "", true, text, ts, unread[g.conv] ?: 0, "group",
                 m.typingIn(g.conv).isNotEmpty(), 0, "$here/${members.size} in range"))
         }
@@ -168,7 +173,7 @@ object Runtime {
         }
         val gid = convGroupId(conv) ?: return ""
         val g = synchronized(m.lock) { m.groups[gid.hex()] } ?: return ""
-        val members = synchronized(m.lock) { g.members.toList() }.filter { it != n.nodeId }
-        return "${members.count { m.reachable(it) }}/${members.size} in range · " + members.joinToString { m.displayName(it) }
+        val members = synchronized(m.lock) { g.members.toList() }.filter { it != m.me }
+        return "${members.count { m.personReachable(it) }}/${members.size} in range · " + members.joinToString { m.displayName(it) }
     }
 }

@@ -96,7 +96,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
         val start = evs.firstOrNull { it.type == "start" && it.sender == creator }
         val mx = b.int("max", 2); val mn = b.int("min", 2)
         val joined = ArrayList<String>().apply { add(creator); joins.forEach { if (it.sender !in this) add(it.sender) } }
-        val players = if (start != null) ((start.body as? Map<String, Any?>)?.list("players") ?: emptyList()).map { it as String }.filter { it in joined }
+        val players = if (start != null) ((start.body as? Map<String, Any?>)?.list("players") ?: emptyList()).map { mesh.person(it as String) }.filter { it in joined }
                       else joined.take(mx)
         // an unsent invite stays unsent everywhere (see gamehost.py)
         val withdrawn = start == null && evs.any { it.type == "withdraw" && it.sender == creator }
@@ -108,7 +108,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
             val rest = players.filter { it != ended[0].sender }
             result = mapOf("winners" to (if (rest.size == 1) rest else emptyList()), "text" to "resigned")
         }
-        val me = mesh.nodeId
+        val me = mesh.me
         val status = when {
             withdrawn -> "invite withdrawn"
             ended.isNotEmpty() -> "${mesh.displayName(ended[0].sender)} " + if (ended[0].type == "resign") "resigned" else "ended the game"
@@ -164,7 +164,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
     fun withdraw(session: String) {
         val info = sessionInfo(session)
         if (info.isEmpty()) throw IllegalArgumentException("unknown game session")
-        if (info["creator"] != mesh.nodeId) throw IllegalArgumentException("only whoever sent the invite can unsend it")
+        if (info["creator"] != mesh.me) throw IllegalArgumentException("only whoever sent the invite can unsend it")
         if (info["started"] == true) throw IllegalArgumentException("the game already started — resign instead")
         act(session, "withdraw", emptyMap<String, Any?>())
     }
@@ -186,7 +186,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
     fun rt(session: String, body: Any?) {
         val info = sessionInfo(session)
         if (info.isEmpty()) return
-        val to = mesh.convMembers(info.str("conv")).filter { it != mesh.nodeId } // watchers see it live too
+        val to = mesh.convMembers(info.str("conv")) // watchers (and my other devices) see it live too
         mesh.rtSend(info.str("conv"), info.str("app"), session, body, to = to)
     }
 }

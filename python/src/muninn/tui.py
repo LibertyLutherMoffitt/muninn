@@ -125,10 +125,10 @@ class Tui(ChatUI):
         self.events.put("note")
 
     def _on_message(self, m: StoredMessage) -> None:
-        if m.conv == self.conv and m.sender != self.mesh.node_id:
+        if m.conv == self.conv and m.sender != self.mesh.me:
             self.mesh.mark_read(m.conv)
         elif (
-            m.sender != self.mesh.node_id
+            m.sender != self.mesh.me
             and m.kind in ("text", "file")
             and not self.mesh.is_muted(m.conv)
         ):
@@ -306,15 +306,15 @@ class Tui(ChatUI):
         g = self.mesh.groups.get(gid or b"")
         if not g:
             return "group", ""
-        others = [x for x in g.members if x != self.mesh.node_id]
-        here = sum(1 for x in others if self.mesh.reachable(x))
+        others = [x for x in g.members if x != self.mesh.me]
+        here = sum(1 for x in others if self.mesh.person_reachable(x))
         return g.name, f"{here}/{len(others)} in range"
 
     def msg_lines(
         self, m: StoredMessage, width: int, selected: bool
     ) -> list[tuple[str, int]]:
         C = curses.color_pair
-        me = m.sender == self.mesh.node_id
+        me = m.sender == self.mesh.me
         t = time.strftime("%H:%M", time.localtime(m.ts))
         sel = curses.A_REVERSE if selected else 0
         if m.kind == "system":
@@ -326,7 +326,7 @@ class Tui(ChatUI):
             if o:
                 ow = (
                     "you"
-                    if o.sender == self.mesh.node_id
+                    if o.sender == self.mesh.me
                     else self.mesh.display_name(o.sender)
                 )
                 lines.append(
@@ -415,7 +415,9 @@ class Tui(ChatUI):
         C = curses.color_pair
         direct = len(self.mesh.connected())
         relayed = sum(
-            1 for p in self.mesh.active_peers() if (self.mesh.hops(p.node_id) or 0) > 1
+            1
+            for p in self.mesh.active_peers()
+            if (self.mesh.person_hops(p.node_id) or 0) > 1
         )
         status = f" {self.mesh.name or 'no name'} · {direct} connected"
         if relayed:
@@ -519,7 +521,7 @@ class Tui(ChatUI):
             else:
                 self.mesh.send_text(self.conv, text, self.reply_to)
                 members = self.mesh.conv_members(self.conv)
-                if members and not any(self.mesh.reachable(x) for x in members):
+                if members and not any(self.mesh.person_reachable(x) for x in members):
                     self.out(
                         "  out of range — will send automatically when they're back"
                     )
@@ -546,10 +548,10 @@ class Tui(ChatUI):
             return
         elif k == "r":
             self.reply_to, self.mode = m.msg_id, "type"
-        elif k == "e" and m.sender == self.mesh.node_id and m.kind == "text":
+        elif k == "e" and m.sender == self.mesh.me and m.kind == "text":
             self.edit_id, self.mode = m.msg_id, "type"
             self.input, self.cursor = m.text, len(m.text)
-        elif k == "d" and m.sender == self.mesh.node_id:
+        elif k == "d" and m.sender == self.mesh.me:
             self.mesh.delete(self.conv, m.msg_id)
         elif isinstance(k, str) and k in "12345678":
             e = emoji.QUICK_REACTIONS[int(k) - 1]
@@ -557,7 +559,7 @@ class Tui(ChatUI):
                 self.conv,
                 m.msg_id,
                 e,
-                remove=self.mesh.node_id in m.reactions.get(e, []),
+                remove=self.mesh.me in m.reactions.get(e, []),
             )
         elif k == "+":
             self.mode, self.input, self.cursor = (

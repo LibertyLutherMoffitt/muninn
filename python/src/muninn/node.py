@@ -178,7 +178,25 @@ class Node:
     # --- presence -------------------------------------------------------------
 
     def presence(self, node_id: str) -> dict:
-        """What the UI should say about a peer right now."""
+        """What the UI should say about a person right now (a linked person:
+        their best-placed device)."""
+        m = self.mesh
+        devs = m.devices_of(m.person(node_id))
+        if len(devs) > 1:
+            order = {"direct": 0, "relay": 1, "nearby": 2, "offline": 3}
+            best = min(
+                (self._device_presence(d) for d in devs),
+                key=lambda p: (order[p["state"]], p["hops"] or 99),
+            )
+            if best["state"] == "offline":
+                last = max(
+                    (m.peers[d].last_seen for d in devs if d in m.peers), default=0
+                )
+                best["text"] = "last seen " + ago(last) if last else "not seen yet"
+            return best
+        return self._device_presence(node_id)
+
+    def _device_presence(self, node_id: str) -> dict:
         m = self.mesh
         h = m.hops(node_id)
         if h == 1:

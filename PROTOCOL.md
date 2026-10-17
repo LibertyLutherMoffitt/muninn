@@ -107,6 +107,30 @@ never count as evidence for reinstall detection. An entry for the receiver
 itself tells it its own radio address — Android apps can't read their own
 Bluetooth address, and need it for tap-to-meet.
 
+### DEVICES (0x07)
+
+One linked-device set per frame, UTF-8 JSON:
+
+```
+{"a": account id, "v": version ≥ 1,
+ "d": [[node id, pubkey hex, join ts, consent sig hex], …]   (sorted by id),
+ "s": primary signature hex}
+```
+
+The primary's own entry has join ts 0 and an empty consent. Signatures are
+XEdDSA (Ed25519 under the Edwards form of the X25519 identity key):
+
+- consent of device X: over `"muninn-join\n{a}\n{X}\n{join ts}"`
+- primary (device `a`): over `"muninn-devices\n{a}\n{v}\n"` followed by one
+  line per entry, `"{id} {pubkey hex} {join ts} {consent hex}\n"`, in order.
+
+Valid iff: `a` is listed; 1–8 unique devices; every listed pubkey matches the
+receiver's pinned key for that id (unknown ids are learned from the set);
+every consent and the primary signature verify. Per account the highest `v`
+wins. A device listed in two accounts belongs to the one with the newer join
+ts (its own latest consent). Sent to a neighbour after HELLO and re-flooded
+on change; a set with only the primary means "no other devices".
+
 ## Mesh frames
 
 ### PACKET (0x10)
@@ -172,11 +196,18 @@ kind u8 meta_len u16 meta(JSON object) blob(rest)
 | 12 | TYPING     |   | `g`? |
 | 13 | GROUP_REQ  |   | `g` — "I got a message for a group I don't know" |
 | 14 | REPLACED   | ✓ | `o` old node id, `n` new node id (reinstall notice) |
+| 15 | LINK       | ✓ | `o` op: `req` (`c` code, `t` join ts, `k` consent hex) · `ok` (`r` device set) · `no` (`e` reason) · `leave` |
 
 A group message is sent as one PACKET per member, each encrypted for that
 member; all copies share the message id `i`. A DM has no `g`.
 
 ### Conversations and receipts
+
+All ids below are **person** ids: a device's account if it belongs to a
+device set (see DEVICES), else its own node id. A DM body carries `to` = the other
+person, so the sender's own devices
+(which also receive it) file it under that chat. Bodies to a person go to
+each of their devices, and to the sender's other devices too.
 
 - DM conversation = the peer's node id; group conversation = `g`.
 - *delivered* = ACK from that recipient; *read* = RECEIPT from that recipient

@@ -115,10 +115,16 @@ def _open(sealed: dict, password: str) -> bytes:
         raise ValueError("wrong password (or a damaged backup)") from e
 
 
-def export(storage, path: str | Path, password: str | None = None) -> dict:
-    """Write a backup zip. Returns counts per table."""
+def export(
+    storage, path: str | Path, password: str | None = None, max_files: int | None = None
+) -> dict:
+    """Write a backup zip. Returns counts per table. `max_files` caps the
+    attachment bytes carried (the rest can be fetched again later)."""
     ident = storage.get_identity()
     tables = {t: storage.export_rows(t, cols) for t, (cols, _) in TABLES.items()}
+    tables["files"] = [  # history syncs between linked devices aren't history
+        r for r in tables["files"] if not str(r.get("conv", "")).startswith("sync:")
+    ]
     counts = {t: len(rows) for t, rows in tables.items()}
     for t, (_, blobs) in TABLES.items():
         for row in tables[t]:
@@ -148,10 +154,14 @@ def export(storage, path: str | Path, password: str | None = None) -> dict:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", json.dumps(manifest, indent=1))
         files = tables["files"]
+        budget = max_files if max_files is not None else float("inf")
         for row in files:
             p = Path(row.get("path") or "")
             if row.get("state") == "complete" and p.is_file():
-                z.write(p, f"files/{row['file_id']}/{p.name}", zipfile.ZIP_STORED)
+                size = p.stat().st_size
+                if size <= budget:
+                    budget -= size
+                    z.write(p, f"files/{row['file_id']}/{p.name}", zipfile.ZIP_STORED)
             row["path"] = p.name
         for row in tables["messages"]:
             meta = json.loads(row.get("meta") or "{}")
@@ -170,10 +180,18 @@ def inspect(path: str | Path) -> dict:
     return m
 
 
-def import_(storage, path: str | Path, password: str | None = None) -> dict:
+def import_(
+    storage,
+    path: str | Path,
+    password: str | None = None,
+    allow_from: set[str] | None = None,
+    skip_system: bool = False,
+) -> dict:
     """Merge a backup into this install. Returns {"added": {table: n},
     "identity": restored?} — when the identity was restored the app must be
-    restarted (it is now that person)."""
+    restarted (it is now that person). `allow_from`: other devices of mine
+    whose history may merge in (linked devices); `skip_system` leaves out
+    "X created the group" lines this device has its own copy of."""
     m = inspect(path)
     if int(m.get("version", 0)) > VERSION:
         raise ValueError("backup from a newer Muninn — update first")
@@ -197,7 +215,13 @@ def import_(storage, path: str | Path, password: str | None = None) -> dict:
             )
             restored = True
     ident = storage.get_identity()
-    if not restored and ident and m.get("from") and m["from"] != ident.node_id:
+    if (
+        not restored
+        and ident
+        and m.get("from")
+        and m["from"] != ident.node_id
+        and m["from"] not in (allow_from or set())
+    ):
         raise ValueError(
             f"this is {m.get('name') or 'someone else'}'s backup — chats are stored from "
             "their point of view, so it can only go back into their own Muninn "
@@ -230,6 +254,10 @@ def import_(storage, path: str | Path, password: str | None = None) -> dict:
                 (d / "thumb.jpg").write_bytes(z.read(f"files/{fid}/thumb.jpg"))
                 meta["thumb"] = str(d / "thumb.jpg")
                 row["meta"] = json.dumps(meta)
+        if skip_system:
+            tables["messages"] = [
+                r for r in tables.get("messages", []) if r.get("kind") != "system"
+            ]
         for t, (cols, blobs) in TABLES.items():
             rows = tables.get(t, [])
             for row in rows:

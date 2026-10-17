@@ -27,6 +27,7 @@ K_RT = 11  # {a, s, b} blob?                     unreliable
 K_TYPING = 12  # {g?}                            unreliable
 K_GROUP_REQ = 13  # {g}                          unreliable
 K_REPLACED = 14  # {o: old id, n: new id}         reliable (reinstall notice)
+K_LINK = 15  # {o: req|ok|no|leave, …}           reliable (linked devices)
 
 RELIABLE_KINDS = {
     K_TEXT,
@@ -38,6 +39,7 @@ RELIABLE_KINDS = {
     K_RECEIPT,
     K_APP,
     K_REPLACED,
+    K_LINK,
 }
 
 KIND_NAMES = {
@@ -55,6 +57,7 @@ KIND_NAMES = {
     K_TYPING: "typing",
     K_GROUP_REQ: "group_req",
     K_REPLACED: "replaced",
+    K_LINK: "link",
 }
 
 

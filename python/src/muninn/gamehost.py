@@ -192,7 +192,11 @@ class GameRegistry:
             if e.sender not in joined:
                 joined.append(e.sender)
         if start is not None:
-            players = [p for p in start.body.get("players", []) if p in joined]
+            players = [
+                q
+                for q in (self.mesh.person(p) for p in start.body.get("players", []))
+                if q in joined
+            ]
         else:
             players = joined[:mx]
         started = start is not None or len(players) >= mx
@@ -210,7 +214,7 @@ class GameRegistry:
         if result is None and ended and ended[0].type == "resign":
             rest = [p for p in players if p != ended[0].sender]
             result = {"winners": rest if len(rest) == 1 else [], "text": "resigned"}
-        me = self.mesh.node_id
+        me = self.mesh.me
         if withdrawn:
             status = "invite withdrawn"
         elif ended:
@@ -306,7 +310,7 @@ class GameRegistry:
         info = self.session_info(session)
         if not info:
             raise ValueError("unknown game session")
-        if info["creator"] != self.mesh.node_id:
+        if info["creator"] != self.mesh.me:
             raise ValueError("only whoever sent the invite can unsend it")
         if info["started"]:
             raise ValueError("the game already started — resign or end it instead")
@@ -326,9 +330,5 @@ class GameRegistry:
         info = self.session_info(session)
         if info:
             # everyone in the chat, so watchers see real-time games live too
-            to = [
-                p
-                for p in self.mesh.conv_members(info["conv"])
-                if p != self.mesh.node_id
-            ]
+            to = self.mesh.conv_members(info["conv"])
             self.mesh.rt_send(info["conv"], info["app"], session, body, to=to)

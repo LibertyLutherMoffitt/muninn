@@ -230,14 +230,14 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 3
 
     // ---- messages -------------------------------------------------------------
 
-    override fun saveMessage(m: StoredMessage, recipients: List<String>): Boolean = w { db ->
+    override fun saveMessage(m: StoredMessage, recipients: List<String>, read: Boolean?): Boolean = w { db ->
         db.beginTransaction()
         try {
             val id = db.insertWithOnConflict("messages", null, ContentValues().apply {
                 put("msg_id", m.msgId); put("conv", m.conv); put("sender", m.sender); put("ts", m.ts)
                 put("kind", m.kind); put("text", m.text); put("reply_to", m.replyTo)
                 put("meta", if (m.meta.isEmpty()) null else Json.write(m.meta))
-                put("read_local", if (recipients.isNotEmpty()) 1 else 0)
+                put("read_local", if (read ?: recipients.isNotEmpty()) 1 else 0)
             }, SQLiteDatabase.CONFLICT_IGNORE)
             if (id != -1L) for (r in recipients)
                 db.execSQL("INSERT OR IGNORE INTO recipients (msg_id, node_id) VALUES (?,?)", arrayOf(m.msgId, r))
@@ -261,6 +261,49 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 3
             "WHERE msg_id = ? AND node_id = ? AND read_at IS NULL", arrayOf(now(), now(), msgId, nodeId))
         changes(db) > 0
     }
+
+    override fun markReadIds(ids: List<ByteArray>): List<String> {
+        val convs = sortedSetOf<String>()
+        for (id in ids) {
+            val c = queryBlob("SELECT conv FROM messages WHERE msg_id = ? AND read_local = 0", id) { it.getString(0) }.firstOrNull() ?: continue
+            w { it.execSQL("UPDATE messages SET read_local = 1 WHERE msg_id = ?", arrayOf(id)) }
+            convs.add(c)
+        }
+        return convs.toList()
+    }
+
+    override fun mergeIds(mapping: Map<String, String>): Int = w { db ->
+        var n = 0
+        db.beginTransaction()
+        try {
+            for ((old, new) in mapping) {
+                if (old == new) continue
+                for ((sql, args) in listOf(
+                    "UPDATE messages SET conv = ? WHERE conv = ?" to arrayOf<Any>("dm:$new", "dm:$old"),
+                    "UPDATE messages SET sender = ? WHERE sender = ?" to arrayOf<Any>(new, old),
+                    "UPDATE OR IGNORE recipients SET node_id = ? WHERE node_id = ?" to arrayOf<Any>(new, old),
+                    "UPDATE OR IGNORE reactions SET node_id = ? WHERE node_id = ?" to arrayOf<Any>(new, old),
+                    "UPDATE OR IGNORE group_members SET node_id = ? WHERE node_id = ?" to arrayOf<Any>(new, old),
+                    "UPDATE app_events SET sender = ? WHERE sender = ?" to arrayOf<Any>(new, old),
+                    "UPDATE app_events SET conv = ? WHERE conv = ?" to arrayOf<Any>("dm:$new", "dm:$old"),
+                    "UPDATE files SET sender = ? WHERE sender = ?" to arrayOf<Any>(new, old),
+                    "UPDATE files SET conv = ? WHERE conv = ?" to arrayOf<Any>("dm:$new", "dm:$old"),
+                )) { db.execSQL(sql, args); n += changes(db) }
+                for (t in listOf("recipients", "reactions", "group_members")) db.execSQL("DELETE FROM $t WHERE node_id = ?", arrayOf(old))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        n
+    }
+
+    override fun deleteFileRecord(fileId: ByteArray) = w { db -> db.execSQL("DELETE FROM files WHERE file_id = ?", arrayOf(fileId)) }
+
+    override fun settingsWithPrefix(prefix: String): Map<String, String> =
+        query("SELECT key, value FROM settings WHERE substr(key, 1, ?) = ?", arrayOf(prefix.length.toString(), prefix)) {
+            it.getString(0) to it.getString(1)
+        }.toMap()
 
     override fun markReadLocal(conv: String): List<Pair<ByteArray, String>> {
         val rows = query("SELECT msg_id, sender FROM messages WHERE conv = ? AND read_local = 0 AND kind IN ('text','file')",

@@ -126,7 +126,7 @@ fun ChatScreen(conv: String) {
     val scope = rememberCoroutineScope()
     val tick by Runtime.tick.collectAsState()
     val node = Runtime.node
-    val me = node?.nodeId ?: ""
+    val me = node?.mesh?.me ?: ""
     val isGroup = conv.startsWith("group:")
     val msgs by produceState(emptyList<StoredMessage>(), tick, conv) {
         value = withContext(Dispatchers.IO) { Runtime.node?.mesh?.storage?.loadHistory(conv, 400) ?: emptyList() }
@@ -182,7 +182,7 @@ fun ChatScreen(conv: String) {
             try {
                 val mesh = Runtime.node?.mesh ?: return@launch
                 if (ed != null) mesh.edit(conv, ed.msgId, text) else mesh.sendText(conv, text, rp?.msgId)
-                if (mesh.convMembers(conv).none { mesh.reachable(it) })
+                if (mesh.convMembers(conv).none { mesh.reachable(it) }) // any device of theirs (or mine)
                     Runtime.toast("Out of range — will send automatically when they're back")
             } catch (e: Throwable) { Runtime.toast(e.message ?: "send failed") }
         }
