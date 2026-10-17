@@ -139,8 +139,8 @@ def test_chess_rules_spot_checks(engine):
 def test_checkers_forced_capture_and_multijump(engine):
     load(engine, BUNDLED / "checkers.js")
     r = engine.evaluate("""(function(){
-      var s=game.setup(['A','B'],1); var b=[];for(var i=0;i<64;i++)b.push(null);
-      b[1]='a'; b[10]='b'; b[26]='b'; s.b=b;   // a at row0 can double-jump
+      var s=game.setup(['A','B'],1,{moves:'diagonal',flying:'no',most:'no'}); var b=[];for(var i=0;i<64;i++)b.push(null);
+      b[1]='a'; b[10]='b'; b[26]='b'; s.b=b;   // American rules: a at row0 can double-jump
       var l=game.legal(s); return JSON.stringify(l);})()""")
     assert json.loads(r.toString()) == [[1, 19, 33]]
 
@@ -496,3 +496,84 @@ def test_group_members_can_watch_a_two_player_game(lab):
     info = gc.session_info(sid)
     assert info["spectator"] and not info["invitedMe"] and not info["amPlayer"]
     assert info["players"] == [a.node_id, b.node_id]
+
+
+def _ck(engine, js):
+    return _eval(engine, "checkers.js", js)
+
+
+def test_checkers_turkish_defaults(engine):
+    r = _ck(
+        engine,
+        """var s=game.setup(['A','B'],1);
+      var a=s.b.filter(function(p){return p==='a';}).length;
+      var m=game.legal(s);
+      // every opening move is one square straight forward from row 2
+      var straight=m.every(function(x){return x[1]-x[0]===8 && Math.floor(x[0]/8)===2;});
+      return [a, m.length, straight, s.R.orth, s.R.fly, s.R.most, s.R.back];""",
+    )
+    assert r == [16, 8, True, True, True, True, False]
+
+
+def test_checkers_turkish_men_move_sideways_not_back_or_diagonal(engine):
+    r = _ck(
+        engine,
+        """var s=game.setup(['A','B'],1); var b=[];for(var i=0;i<64;i++)b.push(null);
+      b[3*8+3]='a'; b[7*8+7]='b'; s.b=b;
+      return game.legal(s).map(function(m){return m[1];}).sort(function(x,y){return x-y;});""",
+    )
+    assert r == [26, 28, 35]  # left, right, forward — never back (19) or diagonal
+
+
+def test_checkers_must_take_the_most_pieces(engine):
+    r = _ck(
+        engine,
+        """var s=game.setup(['A','B'],1); var b=[];for(var i=0;i<64;i++)b.push(null);
+      b[2*8+1]='a'; b[3*8+1]='b';               // single capture forward
+      b[2*8+5]='a'; b[3*8+5]='b'; b[5*8+5]='b'; // double capture forward
+      b[7*8+0]='b'; s.b=b;
+      var most=game.legal(s);
+      s.R.most=false; var any=game.legal(s);
+      return [most.map(function(m){return m.length;}), any.length];""",
+    )
+    assert r == [[3], 2]
+
+
+def test_checkers_flying_king_and_no_reversal(engine):
+    r = _ck(
+        engine,
+        """var s=game.setup(['A','B'],1); var b=[];for(var i=0;i<64;i++)b.push(null);
+      b[0*8+0]='A'; b[0*8+4]='b'; b[7*8+7]='b'; s.b=b;
+      // king on a1 captures the piece on e1 from a distance and may land on f1, g1 or h1
+      return game.legal(s).map(function(m){return m.join('-');}).sort();""",
+    )
+    assert r == ["0-5", "0-6", "0-7"]
+    r = _ck(
+        engine,
+        """var s=game.setup(['A','B'],1); var b=[];for(var i=0;i<64;i++)b.push(null);
+      b[0*8+3]='A'; b[0*8+5]='b'; b[0*8+1]='b'; b[7*8+7]='b'; s.b=b;
+      // after jumping right over f1 it may not turn back left over b1
+      return game.legal(s).filter(function(m){return m.length>2;}).length;""",
+    )
+    assert r == 0
+
+
+def test_checkers_backward_capture_option(engine):
+    js = """var s=game.setup(['A','B'],1,%s); var b=[];for(var i=0;i<64;i++)b.push(null);
+      b[4*8+4]='a'; b[3*8+4]='b'; b[7*8+0]='b'; s.b=b;
+      return game.legal(s).filter(function(m){return m[1]===2*8+4;}).length;"""
+    assert _ck(engine, js % "{}") == 0
+    assert _ck(engine, js % "{back:'yes'}") == 1
+
+
+def test_checkers_small_board_and_optional_capture(engine):
+    r = _ck(
+        engine,
+        """var t=game.setup(['A','B'],1,{size:6}), d=game.setup(['A','B'],1,{size:6,moves:'diagonal'});
+      var cnt=function(s){return s.b.filter(function(p){return p==='a';}).length;};
+      var s=game.setup(['A','B'],1,{must:'no'}); var b=[];for(var i=0;i<64;i++)b.push(null);
+      b[2*8+1]='a'; b[3*8+1]='b'; b[7*8+7]='b'; s.b=b;
+      var m=game.legal(s);
+      return [t.b.length, cnt(t), d.b.length, cnt(d), m.length];""",
+    )
+    assert r == [36, 12, 36, 6, 3]  # the capture + 2 sideways steps when not mandatory

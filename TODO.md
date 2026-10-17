@@ -179,15 +179,18 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   laptop-as-middleman direct links, reconnect after walking away, file
   throughput, battery drain over a few hours with the screen off, and that
   no phone ever offers magnus as an audio device again.
-- [ ] **Protocol versioning before others install it** (`CAPS` / feature
+- [ ] **Bubble Tea terminal client** (Go, Linux + Windows): a second,
+  non-vim terminal client focused on visual polish — smooth animations,
+  slick layout, sensible default keybinds (arrows/Tab/Enter/Ctrl-…), mouse
+  support. Talks to the same core (via a local JSON API over the bot's
+  control port, or a Go port of the protocol). No games.
+- [ ] (later — everyone updates a week before the trip) **Protocol versioning** (`CAPS` / feature
   bits in HELLO): today a v2 node refuses any other version outright, so a
   friend who hasn't updated can't talk to you mid-flight. Make HELLO carry
   a feature set, accept older peers, and degrade features per link.
 - [ ] `:doctor` / Settings → "Check before the flight": Bluetooth on,
   permissions, battery optimisation off, background running, version vs
   friends', last time each friend was seen, whether find mode is needed.
-- [ ] Play games in the terminal: generic (list legal `moves()` + status
-  text, optional ASCII board hook) so every plugin works there too.
 - [ ] Privacy toggles: read receipts and typing indicators on/off.
 - [ ] Export / import chat history (moving to a new phone; pairs with
   linked devices later).

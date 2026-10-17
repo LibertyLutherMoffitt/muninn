@@ -1210,27 +1210,32 @@ class ChatBridge(QObject):
                         for g in self.games.catalog()
                     ],
                 )
-            # options as key=value; ask for missing ones one menu at a time
+            # Options: a summary of the rules ("▶ Invite" + one row per rule);
+            # picking a row changes that rule and comes back here.
             game = next((g for g in self.games.catalog() if g["id"] == args[0]), None)
-            opts = dict(a.split("=", 1) for a in args[1:] if "=" in a)
-            missing = [
-                o for o in (game or {}).get("options", []) if o["id"] not in opts
-            ]
-            if game and missing:
-                o = missing[0]
-                base = "game " + " ".join(args)
-                return self._info(
-                    f"{game['icon']}  {game['name']} — {o['label']}",
-                    [
+            go = "go" in args[1:]
+            pairs = [a for a in args[1:] if "=" in a]
+            opts = dict(a.split("=", 1) for a in pairs)
+            if game and game.get("options") and not go:
+                rows = [
+                    self._item(
+                        "▶  Invite with these rules",
+                        f"{game['icon']} {game['name']} · {game['players']}",
+                        action="cmd",
+                        cmd=shlex.join(["game", game["id"], *pairs, "go"]),
+                    )
+                ]
+                for o in game["options"]:
+                    cur = opts.get(o["id"], str(o.get("default")))
+                    rows.append(
                         self._item(
-                            str(c),
-                            "default" if c == o.get("default") else "",
+                            f"{o['label']}:  {cur}",
+                            "change",
                             action="cmd",
-                            cmd=f"{base} {o['id']}={c}",
+                            cmd=shlex.join(["gamerules", game["id"], o["id"], *pairs]),
                         )
-                        for c in o.get("choices", [])
-                    ],
-                )
+                    )
+                return self._info(f"{game['icon']}  {game['name']} — rules", rows)
             self.startGame(args[0], self._active, opts)
         elif head == "unpair":
             done = self.node.unpair_peers()
@@ -1264,6 +1269,26 @@ class ChatBridge(QObject):
                     for g in board
                 ]
                 or [("no finished games yet", "start one with :game")],
+            )
+        elif head == "gamerules" and len(args) >= 2:
+            game = next((g for g in self.games.catalog() if g["id"] == args[0]), None)
+            opt = next(
+                (o for o in (game or {}).get("options", []) if o["id"] == args[1]), None
+            )
+            if not opt or not game:
+                return self.errorOccurred.emit("no such game option")
+            keep = [a for a in args[2:] if not a.startswith(opt["id"] + "=")]
+            return self._info(
+                f"{game['icon']}  {game['name']} — {opt['label']}",
+                [
+                    self._item(
+                        str(c),
+                        "default" if c == opt.get("default") else "",
+                        action="cmd",
+                        cmd=shlex.join(["game", game["id"], *keep, f"{opt['id']}={c}"]),
+                    )
+                    for c in opt.get("choices", [])
+                ],
             )
         elif head == "games":
             sess = self.games.sessions(self._active or None)
