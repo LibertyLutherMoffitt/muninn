@@ -194,7 +194,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [x] Privacy toggles: read receipts and typing indicators on/off.
 - [ ] Export / import chat history (moving to a new phone; pairs with
   linked devices later).
-- [ ] Tap phones to add someone to a room (NFC + group invite).
+- [x] Tap phones to add someone to a room (Room info → Add people → Tap phones; works before any radio link).
 - [x] React / reply from the Android notification (👍 + reply).
 - [x] Desktop zoom (Ctrl +/-/0, :zoom) and light theme (:theme light|dark|system).
 - [ ] Real-time game latency over real Bluetooth + relay (pong), and a

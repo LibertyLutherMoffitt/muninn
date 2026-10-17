@@ -277,3 +277,26 @@ def test_mixed_cabin_soak(lab, jvm):
     for n in ids:
         g = texts(n, group_conv(gid))
         assert len(g) == len(set(g)), f"group duplicates at {n}"
+
+
+def test_tap_to_add_stranger_to_room(lab, jvm):
+    """NFC tap from a room (Android): the reader learns a stranger's id + key,
+    adds them to the room while no radio link exists yet; once they come into
+    range they get the room and its messages."""
+    b = lab.node("member", (0, 0))
+    k = jvm("reader", (1, 0))
+    c = lab.node("stranger", (60, 60))  # far away: never seen over the radio
+    wait_until(lambda: k.reachable(b.node_id), 30)
+    gid = k("group", name="trip", members=[b.node_id])["group"]
+    k("introduce", id=c.node_id, pubkey=c.mesh.pubkey.hex(), name="stranger")
+    k("gadd", group="trip", members=[c.node_id])
+    k("gsend", group="trip", text="welcome aboard")
+    time.sleep(2)
+    assert bytes.fromhex(gid) not in c.mesh.groups
+    lab.move("stranger", (1, 1))
+    wait_until(lambda: bytes.fromhex(gid) in c.mesh.groups, 60)
+    assert {b.node_id, k.node_id, c.node_id} <= set(
+        c.mesh.groups[bytes.fromhex(gid)].members
+    )
+    c.mesh.send_text(group_conv(bytes.fromhex(gid)), "thanks!")
+    wait_until(lambda: "thanks!" in py_texts(b, group_conv(bytes.fromhex(gid))), 30)

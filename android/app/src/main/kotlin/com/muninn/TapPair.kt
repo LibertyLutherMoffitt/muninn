@@ -34,6 +34,10 @@ import kotlinx.coroutines.flow.asStateFlow
  * learned the other's address dials it at once; if neither knows one yet
  * (two phones that never met anyone), the reader becomes visible for a
  * moment and both look for the other by Bluetooth name.
+ *
+ * Started from a room ([startReading] with `room`), the reader also adds the
+ * person it met to that room — the membership update rides the outbox, so it
+ * reaches them as soon as the Bluetooth link is up.
  */
 object TapPair {
     private const val TAG = "TapPair"
@@ -46,7 +50,7 @@ object TapPair {
         data object Idle : State()
         data object Reading : State()
         data class Connecting(val name: String, val visibleNeeded: Boolean) : State()
-        data class Connected(val name: String, val nodeId: String) : State()
+        data class Connected(val name: String, val nodeId: String, val addedToRoom: Boolean = false) : State()
         data class Failed(val message: String) : State()
     }
 
@@ -68,8 +72,12 @@ object TapPair {
 
     // ---- reader side ------------------------------------------------------------
 
-    fun startReading(activity: Activity) {
+    /** Group id the current read adds people to (null: just meet). */
+    @Volatile private var room: ByteArray? = null
+
+    fun startReading(activity: Activity, room: ByteArray? = null) {
         val nfc = NfcAdapter.getDefaultAdapter(activity) ?: return
+        this.room = room
         _state.value = State.Reading
         nfc.enableReaderMode(activity, { tag -> onTag(activity, tag) },
             NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
@@ -118,6 +126,12 @@ object TapPair {
         Log.i(TAG, "met $id ($name) addr=$addr bt=$btName reader=$reader")
         Thread({
             node.mesh.introduce(id, pk, name)
+            val gid = if (reader) room else null
+            val added = gid != null && runCatching {
+                val members = synchronized(node.mesh.lock) { node.mesh.groups[gid.hex()]?.members?.toSet() }
+                if (members != null && id !in members) node.mesh.updateGroup(gid, add = listOf(id))
+                members != null
+            }.getOrDefault(false)
             val iKnowTheirs = addr.isNotEmpty()
             val theyKnowMine = node.mesh.ownAddr != null
             if (reader) _state.value = State.Connecting(name, visibleNeeded = !iKnowTheirs && !theyKnowMine)
@@ -126,7 +140,7 @@ object TapPair {
                 node.markSeen(addr)
                 node.poke(addr)
             } else if (btName.isNotEmpty()) findByName(node, btName)
-            awaitLink(node, id, name, reader)
+            awaitLink(node, id, name, reader, added)
         }, "tap-$id").apply { isDaemon = true; start() }
     }
 
@@ -142,18 +156,19 @@ object TapPair {
         }
     }
 
-    private fun awaitLink(node: com.muninn.core.Node, id: String, name: String, reader: Boolean) {
+    private fun awaitLink(node: com.muninn.core.Node, id: String, name: String, reader: Boolean, added: Boolean) {
         val until = System.currentTimeMillis() + 60_000
         while (System.currentTimeMillis() < until) {
             if (id in node.mesh.connected()) {
-                if (reader) _state.value = State.Connected(name, id)
-                Runtime.toast("Connected to $name")
+                if (reader) _state.value = State.Connected(name, id, added)
+                Runtime.toast(if (added) "Added $name to the room" else "Connected to $name")
                 Runtime.bump()
                 return
             }
             Thread.sleep(400)
         }
-        if (reader) fail("Couldn't reach $name over Bluetooth — make one phone visible and try again")
+        if (reader) fail("Couldn't reach $name over Bluetooth — make one phone visible and try again" +
+            if (added) " (they're in the room; they'll get it once connected)" else "")
     }
 }
 

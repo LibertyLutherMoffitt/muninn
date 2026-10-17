@@ -292,7 +292,7 @@ fun VisibilityCard() {
 
 /** "Tap phones": read the other phone over NFC (see TapPair.kt). */
 @Composable
-fun TapCard() {
+fun TapCard(room: ByteArray? = null) {
     val ctx = LocalContext.current
     val activity = ctx as? android.app.Activity ?: return
     if (!TapPair.available(ctx)) return
@@ -318,7 +318,7 @@ fun TapCard() {
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("📱 Tap phones to meet", fontWeight = FontWeight.SemiBold)
+            Text(if (room != null) "📱 Tap to add someone" else "📱 Tap phones to meet", fontWeight = FontWeight.SemiBold)
             val s = st
             when {
                 !enabled -> {
@@ -328,10 +328,12 @@ fun TapCard() {
                     }) { Text("Turn on NFC") }
                 }
                 s is TapPair.State.Idle -> {
-                    Text("The quickest way to meet someone: no searching, no visibility. Press the button, then hold the backs " +
+                    Text(if (room != null) "Press the button, then hold the backs of the two phones together (theirs unlocked, " +
+                        "Muninn installed) — they join this room, even if you've never met."
+                        else "The quickest way to meet someone: no searching, no visibility. Press the button, then hold the backs " +
                         "of the two phones together (theirs unlocked, Muninn installed).",
                         style = MaterialTheme.typography.bodySmall)
-                    Button(onClick = { TapPair.startReading(activity) }) { Text("Tap phones") }
+                    Button(onClick = { TapPair.startReading(activity, room) }) { Text("Tap phones") }
                 }
                 s is TapPair.State.Reading -> Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -346,12 +348,14 @@ fun TapCard() {
                         style = MaterialTheme.typography.bodySmall)
                 }
                 s is TapPair.State.Connected -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("✓ Connected to ${s.name}", Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
-                    Button(onClick = { TapPair.reset(); Nav.back(); Nav.go(Screen.Chat(dmConv(s.nodeId))) }) { Text("Open chat") }
+                    Text(if (s.addedToRoom) "✓ ${s.name} joined the room" else "✓ Connected to ${s.name}", Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.primary)
+                    if (room != null) Button(onClick = { TapPair.startReading(activity, room) }) { Text("Tap another") }
+                    else Button(onClick = { TapPair.reset(); Nav.back(); Nav.go(Screen.Chat(dmConv(s.nodeId))) }) { Text("Open chat") }
                 }
                 s is TapPair.State.Failed -> {
                     Text(s.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                    Button(onClick = { TapPair.startReading(activity) }) { Text("Try again") }
+                    Button(onClick = { TapPair.startReading(activity, room) }) { Text("Try again") }
                 }
             }
         }
@@ -540,6 +544,7 @@ fun GroupInfoScreen(conv: String) {
             Spacer(Modifier.size(12.dp))
             if (adding) {
                 Text("Add people", style = MaterialTheme.typography.titleSmall)
+                TapCard(room = gid)
                 Box(Modifier.weight(1f)) { PeerChecklist(picked, members.toSet()) { id -> picked = if (id in picked) picked - id else picked + id } }
                 Row {
                     TextButton(onClick = { adding = false }) { Text("Cancel") }

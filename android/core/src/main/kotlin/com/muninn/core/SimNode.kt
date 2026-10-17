@@ -54,6 +54,8 @@ private fun startControl(node: Node, port: Int) {
         )
         "send" -> mapOf("msg_id" to mesh.sendText(dmConv(peer(c.str("to"))), c.str("text")).hex())
         "group" -> mapOf("group" to mesh.createGroup(c.str("name"), c.list("members").map { peer(it as String) }).hex())
+        "introduce" -> { mesh.introduce(c.str("id"), c.str("pubkey").unhex(), c.str("name")); emptyMap<String, Any?>() }
+        "gadd" -> { mesh.updateGroup(group(c.str("group")).groupId, add = c.list("members").map { it as String }); emptyMap<String, Any?>() }
         "gsend" -> mapOf("msg_id" to mesh.sendText(group(c.str("group")).conv, c.str("text")).hex())
         "history" -> mesh.storage.loadHistory(c.str("conv"), c.int("n", 50)).map {
             mapOf("id" to it.idHex, "sender" to it.sender, "text" to it.text, "kind" to it.kind,
