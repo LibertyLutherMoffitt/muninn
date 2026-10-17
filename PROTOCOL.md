@@ -33,10 +33,12 @@ No compatibility with v1 is kept (v1 databases are wiped on first start).
 | 0x04 | ROUTES  | link       | distance-vector reachability |
 | 0x05 | ROSTER  | link       | who-is-who gossip (ids, keys, names) |
 | 0x06 | ADDRS   | link       | radio addresses of the sender's direct links |
+| 0x07 | DEVICES | link (flooded) | a linked-device set (who is the same person) |
 | 0x10 | PACKET  | end-to-end | encrypted body, routed by destination |
 | 0x11 | ACK     | end-to-end | delivery confirmation, routed to the sender |
 
-Link frames are never forwarded. Mesh frames are forwarded hop by hop.
+Link frames are never forwarded (DEVICES is re-flooded by each receiver when
+it is new to it). Mesh frames are forwarded hop by hop.
 
 ## Link frames
 
@@ -182,11 +184,11 @@ kind u8 meta_len u16 meta(JSON object) blob(rest)
 
 | Kind | Name       | Reliable | Meta (blob) |
 |-----:|------------|:--------:|-------------|
-| 1  | TEXT       | ✓ | `i` msg id hex, `t` text, `g`? group id hex, `r`? reply-to msg id |
-| 2  | REACT      | ✓ | `m` target msg, `e` emoji, `x`? 1 = remove, `g`? |
-| 3  | EDIT       | ✓ | `m`, `t`, `g`? — only the original sender's edits apply |
-| 4  | DELETE     | ✓ | `m`, `g`? — only the original sender's deletes apply |
-| 5  | FILE       | ✓ | `i`, `f` file id, `n` name, `mt` mime, `s` size, `h` sha256 hex, `cs` chunk size, `c` chunks, `t`? caption, `r`?, `g`? (blob: JPEG thumbnail ≤ 12 KB) |
+| 1  | TEXT       | ✓ | `i` msg id hex, `t` text, `g`? group id hex, `to`? (DM: the other person), `r`? reply-to msg id |
+| 2  | REACT      | ✓ | `m` target msg, `e` emoji, `x`? 1 = remove, `g`? / `to`? |
+| 3  | EDIT       | ✓ | `m`, `t`, `g`? / `to`? — only the original sender (person) can edit |
+| 4  | DELETE     | ✓ | `m`, `g`? / `to`? — only the original sender (person) can delete |
+| 5  | FILE       | ✓ | `i`, `f` file id, `n` name, `mt` mime, `s` size, `h` sha256 hex, `cs` chunk size, `c` chunks, `t`? caption, `r`?, `g`? / `to`?, `sync`? 1 = history between my own devices (not shown) (blob: JPEG thumbnail ≤ 12 KB) |
 | 6  | CHUNK      |   | `f`, `i` index (blob: chunk bytes) |
 | 7  | FILE_REQ   |   | `f`, `w` list of wanted indices |
 | 8  | GROUP      | ✓ | `g`, `n` name, `v` version, `m` `[[id, pubkey hex], …]` |

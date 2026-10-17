@@ -6,6 +6,7 @@
 nix develop                       # enter dev shell (installs prek hook automatically)
 nix run .#muninn-linux -- --help  # CLI
 nix run .#muninn-gui              # Qt6/QML GUI
+nix run .#muninn-tea              # Bubble Tea terminal client (Go, tea/)
 ```
 
 Use `nix run` not `nix build` — avoids creating `result/` symlink in repo root.
@@ -14,11 +15,13 @@ Use `nix run` not `nix build` — avoids creating `result/` symlink in repo root
 tree; new QML files (or any new source) must be `git add`-ed before
 `nix build`/`nix run` will pick them up. Bump `version` in both
 `python/pyproject.toml` and `flake.nix` whenever you need to invalidate the
-build cache.
+build cache. Changing Go dependencies (`tea/go.sum`) also means updating
+`vendorHash` of `muninn-tea` in `flake.nix` (set `pkgs.lib.fakeHash`, build,
+copy the "got:" hash).
 
 ### Linting
 
-Run all pre-commit hooks (ruff format, ruff check, ty check, alejandra, nix flake check):
+Run all pre-commit hooks (ruff format, ruff check, ty check, alejandra, nix flake check, gofmt, go vet + test):
 
 ```bash
 nix develop --command prek run --all-files
@@ -34,6 +37,11 @@ Pre-commit hooks run automatically via prek, which enters the nix dev shell itse
 nix run .#gui-headless &                 # GUI on Xvfb :98, throwaway data dir
 DISPLAY=:98 xdotool type ':help'         # drive it (xdotool in dev shell)
 DISPLAY=:98 import -window root out.png  # screenshot
+
+tools/tea_lab.sh start                   # hub + bots + Bubble Tea client in tmux
+tools/tea_lab.sh keys 'hi' Enter; tools/tea_lab.sh shot   # drive / text capture
+tools/tea_lab.sh png                     # colour screenshot (xterm on Xvfb :96)
+python tools/netsim_lab.py bench         # two emulators over real Android BT (netsim)
 
 nix run .#android-emu &                  # headless KVM emulator (API 34 x86_64)
 adb install -r -g android/app/build/outputs/apk/debug/app-debug.apk
@@ -61,6 +69,12 @@ pair/chat between them over real RFCOMM.
 - **SQLite write-through persistence** — messages, pubkeys, groups, display names, unacked state, and seen-dedup are all persisted via `storage.py`. WAL mode, `threading.Lock` serialization. The DB file growing is not a bug; pruning is out of scope.
 - **Muninn never pairs** (and never sets Trusted, never registers a pairing agent). A bond with a phone made Android use the laptop as speakers; Muninn's RFCOMM profile is open on both sides, so links don't need one — if a laptop can't dial a phone unbonded, the phone dials the laptop. Old bonds: `:unpair` / `/unpair`; Trusted is cleared on start.
 - **No forward secrecy** — acceptable for this use case.
+- **Linked devices keep separate keys** — a device set (signed by the first
+  device + each member's consent, XEdDSA with the X25519 keys) maps devices
+  to a person; storage and UIs speak person ids (`mesh.me`, `mesh.person()`),
+  transport stays per device (`mesh.node_id`). Compare senders with `me`.
+- **One core, many front ends** — the Bubble Tea client is Go but holds no
+  protocol logic: it runs `muninn --api` (stdio JSON, `api.py`).
 - **Routing metadata is plaintext** — src/dst/ids/ACKs; bodies are encrypted. Needed for relaying.
 - **Good Bluetooth citizen** — never pair with, prompt, or dial devices that aren't (possibly) Muninn; headsets/watches are never contacted.
 
@@ -86,16 +100,24 @@ Python (`python/src/muninn/`) — shared by CLI, GUI, bot, tests:
 - `storage.py` — SQLite (schema migrations in `_migrate`)
 - `transport.py` (`BtTransport`, `ScanResult`), `bt/bluez.py`, `bt/winrt.py`
 - `scanpolicy.py` — find mode (temporary scanning for new people) + reconnect speed fast/saver (mirror: `android/core/.../ScanPolicy.kt`, tested)
+- `devices.py` + `xeddsa.py` — linked-device sets, signatures (mirrors: `Devices.kt`, `Ed25519.kt`; vectors in `spec/`)
+- `backup.py` — backup zip (also the history-sync format; Kotlin: `HistorySync.kt`, app `Backup.kt`)
+- `media.py` — photo shrinking before sending; `api.py` — stdio JSON API for `tea/`
 - `gamehost.py` + `games/*.js` — generic game sessions + plugins (API in games/README.md)
 - `emoji.py` + `assets/emoji.json`, `assets/stickers/*.gif` — shared with Android
 - `sim/hub.py`, `sim/transport.py`, `sim/lab.py` — radio simulator; `bot.py` — headless node
-- `cli.py` (line mode + shared `/command` handling), `tui.py` (curses full-screen, default on a TTY); `gui/` (`bridge.py` command dispatcher, `models.py`, `vim.py`, `qml/`)
+- `cli.py` (line mode + shared `/command` handling, `--api`), `tui.py` (curses full-screen, default on a TTY); `gui/` (`bridge.py` command dispatcher, `models.py`, `vim.py`, `qml/`)
+
+Go (`tea/`): Bubble Tea client — `core.go` (spawns the core), `model.go`
+(state, keys), `view.go` (rendering), `palette.go` (Ctrl+K), `theme.go`.
 
 Kotlin:
-- `android/core/` — pure-JVM port of the core (`Nacl.kt` TweetNaCl, `Protocol.kt`,
-  `Mesh.kt`, `Node.kt`, `Storage.kt`, `GameHost.kt`, `SimTransport.kt`, `SimNode.kt`)
+- `android/core/` — pure-JVM port of the core (`Nacl.kt` TweetNaCl, `Ed25519.kt`
+  XEdDSA, `Protocol.kt`, `Mesh.kt`, `Devices.kt`, `HistorySync.kt`, `Node.kt`,
+  `Storage.kt`, `GameHost.kt`, `SimTransport.kt`, `SimNode.kt`)
 - `android/app/` — `Runtime.kt` (process-wide node), `MuninnService.kt`,
-  `BtTransport.kt`, `AndroidStorage.kt`, Compose screens, `assets/gamehost.html`
+  `BtTransport.kt`, `AndroidStorage.kt`, `TapPair.kt` (NFC), `Updater.kt`,
+  `Backup.kt`, `Media.kt`, Compose screens, `assets/gamehost.html`
 
 Any protocol or behaviour change must land in **both** cores; `tests/test_interop.py`
 and the parity tests catch drift. See TESTING.md.
@@ -115,4 +137,6 @@ through `bridge.runCommand`. Adding a new command means:
 3. If it returns text/lists, emit `infoMenuRequested(title, items)`; otherwise emit
    `notify` for success and `errorOccurred` for failure.
 
-CLI commands stay `/`-prefixed in `cli.py` — no plan to unify.
+CLI commands stay `/`-prefixed in `cli.py` — no plan to unify. The Bubble Tea
+client gets every `/command` for free (it runs them through `api.py`); add
+common ones to `paletteCommands` in `tea/palette.go`.

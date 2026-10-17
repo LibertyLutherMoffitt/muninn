@@ -25,14 +25,19 @@ appears. Everything is end-to-end encrypted.
 - pictures, GIFs and any file (resumable, verified, even through relays)
 - 25 animated stickers built in, plus any GIF you save — no internet needed
 - emoji picker and `:shortcodes:`
-- games: chess, checkers, connect four, reversi, dots & boxes (2-4 players),
-  tic-tac-toe and real-time pong — any game is one JavaScript file, and the
-  code travels with the invite, so the other side doesn't need it installed
+- games: chess, four-player chess, checkers (Turkish by default, many rule
+  options, 6×6 too), connect four, reversi, dots & boxes, tic-tac-toe,
+  ultimate and ultimate² tic-tac-toe, unlimited tic-tac-toe (any number of
+  players, k in a row) and real-time pong; scores per chat, spectators, and
+  unsending an invite — any game is one JavaScript file whose code travels
+  with the invite, so the other side doesn't need it installed
 - presence: *connected* / *via a relay* / *nearby, not connecting* / *last seen*
+- tap two Android phones together (NFC) to meet, or to add someone to a room
 - linked devices: your phone and laptop act as one person (`:link` shows a
   code, the other device joins); chats, rooms and games follow you to both
 - backup and restore (`:export` / Settings → Backup), photos shrunk before
-  sending, light and dark themes
+  sending, light and dark themes, `:ping` round-trip times, a pre-flight
+  check (`:doctor`), privacy switches, self-updating apps
 - survives flaky links, app restarts, reinstalls and people walking down the
   aisle; a good Bluetooth citizen (never pairs with or prompts strangers'
   devices, never touches headsets or watches)
@@ -44,13 +49,16 @@ appears. Everything is end-to-end encrypted.
 | Client | Platform | UI | Status |
 |--------|----------|----|--------|
 | Desktop GUI | Linux (Windows backend untested) | Qt 6 / QML, Vim-modal composer | working |
-| Terminal | Linux (Windows) | full-screen TUI (curses), `/commands`; `--plain` line mode | working |
+| Terminal (Bubble Tea) | Linux, Windows | polished full-screen client, plain keys + mouse, Ctrl+K palette (`tea/`) | working |
+| Terminal (classic) | Linux (Windows) | curses TUI with Vim keys, `/commands`; `--plain` line mode | working |
 | Android | Android 12+ | Jetpack Compose | working |
 | Headless bot | anywhere | JSON control port | testing tool |
 
-The Python CLI, GUI and bot share one core (`python/src/muninn/`). The Android
-app runs a Kotlin port of the same core (`android/core/`), which is also built
-for the JVM so the two implementations are tested against each other.
+The Python CLI, GUI and bot share one core (`python/src/muninn/`); the Bubble
+Tea client is a Go front end that runs that core as `muninn --api` (JSON over
+stdio). The Android app runs a Kotlin port of the core (`android/core/`),
+which is also built for the JVM so the two implementations are tested against
+each other.
 
 ---
 
@@ -61,9 +69,9 @@ Download from the [latest release](https://github.com/LibertyLutherMoffitt/munin
 | | File | Notes |
 |---|---|---|
 | Android 12+ | `muninn-android.apk` | install once (allow "install unknown apps"); after that Muninn updates itself — *Settings → Updates* |
-| Linux | `muninn-gui-linux-x86_64`, `muninn-linux-x86_64` | `chmod +x`, run; GUI and terminal client, no Python needed (glibc 2.35+, BlueZ) |
-| Windows | `muninn-gui-windows-x86_64.exe`, `muninn-windows-x86_64.exe` | Bluetooth backend not yet tested on hardware |
-| Nix | `nix run github:LibertyLutherMoffitt/muninn#muninn-gui` | or `#muninn-linux` for the terminal |
+| Linux | `muninn-gui-linux-x86_64`, `muninn-linux-x86_64`, `muninn-tea-linux-x86_64` | `chmod +x`, run; GUI, classic terminal client, Bubble Tea client (keep it next to `muninn-linux-x86_64`, its core). No Python needed (glibc 2.35+, BlueZ). The GUI and CLI update themselves (`:update`) |
+| Windows | `muninn-gui-windows-x86_64.exe`, `muninn-windows-x86_64.exe`, `muninn-tea-windows-x86_64.exe` | same three; Bluetooth backend not yet tested on hardware |
+| Nix | `nix run github:LibertyLutherMoffitt/muninn#muninn-gui` | or `#muninn-tea` / `#muninn-linux` for the terminal |
 
 Releases are cut with `tools/release.sh X.Y.Z "notes"` (signed APK + tag +
 GitHub release; CI attaches the desktop builds).
@@ -72,7 +80,8 @@ GitHub release; CI attaches the desktop builds).
 
 ```bash
 nix run .#muninn-gui              # desktop GUI
-nix run .#muninn-linux            # terminal client (TUI; --plain for line mode)
+nix run .#muninn-tea              # Bubble Tea terminal client (F1 for keys)
+nix run .#muninn-linux            # classic terminal client (TUI; --plain for line mode)
 ```
 
 Android: `nix develop`, then `cd android && ./gradlew :app:assembleDebug` and
@@ -104,6 +113,9 @@ MUNINN_SIM=127.0.0.1:7420 MUNINN_DATA=/tmp/me nix run .#muninn-gui
 - **Mesh:** distance-vector routing, persistent outbox with retries until an
   end-to-end ACK, store-and-forward at relays, keepalive dead-link detection,
   gossip of names and keys over any number of hops.
+- **Linked devices:** each device keeps its own keys; a device set signed by
+  the first device (and a consent signed by each other one, XEdDSA with the
+  same keys) makes them one person to everyone else.
 
 Wire spec: [`PROTOCOL.md`](PROTOCOL.md). Architecture: [`DESIGN.md`](DESIGN.md).
 Game API: [`python/src/muninn/games/README.md`](python/src/muninn/games/README.md).
@@ -123,7 +135,10 @@ Download and double-click [`install-gui.bat`](install-gui.bat). It installs Muni
 Messages, files, reactions and game moves are end-to-end encrypted per
 recipient. Keys are pinned on first contact (trust on first use); a reinstall
 is recognised and handled. No PKI, so a man-in-the-middle at first contact is
-possible — out of scope for an in-flight chat tool.
+possible — out of scope for an in-flight chat tool. Nobody can add a device to
+someone else's account: linking needs a code shown on that person's device
+and signatures from both devices. Backups carry your identity only when you
+give a password (then it is encrypted with it).
 
 ---
 
@@ -142,8 +157,10 @@ hint.
 
 ## Roadmap
 
-See [`TODO.md`](TODO.md): Windows hardware validation, NFC tap-to-pair,
-linked devices (phone + laptop as one person), a full-screen TUI.
+See [`TODO.md`](TODO.md): a hardware session (real-air latency, battery,
+walking away and back), Windows hardware validation, protocol version
+negotiation before mixing app versions; screen sharing is on the glacier
+backlog.
 
 ---
 

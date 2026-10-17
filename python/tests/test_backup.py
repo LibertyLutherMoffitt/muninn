@@ -79,3 +79,77 @@ def test_someone_elses_backup_is_refused(lab, tmp_path):
     with pytest.raises(ValueError):
         b.import_backup(str(zpath), password="x")  # b already has chats
     assert b.storage.get_identity().node_id == b.node_id
+
+
+def test_crafted_backup_cannot_write_outside_the_files_dir(lab, tmp_path):
+    a = lab.node("a", (0, 0), start=False)
+    zpath = tmp_path / "evil.zip"
+    a.export_backup(str(zpath))
+    with zipfile.ZipFile(zpath) as z:
+        manifest = z.read("manifest.json")
+        tables = json.loads(z.read("tables.json"))
+    evil_id = "../../escaped"
+    tables["files"] = [
+        {
+            "file_id": evil_id,
+            "msg_id": "00" * 16,
+            "conv": "dm:X",
+            "sender": "X",
+            "name": "x",
+            "mime": "text/plain",
+            "size": 3,
+            "sha256": "",
+            "chunk_size": 16000,
+            "chunks": 1,
+            "path": "pwned.txt",
+            "state": "complete",
+            "have": "ff",
+        },
+        {
+            "file_id": "ab" * 16,
+            "msg_id": "01" * 16,
+            "conv": "dm:X",
+            "sender": "X",
+            "name": "y",
+            "mime": "text/plain",
+            "size": 3,
+            "sha256": "",
+            "chunk_size": 16000,
+            "chunks": 1,
+            "path": "..",
+            "state": "complete",
+            "have": "ff",
+        },
+    ]
+    tables["messages"] = [
+        {
+            "msg_id": "02" * 16,
+            "conv": "dm:X",
+            "sender": "X",
+            "ts": 1,
+            "kind": "file",
+            "text": "",
+            "reply_to": None,
+            "meta": json.dumps({"f": evil_id, "thumb": "/etc/passwd"}),
+            "edited_at": None,
+            "deleted": 0,
+            "read_local": 1,
+        }
+    ]
+    out = tmp_path / "evil2.zip"
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("manifest.json", manifest)
+        z.writestr("tables.json", json.dumps(tables))
+        z.writestr(f"files/{evil_id}/pwned.txt", "bad")
+        z.writestr(f"files/{'ab' * 16}/..", "bad")
+        z.writestr(f"files/{evil_id}/thumb.jpg", "bad")
+    a.import_backup(str(out))
+    files_dir = a.storage.files_dir.resolve()
+    for p in tmp_path.rglob("*"):
+        if p.name in ("pwned.txt", "escaped") or (
+            p.is_file() and p.read_bytes() == b"bad"
+        ):
+            assert files_dir in p.resolve().parents, p
+    assert not any(r.file_id.hex() == evil_id for r in a.storage.load_files())
+    msg = a.storage.get_message(bytes.fromhex("02" * 16))
+    assert msg is None or "thumb" not in msg.meta

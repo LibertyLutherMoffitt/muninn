@@ -155,16 +155,18 @@ object Backup {
                     val r = raw.toMutableMap()
                     if (t == "files") {
                         val fid = r.str("file_id")
+                        if (!Regex("^[0-9a-f]{32}$").matches(fid)) continue // ids become directory names
                         val dir = File(storage.filesDir, fid)
                         val bytes = entries["files/$fid/${r["path"]}"]
-                        val dest = File(dir, File(r["path"] as? String ?: "file").name)
+                        val dest = File(dir, com.muninn.core.Mesh.safeName(File(r["path"] as? String ?: "file").name))
                         if (bytes != null) { dir.mkdirs(); dest.writeBytes(bytes) }
                         else if (r["state"] == "complete") { r["state"] = "offered"; r["have"] = "" }
                         r["path"] = dest.path
                     }
                     if (t == "messages") {
                         val meta = runCatching { Json.obj(r["meta"] as? String ?: "{}") }.getOrDefault(emptyMap()).toMutableMap()
-                        val fid = meta["f"] as? String
+                        if (meta.remove("thumb") != null) r["meta"] = Json.write(meta) // a path on the other device
+                        val fid = (meta["f"] as? String)?.takeIf { Regex("^[0-9a-f]{32}$").matches(it) }
                         val th = fid?.let { entries["files/$it/thumb.jpg"] }
                         if (th != null) {
                             val f = File(File(storage.filesDir, fid).apply { mkdirs() }, "thumb.jpg"); f.writeBytes(th)

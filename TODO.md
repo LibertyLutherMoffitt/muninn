@@ -141,8 +141,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [ ] Android screenshot tests without an emulator (Paparazzi).
 - [ ] GUI design tokens + shared PresenceDot/EmptyState, message runs.
 - [x] CLI `/whoami`, presence in `/peers`, "held for …" for queued sends.
-- [ ] Docs: TESTING.md, REVIEW.md (Linux vs Windows behaviour), PROTOCOL
-  validation rules (UTF-8-safe name truncation — v2 has the same bug).
+- [x] Docs: TESTING.md, PROTOCOL validation rules (UTF-8-safe name
+  truncation). (A Linux-vs-Windows REVIEW.md waits for the Windows pass.)
 - [x] Notifications VISIBILITY_PRIVATE on the lock screen.
 
 ### 2.6c User requests (2026-10-16) — in progress now
@@ -179,11 +179,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   laptop-as-middleman direct links, reconnect after walking away, file
   throughput, battery drain over a few hours with the screen off, and that
   no phone ever offers magnus as an audio device again.
-- [ ] **Bubble Tea terminal client** (Go, Linux + Windows): a second,
-  non-vim terminal client focused on visual polish — smooth animations,
-  slick layout, sensible default keybinds (arrows/Tab/Enter/Ctrl-…), mouse
-  support. Talks to the same core (via a local JSON API over the bot's
-  control port, or a Go port of the protocol). No games.
+- [x] **Bubble Tea terminal client** (`tea/`, Go, Linux + Windows): plain
+  keys + mouse, Ctrl+K palette, bubbles with replies/reactions/ticks/file
+  progress, emoji completion, toasts, spring scrolling, narrow layout. Drives
+  the Python core via `muninn --api` (stdio JSON, `api.py`), so no protocol
+  port. No games. Tests: Go unit tests + tmux end-to-end (`test_tea.py`).
 - [ ] (later — everyone updates a week before the trip) **Protocol versioning** (`CAPS` / feature
   bits in HELLO): today a v2 node refuses any other version outright, so a
   friend who hasn't updated can't talk to you mid-flight. Make HELLO carry
@@ -271,7 +271,19 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   restyled menus/palette/game overlay); four new games + game options +
   host zoom; TUI on the GUI's vim engine (Qt-optional); Android raven icon,
   swipe-to-reply, self-update; signed releases + desktop CI builds.
-- Next: more games (chess, checkers, connect4, reversi, real-time demo),
-  BT good-citizen audit (bluez agent), Python scan policy, Windows check,
-  Android notification/background testing, netsim real-BT test of new app,
-  NFC tap-to-pair, docs (PROTOCOL/DESIGN/README), CLI polish.
+- 2026-10-16/17 (v0.3 → v0.8): "Muninn never pairs" after a bond made a
+  phone use the laptop as speakers; NFC tap to meet / to add someone to a
+  room; forget / block / delete chats; pre-flight `:doctor`, privacy
+  switches, find mode + reconnect speeds; checkers rules (Turkish default,
+  6×6), ultimate², unlimited and 4-player chess, scores, spectators, unsend;
+  self-update on every platform; photos shrunk before sending; light theme;
+  backup / restore (same file on desktop and Android); `:ping` and the
+  netsim lab (found two finders paging each other mid-inquiry → retry
+  ladder + jitter); **linked devices** in both cores (XEdDSA-signed sets,
+  persons everywhere, history sync); the **Bubble Tea client**.
+- Review (2026-10-17): backup / history-sync imports used ids from the zip
+  as directory names and file names could be `..` → ids must be hex, names
+  sanitised, foreign thumbnail paths dropped (test added); Bubble Tea client
+  could wait 60 s on exit and raced on the core's stderr → fixed.
+- Next: the hardware session (real-air latency, battery, walking away),
+  Windows hardware pass, protocol version negotiation before mixing versions.

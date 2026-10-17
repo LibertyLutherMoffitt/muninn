@@ -215,6 +215,7 @@ inside the invite, so they can play without installing anything.
 
 Bundled games to learn from: `tictactoe.js` (smallest), `connect4.js`,
 `reversi.js`, `dots.js` (2–4 players, extra turns), `checkers.js` and
-`chess.js` (select-then-move input, rotated board), `uttt.js` (nested
-boards), `unlimited.js` (growing board, options, up to 8 players),
+`chess.js` (select-then-move input, rotated board; checkers also shows many
+rule options), `uttt.js` / `uuttt.js` (nested boards, two and three levels),
+`unlimited.js` (growing board, options, up to 8 players),
 `chess4.js` (eliminations), `pong.js` (real-time).

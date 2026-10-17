@@ -42,7 +42,30 @@ type Core struct {
 	next    int
 	pending map[int]chan reply
 	Events  chan Event
-	stderr  strings.Builder
+	stderr  lockedBuf
+}
+
+// lockedBuf: the process writes stderr from its own goroutine.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.b.Len() > 64<<10 { // keep the tail only
+		s := l.b.String()
+		l.b.Reset()
+		l.b.WriteString(s[len(s)-32<<10:])
+	}
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // findCore: $MUNINN_CORE (a command line, e.g. "python -m muninn.cli"),
@@ -132,6 +155,10 @@ func (c *Core) read(out io.Reader) {
 
 // Call sends one request and decodes its result into out (may be nil).
 func (c *Core) Call(cmd string, params map[string]any, out any) error {
+	return c.call(cmd, params, out, 60*time.Second)
+}
+
+func (c *Core) call(cmd string, params map[string]any, out any, timeout time.Duration) error {
 	c.mu.Lock()
 	c.next++
 	id := c.next
@@ -156,13 +183,16 @@ func (c *Core) Call(cmd string, params map[string]any, out any) error {
 			return json.Unmarshal(r.Result, out)
 		}
 		return nil
-	case <-time.After(60 * time.Second):
+	case <-time.After(timeout):
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return errors.New("the core didn't answer")
 	}
 }
 
 func (c *Core) Close() {
-	_ = c.Call("quit", nil, nil)
+	_ = c.call("quit", nil, nil, 3*time.Second)
 	_ = c.in.Close()
 	done := make(chan struct{})
 	go func() { _ = c.cmd.Wait(); close(done) }()

@@ -20,7 +20,8 @@ What "just works" has to mean on a plane:
 
 ```
             ┌───────────── UI ──────────────┐
-            │ Qt/QML GUI · CLI · bot │ Android Compose │
+            │ Qt/QML GUI · TUI/CLI · bot    │ Android Compose
+            │ Bubble Tea (Go) ── stdio JSON ┤ (api.py)
             └──────────────┬────────────────┘
                            │ events / API
             ┌──────────────▼────────────────┐
@@ -110,7 +111,7 @@ forever, so retries never show twice.
 
 All user content is a typed, encrypted body (text with reply-to, reaction,
 edit, delete, file offer/chunk/request, group info, read receipt, app event,
-real-time datagram, typing, reinstall notice). Group messages are encrypted
+real-time datagram, typing, reinstall notice, device link). Group messages are encrypted
 per member. Files are pulled by the receiver in windows of chunks, from the
 sender or any member that has the file, resumable and hash-verified.
 
@@ -130,10 +131,10 @@ What Muninn does to a device that isn't running Muninn — the complete list
 | Device | What can happen | How often |
 |---|---|---|
 | Headset, watch, mouse, speaker, "other" | nothing — never dialled, probed, paired or SDP-queried | never |
-| Stranger's phone/laptop, *visible* and not revealing its services | one pairing-free probe (SDP lookup of the Muninn UUID; no prompt, no bond) — **only in find mode** | ≤ 3 per look; then 10 min pause after a first miss, 6 h after a second |
+| Stranger's phone/laptop, *visible* and not revealing its services | one pairing-free probe (SDP lookup of the Muninn UUID; no prompt, no bond) — **only in find mode** | ≤ 3 per look; after a miss it is retried once ~45 s later (a busy radio is the usual cause), then after 10 min, then left alone for 6 h |
 | …same, user taps "look again" | probe the 6 strongest unknowns | a device at most once a minute |
 | Stranger's phone that is *not* visible (most phones) | nothing — it never shows up in an inquiry | never |
-| Any device | hears our inquiry (a broadcast; every phone's BT settings screen does the same) | **only in find mode**: every 15 s for 5 min after you open Nearby / ⟳ / `:find`, or while you know nobody; otherwise never |
+| Any device | hears our inquiry (a broadcast; every phone's BT settings screen does the same) | **only in find mode**: every 15–23 s (jittered, so two phones both looking drift apart instead of paging each other mid-inquiry) for 5 min after you open Nearby / ⟳ / `:find`, or while you know nobody; otherwise never |
 
 **Muninn never pairs** — no bonds, no "Pair with …?" prompts, no Trusted
 flag, no pairing agent. A bond is what lets a phone treat a laptop as a
@@ -154,36 +155,44 @@ separate, temporary **find mode**, because new contacts are rare.
 
 ## Clients
 
-| | Desktop (Python) | Android (Kotlin) |
+| | Desktop (Python core) | Android (Kotlin) |
 |---|---|---|
-| UI | Qt 6/QML GUI with Vim-modal composer, command palette; readline CLI | Jetpack Compose |
-| Transport | BlueZ (D-Bus profile), WinRT (untested), simulator | insecure RFCOMM, simulator |
-| Notifications | notify-send / tray | per-conversation, inline reply |
-| Background | — | foreground service, boot start |
+| UI | Qt 6/QML GUI (Vim-modal composer, palette, light/dark); curses TUI + line CLI; Bubble Tea client (Go, plain keys, `tea/`) | Jetpack Compose |
+| Transport | BlueZ (D-Bus profile), WinRT (untested), simulator | insecure RFCOMM, NFC tap to meet, simulator |
+| Notifications | notify-send / tray | per-conversation, inline reply + 👍 |
+| Background | tray (`:background`), autostart | foreground service, boot start |
+| Updates | self-update of the standalone builds (checksummed) | in-app updater (same signing key) |
 
-A Go TUI and a WearOS thin client were once planned; they are not on the
-roadmap now (see TODO.md).
+The Bubble Tea client holds no protocol logic: it starts the Python core as
+`muninn --api` and speaks newline-delimited JSON with it over stdio
+(`api.py`), so one tested core serves every desktop front end and the Go
+binary cross-compiles for Windows next to the CLI it drives.
 
 ## Transport details
 
 - RFCOMM service UUID `320bcf9c-94fe-46f4-b9bf-83535cafcd55`.
 - BlueZ: profile registered via `ProfileManager1` (no authentication
   required); `ConnectProfile` is called asynchronously and the socket arrives
-  through `NewConnection`. Known peers are paired via `Device1.Pair()` (link
-  keys persist with `store_hint=1`); unconfirmed devices are never paired.
-  Discoverability is re-asserted every 2 minutes.
+  through `NewConnection`. Nothing is ever paired (see above); the adapter is
+  discoverable but not pairable while Muninn runs, re-asserted every 2
+  minutes and restored on exit.
 - Android: `listenUsingInsecureRfcommWithServiceRecord` /
   `createInsecureRfcommSocketToServiceRecord` — no bonding, no prompts.
   Android can't be discovered unless the user allows it (≤ 5 min), but it
   finds and dials laptops and known peers on its own.
-- Windows: discovery only sees paired devices; discoverability can't be set
-  programmatically. Pair once in Settings.
+- Windows: discovery only sees paired devices and discoverability can't be
+  set programmatically, so phones dial the PC (it listens on the Muninn
+  service). Untested on hardware.
 
 ## Security
 
 NaCl box (X25519 + XSalsa20-Poly1305), static keys, no forward secrecy, TOFU
 key pinning, routing metadata in the clear for relays. MITM at first contact
-and storage limits are out of scope.
+and storage limits are out of scope. Linked-device sets are XEdDSA-signed
+with the same X25519 keys (the first device signs the set, every other
+device its own consent), so peers verify them against keys they already
+pinned. Backups include the identity key only with a password (PBKDF2-SHA256
+→ XSalsa20-Poly1305); importing never writes outside the files directory.
 
 ## Legal
 

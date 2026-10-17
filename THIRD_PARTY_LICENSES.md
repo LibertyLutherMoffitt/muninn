@@ -16,6 +16,25 @@ source tree — they are pulled in as separate artifacts by `pip` (PyPI) or
 | PyGObject   | LGPL-2.1-or-later  | GLib mainloop binding (Linux BlueZ backend)             |
 | winrt-runtime, winrt-Windows.* | MIT | WinRT projection (Windows BT backend)            |
 | JetBrains Mono | SIL Open Font License 1.1 | Default UI font (used if installed; otherwise the OS substitutes a monospace face) |
+| Pillow      | MIT-CMU (HPND)     | Photo shrinking before sending (`media.py`)              |
+
+### Bubble Tea client (`tea/`, statically linked into `muninn-tea`)
+
+| Library | License | Role |
+|---|---|---|
+| Go standard library | BSD-3-Clause | runtime |
+| charmbracelet/bubbletea, bubbles, lipgloss, harmonica, x/ansi, x/term, x/cellbuf, colorprofile | MIT | terminal UI framework, widgets, styling, spring animation |
+| muesli/termenv, muesli/ansi, muesli/cancelreader | MIT | terminal colours and input |
+| rivo/uniseg, mattn/go-runewidth, clipperhouse/* | MIT | text width / grapheme handling |
+| lucasb-eyer/go-colorful | MIT | colour maths |
+| mattn/go-isatty, mattn/go-localereader, erikgeiser/coninput, xo/terminfo, aymanbagabas/go-osc52, atotto/clipboard, sahilm/fuzzy | MIT | terminal / console helpers (some only on Windows) |
+
+### Android app
+
+| Library | License | Role |
+|---|---|---|
+| AndroidX / Jetpack Compose, Material 3, Kotlin standard library | Apache-2.0 | UI and runtime |
+| TweetNaCl (ported to Kotlin in `android/core/`) | public domain | X25519, XSalsa20-Poly1305, Ed25519 group arithmetic |
 
 ### Build-time tools (not redistributed in the source tree)
 

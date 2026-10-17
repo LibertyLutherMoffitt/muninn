@@ -1,234 +1,87 @@
-# Muninn — Desktop Client (CLI + GUI)
+# Muninn — desktop package (core, GUI, terminal, bot)
 
-Encrypted peer-to-peer chat over Bluetooth Classic (RFCOMM). No internet required.
+The Python package in `src/muninn/` is the desktop core and every desktop
+front end:
 
-Runs on Linux (BlueZ) and Windows (WinRT). A single Python package, two BT
-backends — the right one is picked at import time via `sys.platform`. Two
-frontends share the full core: a readline CLI and a Qt6/QML GUI with Vim-modal
-editing.
+| Entry point | What |
+|---|---|
+| `muninn-gui` | Qt 6 / QML GUI (Vim-modal composer, palette, light/dark themes, tray) |
+| `muninn` | terminal client: full-screen curses TUI on a TTY, `--plain` line mode, `--api` JSON on stdio for the Bubble Tea client (`../tea/`) |
+| `muninn-bot` | headless node with a JSON control port (tests, labs, a friend's laptop as a relay) |
+| `muninn-simhub` | the simulated Bluetooth radio (see `../TESTING.md`) |
 
-## Linux — quick start
+Bluetooth backends: BlueZ over D-Bus on Linux (`bt/bluez.py`), WinRT on
+Windows (`bt/winrt.py`, not yet tested on hardware). Muninn **never pairs**:
+links are open RFCOMM connections to the Muninn service; old bonds can be
+removed with `/unpair` / `:unpair`.
 
-**Prerequisites:** Two Linux devices with Bluetooth; Nix package manager.
-
-```
-nix run .#muninn-linux     # CLI
-nix run .#muninn-gui       # GUI
-```
-
-No flags needed for CLI. Every device both listens and scans continuously. Each discovers nearby Muninn
-peers, connects to all of them simultaneously, and maintains independent sessions.
-Pairing is handled on first connect; no OS-level pairing setup required.
-
-## Windows — quick start
-
-**Status:** backend written (`muninn/bt/winrt.py`) but not yet hardware-tested.
-Treat this as beta — report what breaks.
-
-**Prerequisites:** Python 3.11+; Bluetooth adapter; peer device discoverable
-in **Settings → Bluetooth & devices** (Windows has no programmatic
-discoverability toggle, unlike Linux).
-
-```powershell
-# From the python/ directory
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install .
-muninn
-```
-
-`pip install .` picks up the `winrt-*` dependency group automatically via
-`sys_platform == 'win32'` markers in `pyproject.toml`.
-
-### Standalone .exe (optional)
-
-Bundle everything into one executable for distribution:
-
-```powershell
-pip install .[windows-build]
-pyinstaller --onefile --name muninn -c python/src/muninn/cli.py
-# Output: dist\muninn.exe
-```
-
-Ship `muninn.exe` — no Python install required on the target machine.
-
-## Usage — CLI
-
-Once running, type `/help` for the full command list:
-
-```
-/dm <name|addr>         — switch to DM with the given peer
-/group <name>           — switch to a named group
-/new <name> <p1> [p2…]  — create a group with currently-connected peers
-/nick <name>            — set your own self-chosen display name (broadcast to peers)
-/nick <peer> <name>     — set a local-only override for a peer
-/nick <peer> ""         — clear a local override
-/list                   — list all conversations (DMs + groups)
-/peers                  — list connected peers and relay-reachable peers
-/known                  — list all peers ever seen, with current status
-/history [N]            — show last N messages in the active conversation (default 20)
-```
-
-Tab-complete works for peer display names + MAC addresses (under `/dm`, `/new`, `/nick`) and group names (under `/group`).
-
-### Display names
-
-Two knobs:
-
-- **Self-chosen** — set via `/nick <name>` (or the `MUNINN_NAME` env var at launch).
-  Broadcast to every peer you connect to. Peers see this as your name by default.
-  Persisted to SQLite — survives restarts.
-- **Local override** — set via `/nick <peer> <name>`. Per-device, not sent over the
-  wire. Overrides what the peer announced. Useful when someone self-names "Odin" but
-  you want them shown as "Dave". Persisted to SQLite.
-
-Overrides win on display and when resolving names in commands (e.g. `/dm Dave`).
-Both fall back to the MAC address if unset.
-
-Launch with a name pre-set (takes precedence over the persisted name for this session,
-without overwriting the persisted value):
+## Run
 
 ```bash
-MUNINN_NAME=Josh nix run .#muninn-linux
+nix run .#muninn-gui                 # GUI
+nix run .#muninn-linux               # terminal client
+nix run .#muninn-tea                 # Bubble Tea terminal client (Go front end, same core)
 ```
 
-Incoming messages print inline, tagged by conversation:
+Standalone builds (no Python needed) are attached to every GitHub release —
+see the top-level README. From source without Nix: `pip install ./python`
+(`pip install "./python[gui]"` for the GUI), then `muninn` / `muninn-gui`.
+
+Environment:
+
+| Variable | Meaning |
+|---|---|
+| `MUNINN_NAME` | display name for this session |
+| `MUNINN_DATA` | data directory (default `~/.local/share/muninn`, `%APPDATA%\muninn` on Windows) |
+| `MUNINN_SIM=host:port` | use the simulator instead of Bluetooth |
+
+Only one front end runs per data directory at a time (`instance.py`); a
+second one exits with a clear message. Logs go to `<data dir>/muninn.log`.
+
+## Using it
+
+Type `/help` in the terminal or `:help` in the GUI (F1 in the Bubble Tea
+client). The most useful commands:
 
 ```
-[DM:AA:BB:CC:DD:EE:FF] < hey
-[Flight] < BB:CC:DD:EE:FF:00: anyone want coffee?
+/dm <name>              open a chat          /new <room> <people…>  new room
+/find                   look for new people   /peers                 who's in range
+/nick <name>            your name             /nick <who> <name>     local nickname
+/file <path>            send a file/photo     /photos original       send photos unshrunk
+/link                   link another device   /devices               your devices
+/export [file] [pw=…]   back up               /import <file>         restore
+/ping <name>            round-trip time       /doctor                check before the flight
+/forget, /block         remove people         /privacy               receipts / typing
 ```
 
-Outbound messages show status icons as they progress:
+The GUI has the same commands with `:` and adds a palette (Space f / Ctrl+K),
+drag & drop, image viewer, games, zoom and a tray icon. Its Vim keys are
+described in `src/muninn/gui/GUI_PLAN.md`.
+
+## Layout
 
 ```
-[DM:AA:BB:CC:DD:EE:FF] > hello
-                                                                         ⧗
-                                                          ✓ AA:BB:CC:DD:EE:FF
-                                                         ✓✓ AA:BB:CC:DD:EE:FF
+src/muninn/
+  protocol.py content.py   wire frames / encrypted bodies (../PROTOCOL.md)
+  mesh.py                  routing, outbox, relays, gossip, groups, files, games, linked devices
+  node.py                  identity + storage + mesh + transport, dialer, discovery, presence
+  storage.py               SQLite (WAL), migrations
+  devices.py xeddsa.py     linked-device sets and their signatures
+  backup.py media.py       backups / history sync, photo shrinking
+  gamehost.py games/       game sessions + JavaScript game plugins (games/README.md)
+  transport.py bt/         Bluetooth backends; sim/ the simulator
+  cli.py tui.py api.py     terminal clients and the stdio API
+  gui/                     Qt bridge, models, Vim engine, QML
+tests/                     pytest suites (../TESTING.md)
 ```
-
-(`⧗` = pending; `✓` = delivered/ACKed; `✓✓` = read; each status line is right-aligned)
-
-Ctrl+C to quit.
-
-## Usage — GUI
-
-`nix run .#muninn-gui` launches the Qt6/QML client. It speaks the same
-protocol as the CLI and shares the same SQLite database, so a CLI history is
-visible in the GUI and vice versa (one of them must be the *writer*; the
-other runs read-only).
-
-Default font is **JetBrains Mono** (the OS substitutes a monospace face if it
-isn't installed).
-
-### Vim modal composer
-
-The composer is a full Vim modal editor. Normal / Insert / Visual / Visual-line
-/ Operator-pending / Cmdline modes; motions (`hjkl wWbBeE 0^$ gg G fF tT ;,`),
-text objects (`iw aw i" a" i( a) i{ a} ` ` `…`), operators (`d c y > <` plus
-`dd cc yy D C Y x X s S`), registers (`"a`–`"z`, `""`, `"0`, `"+` for
-clipboard), `~`, `r{c}`, `J`, `.` for repeat, `u` / `Ctrl-R`, count prefixes
-on every operator/motion/paste. Yank/paste tracks **linewise vs charwise** so
-`p` after `yw` pastes inline, while `p` after `yy` opens a new line — like
-Vim.
-
-### Commands (`:` cmdline)
-
-Same set as the CLI but `:`-prefixed. Tab-completes commands, peer names, and
-group names.
-
-```
-:dm <peer>                 — switch DM
-:group <name>              — switch group
-:new <name> <p1> [p2…]     — create group
-:nick <name>               — set your display name
-:nick <peer> <name>        — local override for a peer
-:list / :peers / :known    — pop info menu (click-through to a conversation)
-:history [N]               — reload last N messages
-:scan                      — open the scan dialog
-:clear                     — clear the visible message buffer
-:next / :prev              — cycle conversations
-:palette / :find / :f      — open command palette
-:help                      — pop info menu listing every command
-:w                         — no-op
-:wq / :x                   — send pending buffer, then quit
-:q / :qa                   — quit (also ZZ)
-```
-
-`:list` / `:peers` / `:known` / `:help` open a popup menu; the rest emit a
-toast.
-
-### Navigation keys (outside Insert mode)
-
-| Keys                     | Action                                   |
-|--------------------------|------------------------------------------|
-| `Ctrl-N` / `Ctrl-P`      | Cycle to next / previous conversation    |
-| `<space>f`               | Open command palette (peers + commands)  |
-| `<space>s`               | Open scan dialog                         |
-| `Ctrl-H` / `Ctrl-L`      | Focus peer list / chat pane              |
-| `Esc`                    | Close any overlay; otherwise leave Insert|
-
-Inside the palette / info menu / scan dialog: `Ctrl-N` / `Ctrl-P`, `j` / `k`,
-or `Up` / `Down` to move selection; `Tab` to complete; `Enter` to activate;
-`Esc` to close.
-
-### Reader vs writer
-
-The first Muninn process to launch (CLI or GUI) acquires the writer lock and
-owns the BT stack. A second process opens read-only — it can browse history
-and watch live updates but cannot send, scan, pair, or change nick. The
-status bar shows the current mode.
-
-## Dev Shell
-
-```
-nix develop
-python -m muninn.cli --help
-```
-
-## What works today
-
-- RFCOMM connect/listen via BlueZ D-Bus (`org.bluez.ProfileManager1`) — Linux
-- RFCOMM connect/listen via WinRT (`RfcommServiceProvider` / `StreamSocket`) — Windows
-- Automatic pairing — `org.bluez.Device1.Pair()` on Linux,
-  `DeviceInformation.Pairing.Custom.PairAsync()` on Windows; both use Just Works /
-  NoInputNoOutput and require no OS pairing UI
-- X25519 key exchange + XSalsa20-Poly1305 encryption (NaCl Box)
-- Simultaneous multi-peer connections — each peer has independent socket/box/recv thread
-- Continuous scan + acceptor threads — peers find and reconnect to each other automatically
-- Periodic BT cache refresh (every ~2 min) to keep UUID discovery current
-- 1:1 DMs and named groups (up to 6 members); any peer can create a group
-- Pairwise E2EE per recipient — a group message is encrypted separately for each member
-- Relay — frames destined for unreachable peers are forwarded by connected intermediaries
-  and queued if no path exists yet
-- End-to-end ACKs (flood-back through all peers) — sender sees delivery per recipient
-- Read receipts (`✓✓`) when the recipient switches to the conversation
-- Resend of unacked messages on peer reconnect
-- Receiver deduplicates by message ID
-- MAC tiebreaker (higher MAC defers 10s) to avoid simultaneous `ConnectProfile` deadlocks
-- **SQLite persistence** — messages, pubkeys, groups, display names, unacked state, and
-  dedup table survive restarts. Keypair persisted to identity table (same shared secret
-  with each peer across restarts). DB stored at `~/.local/share/muninn/muninn.db` on
-  Linux, `%APPDATA%\muninn\muninn.db` on Windows.
-- Message history via `/history [N]`
-
-## What doesn't exist yet
-
-- Android client
-- Windows backend hardware-tested (`bt/winrt.py` is written but not yet validated on
-  real Windows hardware — expect rough edges)
 
 ## Troubleshooting
 
-**`No Muninn service found`** — the other device isn't running Muninn yet, or the OS
-BT stack hasn't cached its SDP record. Start Muninn on both devices; they will find each
-other. On Windows, ensure the peer is discoverable in **Settings → Bluetooth & devices**.
-
-**`No Bluetooth adapter found`** — Linux: `bluetoothctl show` to verify adapter is
-present and powered on. Windows: check Device Manager and confirm Bluetooth is enabled
-in Settings.
-
-**Windows pairing hangs** — Windows requires the peer to be either discoverable or
-already in its known-devices list. Make the peer discoverable (Settings) before first
-connect; subsequent connects work in the background.
+- **Nobody shows up** — on a new phone, *Settings → Make me visible* once (or
+  run `/find` on the laptop while the phone shows its Nearby screen). Known
+  people reconnect by themselves afterwards.
+- **`No Bluetooth adapter`** — Linux: `bluetoothctl show` (powered on?).
+  Windows: Settings → Bluetooth.
+- **A phone offers the laptop as speakers** — an old bond from Muninn ≤ 0.2:
+  `/unpair` here and *Forget* the laptop on the phone.
+- **"already running"** — another Muninn front end owns this data directory.

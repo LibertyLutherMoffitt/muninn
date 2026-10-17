@@ -104,11 +104,13 @@ object HistorySync {
                     (r["left"] as? Number)?.toInt() == 1)
             }
             val names = z.entries().toList().map { it.name }.toSet()
+            val hexId = Regex("^[0-9a-f]{32}$")
             for (r in rows("files")) {
                 val fid = r.str("file_id")
+                if (!hexId.matches(fid)) continue // ids become directory names
                 if (storage.loadFiles().any { it.fileId.hex() == fid }) continue
                 val dir = File(storage.filesDir, fid)
-                val fname = File(r.str("path").ifEmpty { "file" }).name
+                val fname = Mesh.safeName(File(r.str("path").ifEmpty { "file" }).name)
                 val member = "files/$fid/$fname"
                 val dest = File(dir, fname)
                 var state = r.str("state")
@@ -124,8 +126,8 @@ object HistorySync {
             var added = 0
             for (r in rows("messages")) {
                 if (r.str("kind") == "system") continue // this device keeps its own
-                var meta = (r["meta"] as? String)?.let { runCatching { Json.obj(it) }.getOrNull() } ?: emptyMap()
-                val fid = meta["f"] as? String
+                var meta = ((r["meta"] as? String)?.let { runCatching { Json.obj(it) }.getOrNull() } ?: emptyMap()) - "thumb"
+                val fid = (meta["f"] as? String)?.takeIf { hexId.matches(it) }
                 if (fid != null && "files/$fid/thumb.jpg" in names) {
                     val th = File(File(storage.filesDir, fid).apply { mkdirs() }, "thumb.jpg")
                     th.writeBytes(read("files/$fid/thumb.jpg")!!)

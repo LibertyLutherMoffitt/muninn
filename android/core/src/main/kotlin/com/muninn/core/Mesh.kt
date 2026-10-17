@@ -1649,7 +1649,7 @@ class Mesh(
     companion object {
         fun safeName(name: String): String {
             val keep = name.map { if (it.isLetterOrDigit() || it in "._- ()") it else '_' }.joinToString("").trim()
-            return keep.take(120).ifEmpty { "file" }
+            return keep.trimStart('.').take(120).ifEmpty { "file" } // never "." / ".." / hidden files
         }
 
         fun sha256(f: File): String {

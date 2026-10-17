@@ -1,5 +1,15 @@
 # Muninn GUI — Plan
 
+> **Status (2026-10-17).** This is the original plan; most of it shipped and
+> some of it changed. Shipped beyond the MVP: files and images (drag & drop,
+> viewer, shrinking), emoji picker and stickers, search, light/dark/system
+> themes (`:theme`), tray + background running, games, zoom, linked devices,
+> backup. Changed: there is no reader/writer split any more — one front end
+> owns a data directory (`instance.py`); the GUI talks to the v2 `Mesh` /
+> `Node` core, not `ConnectionManager`. The Vim engine (`vim.py`) is shared
+> with the curses TUI and covered by `tests/test_vim.py`. The command surface
+> is documented in CLAUDE.md ("GUI command surface") and `:help`.
+
 > Desktop GUI client for Muninn — modern, animated, Vim-native, dark.
 > Ships as a second entry point alongside the existing CLI, sharing the full
 > protocol / BT / crypto / storage core unchanged.

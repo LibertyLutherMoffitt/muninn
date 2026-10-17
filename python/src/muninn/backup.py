@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -85,6 +86,14 @@ TABLES: dict[str, tuple[list[str], set[str]]] = {
         {"event_id"},
     ),
 }
+
+
+_FID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _fid_ok(fid) -> bool:
+    """Ids from a backup become directory names: only real (hex) ids."""
+    return isinstance(fid, str) and bool(_FID.match(fid))
 
 
 def _key(password: str, salt: bytes, iters: int) -> bytes:
@@ -231,24 +240,32 @@ def import_(
     with zipfile.ZipFile(path) as z:
         tables = json.loads(z.read("tables.json"))
         names = set(z.namelist())
-        for row in tables.get("files", []):
+        from muninn.mesh import _safe_name
+
+        tables["files"] = [
+            r for r in tables.get("files", []) if _fid_ok(r.get("file_id"))
+        ]
+        for row in tables["files"]:
             fid = row["file_id"]
             member = f"files/{fid}/{row.get('path', '')}"
             dest_dir = storage.files_dir / fid
+            safe = _safe_name(Path(str(row.get("path") or "file")).name)
             if member in names and row.get("path"):
                 dest_dir.mkdir(parents=True, exist_ok=True)
-                dest = dest_dir / Path(row["path"]).name
+                dest = dest_dir / safe
                 dest.write_bytes(z.read(member))
                 row["path"] = str(dest)
             else:
-                row["path"] = str(dest_dir / Path(row.get("path") or "file").name)
+                row["path"] = str(dest_dir / safe)
                 if row.get("state") == "complete":
                     row["state"] = "offered"  # can be downloaded again from a peer
                     row["have"] = ""
         for row in tables.get("messages", []):
             meta = json.loads(row.get("meta") or "{}")
             fid = meta.get("f")
-            if fid and f"files/{fid}/thumb.jpg" in names:
+            meta.pop("thumb", None)  # a path on the other device; never trust it
+            row["meta"] = json.dumps(meta) if meta else row.get("meta")
+            if _fid_ok(fid) and f"files/{fid}/thumb.jpg" in names:
                 d = storage.files_dir / fid
                 d.mkdir(parents=True, exist_ok=True)
                 (d / "thumb.jpg").write_bytes(z.read(f"files/{fid}/thumb.jpg"))

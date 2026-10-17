@@ -2392,7 +2392,7 @@ def _frame_prio(frame: bytes) -> int:
 
 def _safe_name(name: str) -> str:
     keep = "".join(c if c.isalnum() or c in "._- ()" else "_" for c in name).strip()
-    return keep[:120] or "file"
+    return keep.lstrip(".")[:120] or "file"  # never "." / ".." / hidden files
 
 
 def _save_thumb(storage: Storage, file_id: bytes, thumb: bytes) -> str:
