@@ -85,6 +85,17 @@ fun SimpleScaffold(title: String, actions: @Composable () -> Unit = {}, content:
     }) { pad -> content(Modifier.padding(pad)) }
 }
 
+// ---------------------------------------------------------------- scores
+
+fun scoreLine(g: com.muninn.core.GameHost.Score?): String {
+    g ?: return ""
+    val m = Runtime.node?.mesh
+    val parts = g.wins.entries.sortedByDescending { it.value }
+        .map { (n, w) -> (if (n == m?.nodeId) "you" else m?.displayName(n) ?: n) + " $w" }.toMutableList()
+    if (g.draws > 0) parts += "${g.draws} draw" + if (g.draws > 1) "s" else ""
+    return parts.joinToString(" · ")
+}
+
 // ---------------------------------------------------------------- blocked
 
 @Composable
@@ -590,6 +601,11 @@ fun GameScreen(session: String) {
     SimpleScaffold("${info["icon"] ?: "🎮"} ${info["name"] ?: "Game"}", actions = {
         if (info["started"] == true && info["ended"] != true && info["amPlayer"] == true && !over)
             TextButton(onClick = { Thread { runCatching { host.act(session, "resign", null) } }.start() }) { Text("Resign") }
+        if (info["creator"] == info["me"] && info["started"] != true && info["withdrawn"] != true && info.isNotEmpty())
+            TextButton(onClick = {
+                Thread { runCatching { host.withdraw(session) }.onSuccess { Runtime.toast("Invite unsent") } }.start()
+                Nav.back()
+            }) { Text("Unsend", color = MaterialTheme.colorScheme.error) }
     }) { mod ->
         Column(mod.fillMaxSize()) {
             val names = (info["names"] as? Map<*, *>) ?: emptyMap<String, String>()
@@ -601,6 +617,9 @@ fun GameScreen(session: String) {
                 else -> status
             }
             Text(line, Modifier.padding(16.dp, 8.dp), style = MaterialTheme.typography.bodyMedium)
+            val score = remember(info) { scoreLine(host.scores(info["conv"] as? String).firstOrNull { it.app == info["app"] }) }
+            if (score.isNotEmpty()) Text("Score: $score", Modifier.padding(horizontal = 16.dp),
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (info["started"] != true && info["ended"] != true) Row(Modifier.padding(horizontal = 16.dp)) {
                 if (info["invitedMe"] == true) {
                     Button(onClick = { Thread { host.act(session, "join", null) }.start() }) { Text("Join") }
@@ -623,6 +642,7 @@ fun GameScreen(session: String) {
                             @JavascriptInterface fun code(): String = code
                             @JavascriptInterface fun move(json: String) { runCatching { host.act(session, "move", Json.parse(json)) } }
                             @JavascriptInterface fun rt(json: String) { runCatching { host.rt(session, Json.parse(json)) } }
+                            @JavascriptInterface fun result(json: String) { runCatching { host.act(session, "result", Json.parse(json)) } }
                             @JavascriptInterface fun toast(msg: String) = Runtime.toast(msg)
                             @JavascriptInterface fun status(json: String) {
                                 val s = Json.obj(json)

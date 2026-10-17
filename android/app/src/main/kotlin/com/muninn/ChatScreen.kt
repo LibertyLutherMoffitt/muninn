@@ -579,6 +579,19 @@ private fun GamesSheet(conv: String, onDone: () -> Unit) {
             }
             HorizontalDivider()
         }
+        val board by produceState(emptyList<com.muninn.core.GameHost.Score>(), tick) {
+            value = withContext(Dispatchers.IO) { Runtime.games?.scores(conv) ?: emptyList() }
+        }
+        if (board.isNotEmpty()) {
+            Text("Scores", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp, 8.dp))
+            board.forEach { g ->
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
+                    Text("${g.icon}  ${g.name}", modifier = Modifier.weight(1f))
+                    Text(scoreLine(g), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            HorizontalDivider(Modifier.padding(top = 6.dp))
+        }
         Text("Start a game", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp, 8.dp))
         var picking by remember { mutableStateOf<String?>(null) }   // game whose options are open
         val chosen = remember { mutableStateMapOf<String, Any?>() }

@@ -88,7 +88,12 @@ class GameBot:
                 return
             g = self._game(session)
             state = g.property("setup").callWithInstance(
-                g, [self._js(info["players"]), self._js(info["seed"])]
+                g,
+                [
+                    self._js(info["players"]),
+                    self._js(info["seed"]),
+                    self._js(info.get("opts") or {}),
+                ],
             )
             turn_fn = g.property("turn")
             move_fn = g.property("move")
@@ -113,7 +118,31 @@ class GameBot:
             if not legal:
                 return
             time.sleep(random.uniform(0.3, 1.0))
-            self.reg.act(session, "move", random.choice(legal))
+            mv = random.choice(legal)
+            self.reg.act(session, "move", mv)
+            # the player whose move ends the game records the result
+            after = move_fn.callWithInstance(g, [state, self._js(me), self._js(mv)])
+            status_fn = g.property("status")
+            if (
+                not after.isError()
+                and status_fn.isCallable()
+                and not info.get("result")
+            ):
+                st = (
+                    status_fn.callWithInstance(
+                        g, [after, self._js(info.get("names") or {})]
+                    ).toVariant()
+                    or {}
+                )
+                if st.get("over"):
+                    self.reg.act(
+                        session,
+                        "result",
+                        {
+                            "winners": st.get("winners") or [],
+                            "text": st.get("text", ""),
+                        },
+                    )
 
 
 def main() -> None:

@@ -3,6 +3,7 @@ moves survive a JSON round trip (as on the wire), renders only with the
 canvas subset both hosts support, and rejects illegal input."""
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -205,3 +206,48 @@ def test_game_options_are_validated():
         resolve_opts(meta, {"k": 99})
     with pytest.raises(ValueError):
         resolve_opts(meta, {"zz": 1})
+
+
+def _two(lab):
+    from muninn.gamehost import GameRegistry
+    from muninn.mesh import dm_conv
+    from muninn.sim.lab import wait_until
+
+    a = lab.node("a", (0, 0))
+    b = lab.node("b", (1, 0))
+    wait_until(lambda: b.node_id in a.mesh.connected(), 30)
+    return a, b, GameRegistry(a), GameRegistry(b), dm_conv(b.node_id), wait_until
+
+
+def test_scoreboard_counts_results_and_resignations(lab):
+    a, b, ga, gb, conv, wait_until = _two(lab)
+    for winner in ("a", "b", "resign-b", "draw"):
+        sid = ga.invite(conv, "tictactoe")
+        wait_until(lambda: gb.session_info(sid).get("invitedMe"), 15)
+        gb.act(sid, "join", {})
+        wait_until(lambda: ga.session_info(sid).get("started"), 15)
+        if winner == "resign-b":
+            gb.act(sid, "resign", {})
+        else:
+            w = {"a": [a.node_id], "b": [b.node_id], "draw": []}[winner]
+            ga.act(sid, "result", {"winners": w, "text": "done"})
+        wait_until(lambda: gb.session_info(sid).get("result") is not None, 15)
+    board = ga.scores(conv)
+    assert len(board) == 1 and board[0]["app"] == "tictactoe"
+    assert board[0]["played"] == 4 and board[0]["draws"] == 1
+    assert board[0]["wins"] == {a.node_id: 2, b.node_id: 1}
+    assert gb.scores(None)[0]["wins"] == board[0]["wins"]  # same on both sides
+
+
+def test_unsent_invite_disappears_for_everyone(lab):
+    a, b, ga, gb, conv, wait_until = _two(lab)
+    sid = ga.invite(conv, "chess")
+    wait_until(lambda: any(s["session"] == sid for s in gb.sessions(None)), 15)
+    with pytest.raises(ValueError):
+        gb.withdraw(sid)  # only the inviter can
+    ga.withdraw(sid)
+    wait_until(lambda: not any(s["session"] == sid for s in gb.sessions(None)), 15)
+    assert not any(s["session"] == sid for s in ga.sessions(None))
+    gb.act(sid, "join", {})  # a late join can't revive it
+    time.sleep(1)
+    assert gb.session_info(sid)["withdrawn"] and not gb.session_info(sid)["started"]

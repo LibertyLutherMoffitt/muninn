@@ -82,6 +82,14 @@
       state = s;
     } catch (e) { err.textContent = "game error: " + e; }
   }
+  // The player whose move ends the game records the result (scoreboard).
+  function reportResult(after) {
+    try {
+      var st = game.status ? game.status(after, info.names || {}) : null;
+      if (st && st.over && !info.result)
+        Android.result(JSON.stringify({ winners: st.winners || [], text: st.text || "" }));
+    } catch (e) {}
+  }
   function input(ev) {
     if (!game || !game.input || !state) return;
     var r = null;
@@ -90,9 +98,11 @@
     if (r.ui) { for (var k in r.ui) ui[k] = r.ui[k]; paint(); }
     if (r.move !== undefined && r.move !== null) {
       if (!myTurn()) { Android.toast("not your turn"); return; }
-      try { game.move(state, info.me, r.move); } catch (e) { Android.toast("illegal move: " + e); return; }
+      var after;
+      try { after = game.move(state, info.me, r.move); } catch (e) { Android.toast("illegal move: " + e); return; }
       ui = {};
       Android.move(JSON.stringify(r.move));
+      reportResult(after);
     }
     if (r.rt !== undefined) Android.rt(JSON.stringify(r.rt));
   }

@@ -734,6 +734,32 @@ class ChatBridge(QObject):
         except ValueError as e:
             self.errorOccurred.emit(str(e))
 
+    @Slot(str)
+    def gameWithdraw(self, session: str) -> None:
+        try:
+            self.games.withdraw(session)
+            self.notify.emit("invite unsent")
+        except ValueError as e:
+            self.errorOccurred.emit(str(e))
+
+    @Slot(str, str, result=str)
+    def gameScoreLine(self, conv: str, app: str) -> str:
+        """'bob 3 · you 1 · 1 draw' for one game in one conversation."""
+        for g in self.games.scores(conv or None):
+            if g["app"] == app:
+                return self._score_text(g)
+        return ""
+
+    def _score_text(self, g: dict) -> str:
+        me = self.mesh.node_id
+        parts = [
+            f"{'you' if n == me else self.mesh.display_name(n)} {w}"
+            for n, w in sorted(g["wins"].items(), key=lambda kv: -kv[1])
+        ]
+        if g["draws"]:
+            parts.append(f"{g['draws']} draw{'s' if g['draws'] > 1 else ''}")
+        return " · ".join(parts) or "no winner yet"
+
     @Slot(str, QVariant)
     def gameRtSend(self, session: str, body) -> None:
         self.games.rt(session, self._plain(body))
@@ -780,6 +806,7 @@ class ChatBridge(QObject):
         "emoji",
         "game",
         "games",
+        "scores",
         "sharegame",
         "scanmode",
         "whoami",
@@ -836,6 +863,7 @@ class ChatBridge(QObject):
         (":emoji", "emoji picker (Ctrl+E). :shortcodes: expand on send"),
         (":game [name] [opt=value]", "start a game in this conversation"),
         (":games", "games in this conversation"),
+        (":scores", "who won how many of each game (this chat, or all chats)"),
         (":sharegame <name>", "send a game's code to this conversation"),
         (":list", "conversations"),
         (":peers / :known", "who's in range (direct/relay) / everyone you know"),
@@ -1095,6 +1123,20 @@ class ChatBridge(QObject):
                     ],
                 )
             self.startGame(args[0], self._active, opts)
+        elif head == "scores":
+            board = self.games.scores(self._active or None)
+            where = self._conv_title(self._active) if self._active else "all chats"
+            self._info(
+                f"scores — {where}",
+                [
+                    self._item(
+                        f"{g['icon']}  {g['name']}",
+                        f"{self._score_text(g)}  ({g['played']} played)",
+                    )
+                    for g in board
+                ]
+                or [("no finished games yet", "start one with :game")],
+            )
         elif head == "games":
             sess = self.games.sessions(self._active or None)
             self._info(

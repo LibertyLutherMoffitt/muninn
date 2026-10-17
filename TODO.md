@@ -114,7 +114,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [ ] Real-time demo + latency measurement.
 
 ### 2.6 User requests (2026-10-15)
-- [ ] **Tap-to-pair (Android↔Android)**: NFC tap exchanges node id + BT address
+- [x] **Tap-to-pair (Android↔Android)**: NFC tap exchanges node id + BT address
   (HCE on one side, reader mode on the other), then auto-dial. Fallback: QR code.
 - [x] **Send game code over Muninn**: games are self-contained JS plugins, so a
   game can be shared as a file and installed by the receiver (sandboxed).
@@ -146,12 +146,12 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [ ] Notifications VISIBILITY_PRIVATE on the lock screen.
 
 ### 2.6c User requests (2026-10-16) — in progress now
-- [~] NFC tap-to-pair (Android↔Android): HCE + reader mode exchange
+- [x] NFC tap-to-pair (Android↔Android) — built; needs a hardware test: HCE + reader mode exchange
   identity/key/address; fall back to one "visible" prompt + name search.
-- [~] Delete chats / forget / block people, leave+delete rooms; multi-select
+- [x] Delete chats / forget / block people, leave+delete rooms; multi-select
   on GUI + Android, commands in terminal.
-- [ ] Scoreboard: who won how many of each game (per conversation + overall).
-- [ ] Unsend a game invitation (creator cancels before/while others join).
+- [x] Scoreboard: who won how many of each game (per conversation + overall).
+- [x] Unsend a game invitation (creator cancels before/while others join).
 
 ### 2.6d Ideas (2026-10-16, nearer the backlog)
 - [ ] Extensive game testing, especially end/win conditions of every game.

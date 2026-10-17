@@ -92,9 +92,16 @@ Rectangle {
         if (r.ui) { ui = Object.assign({}, ui, r.ui); board.requestPaint() }
         if (r.move !== undefined && r.move !== null) {
             if (!myTurn()) { bridge.errorOccurred("not your turn"); return }
-            try { game.move(state, info.me, r.move) } catch (e) { bridge.errorOccurred("illegal move: " + e); return }
+            let after
+            try { after = game.move(state, info.me, r.move) } catch (e) { bridge.errorOccurred("illegal move: " + e); return }
             ui = ({})
             bridge.gameAction(session, "move", r.move)
+            // the player whose move ends the game records the result (scoreboard)
+            try {
+                const end = game.status ? game.status(after, info.names || {}) : null
+                if (end && end.over && !info.result)
+                    bridge.gameAction(session, "result", { winners: end.winners || [], text: end.text || "" })
+            } catch (e) {}
         }
         if (r.rt !== undefined) bridge.gameRtSend(session, r.rt)
     }
@@ -136,6 +143,15 @@ Rectangle {
             Item { Layout.fillWidth: true }
             GButton { text: "⤢ Fit (0)"; visible: root.zoom > 1
                       onClicked: { root.zoom = 1; root.clampPan(); board.requestPaint() } }
+            Text {
+                visible: text !== ""
+                text: root.info.app ? bridge.gameScoreLine(root.info.conv || "", root.info.app) : ""
+                color: Theme.textMuted; font.pixelSize: 12
+                Layout.rightMargin: 8
+            }
+            GButton { text: "Unsend invite"; danger: true
+                      visible: !!(root.info.creator === root.info.me && !root.info.started && !root.info.withdrawn)
+                      onClicked: { bridge.gameWithdraw(root.session); root.close() } }
             GButton { text: "Resign"; danger: true
                       visible: !!(root.info.started && !root.info.ended && root.info.amPlayer && !root.st.over)
                       onClicked: bridge.gameAction(root.session, "resign", {}) }

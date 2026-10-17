@@ -79,6 +79,7 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/scores                    who won how many of each game (this chat, or all)
 /clear                     delete this chat on this device (a room: leave it too)
 /forget <peer> [...]       forget people: chat, saved addresses, pairing
 /block <peer>  /unblock <peer>   refuse / allow someone again;  /blocked lists
@@ -425,6 +426,22 @@ class ChatUI:
                     self.out(f"  {'blocked' if cmd == 'block' else 'forgot'} {name}")
                     if self.conv == "dm:" + nid:
                         self.conv = ""
+        elif cmd == "scores":
+            from muninn.gamehost import GameRegistry
+
+            board = GameRegistry(self.node).scores(self.conv or None)
+            me = mesh.node_id
+            for g in board:
+                wins = " · ".join(
+                    f"{'you' if n == me else mesh.display_name(n)} {w}"
+                    for n, w in sorted(g["wins"].items(), key=lambda kv: -kv[1])
+                )
+                draws = f" · {g['draws']} draws" if g["draws"] else ""
+                self.out(
+                    f"  {g['icon']} {g['name']}: {wins or 'no winner yet'}{draws} ({g['played']} played)"
+                )
+            if not board:
+                self.out("  no finished games yet")
         elif cmd == "unblock" and args:
             hit = [
                 b

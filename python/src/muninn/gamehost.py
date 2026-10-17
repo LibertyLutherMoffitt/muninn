@@ -14,6 +14,9 @@ Session event types (all reliable app events, app id = game id):
     start   {players: [...]} (creator, for games with min < max)
     move    {m: <any JSON>}  seq = move number (1, 2, ...)
     resign  {}               end {}  (abandon)
+    withdraw {}              (creator, before the game started: "unsend")
+    result  {winners, text}  (sent by whoever's move ended the game; feeds
+                              the scoreboard — first one counts)
 State = setup(players, seed, opts) folded over moves sorted by (seq, ts, sender);
 illegal / out-of-turn moves are ignored identically everywhere.
 """
@@ -197,8 +200,20 @@ class GameRegistry:
             (e for e in evs if e.type == "move"), key=lambda e: (e.seq, e.ts, e.sender)
         )
         ended = [e for e in evs if e.type in ("resign", "end")]
+        # an unsent invite stays unsent on every device, even if someone
+        # joined meanwhile (no explicit "start" yet = the creator's call)
+        withdrawn = start is None and any(
+            e.type == "withdraw" and e.sender == creator for e in evs
+        )
+        started = started and not withdrawn
+        result = next((e.body for e in evs if e.type == "result"), None)
+        if result is None and ended and ended[0].type == "resign":
+            rest = [p for p in players if p != ended[0].sender]
+            result = {"winners": rest if len(rest) == 1 else [], "text": "resigned"}
         me = self.mesh.node_id
-        if ended:
+        if withdrawn:
+            status = "invite withdrawn"
+        elif ended:
             status = f"{self.mesh.display_name(ended[0].sender)} " + (
                 "resigned" if ended[0].type == "resign" else "ended the game"
             )
@@ -236,6 +251,8 @@ class GameRegistry:
                 for e in moves
             ],
             "status": status,
+            "withdrawn": withdrawn,
+            "result": result,
             "ts": evs[-1].ts if evs else 0,
         }
 
@@ -243,13 +260,50 @@ class GameRegistry:
         inv = next((e for e in self._events(session) if e.type == "invite"), None)
         return (inv.body or {}).get("code", "") if inv else ""
 
-    def sessions(self, conv: str | None) -> list[dict]:
+    def sessions(self, conv: str | None, include_withdrawn: bool = False) -> list[dict]:
         out = []
         for session, app, c, _ts in self.mesh.storage.list_app_sessions(conv):
             info = self.session_info(session)
-            if info:
+            if info and (include_withdrawn or not info["withdrawn"]):
                 out.append(info)
         return out
+
+    def scores(self, conv: str | None = None) -> list[dict]:
+        """Wins per player for each game (finished games only), newest game
+        first: [{app, name, icon, played, draws, wins: {node: n}}]."""
+        by: dict[str, dict] = {}
+        for s in self.sessions(conv):
+            r = s.get("result")
+            if not s["started"] or not r:
+                continue
+            g = by.setdefault(
+                s["app"],
+                {
+                    "app": s["app"],
+                    "name": s["name"],
+                    "icon": s["icon"],
+                    "played": 0,
+                    "draws": 0,
+                    "wins": {},
+                },
+            )
+            g["played"] += 1
+            winners = [w for w in r.get("winners") or [] if isinstance(w, str)]
+            if not winners:
+                g["draws"] += 1
+            for w in winners:
+                g["wins"][w] = g["wins"].get(w, 0) + 1
+        return sorted(by.values(), key=lambda g: -g["played"])
+
+    def withdraw(self, session: str) -> None:
+        info = self.session_info(session)
+        if not info:
+            raise ValueError("unknown game session")
+        if info["creator"] != self.mesh.node_id:
+            raise ValueError("only whoever sent the invite can unsend it")
+        if info["started"]:
+            raise ValueError("the game already started — resign or end it instead")
+        self.act(session, "withdraw", {})
 
     def act(self, session: str, type_: str, body) -> None:
         info = self.session_info(session)

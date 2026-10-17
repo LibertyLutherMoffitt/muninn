@@ -98,11 +98,19 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
         val joined = ArrayList<String>().apply { add(creator); joins.forEach { if (it.sender !in this) add(it.sender) } }
         val players = if (start != null) ((start.body as? Map<String, Any?>)?.list("players") ?: emptyList()).map { it as String }.filter { it in joined }
                       else joined.take(mx)
-        val started = start != null || players.size >= mx
+        // an unsent invite stays unsent everywhere (see gamehost.py)
+        val withdrawn = start == null && evs.any { it.type == "withdraw" && it.sender == creator }
+        val started = (start != null || players.size >= mx) && !withdrawn
         val moves = evs.filter { it.type == "move" }.sortedWith(compareBy({ it.seq }, { it.ts }, { it.sender }))
         val ended = evs.filter { it.type == "resign" || it.type == "end" }
+        var result = evs.firstOrNull { it.type == "result" }?.body as? Map<String, Any?>
+        if (result == null && ended.firstOrNull()?.type == "resign") {
+            val rest = players.filter { it != ended[0].sender }
+            result = mapOf("winners" to (if (rest.size == 1) rest else emptyList()), "text" to "resigned")
+        }
         val me = mesh.nodeId
         val status = when {
+            withdrawn -> "invite withdrawn"
             ended.isNotEmpty() -> "${mesh.displayName(ended[0].sender)} " + if (ended[0].type == "resign") "resigned" else "ended the game"
             started -> "in progress · ${moves.size} moves"
             players.size >= mn -> "${players.size}/$mx joined — ready, the host can start"
@@ -118,7 +126,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
             "endType" to (ended.firstOrNull()?.type ?: ""), "me" to me, "amPlayer" to (me in shown),
             "invitedMe" to (me != creator && me !in joined && me !in declined), "names" to names,
             "moves" to moves.map { mapOf("seq" to it.seq, "sender" to it.sender, "m" to (it.body as? Map<String, Any?>)?.get("m")) },
-            "status" to status, "ts" to (evs.lastOrNull()?.ts ?: 0L),
+            "status" to status, "withdrawn" to withdrawn, "result" to result, "ts" to (evs.lastOrNull()?.ts ?: 0L),
         )
     }
 
@@ -128,8 +136,36 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
         return (inv.body as? Map<String, Any?>)?.str("code") ?: ""
     }
 
-    fun sessions(conv: String?): List<Map<String, Any?>> =
-        mesh.storage.listAppSessions(conv).map { sessionInfo(it) }.filter { it.isNotEmpty() }
+    fun sessions(conv: String?, includeWithdrawn: Boolean = false): List<Map<String, Any?>> =
+        mesh.storage.listAppSessions(conv).map { sessionInfo(it) }
+            .filter { it.isNotEmpty() && (includeWithdrawn || it["withdrawn"] != true) }
+
+    data class Score(val app: String, val name: String, val icon: String, var played: Int = 0, var draws: Int = 0,
+                     val wins: MutableMap<String, Int> = LinkedHashMap())
+
+    /** Wins per player for each game (finished games only). Mirrors gamehost.scores. */
+    @Suppress("UNCHECKED_CAST")
+    fun scores(conv: String? = null): List<Score> {
+        val by = LinkedHashMap<String, Score>()
+        for (s in sessions(conv)) {
+            val r = s["result"] as? Map<String, Any?> ?: continue
+            if (s["started"] != true) continue
+            val g = by.getOrPut(s.str("app")) { Score(s.str("app"), s.str("name"), s.str("icon", "🎮")) }
+            g.played++
+            val winners = (r["winners"] as? List<*>).orEmpty().filterIsInstance<String>()
+            if (winners.isEmpty()) g.draws++
+            winners.forEach { g.wins[it] = (g.wins[it] ?: 0) + 1 }
+        }
+        return by.values.sortedByDescending { it.played }
+    }
+
+    fun withdraw(session: String) {
+        val info = sessionInfo(session)
+        if (info.isEmpty()) throw IllegalArgumentException("unknown game session")
+        if (info["creator"] != mesh.nodeId) throw IllegalArgumentException("only whoever sent the invite can unsend it")
+        if (info["started"] == true) throw IllegalArgumentException("the game already started — resign instead")
+        act(session, "withdraw", emptyMap<String, Any?>())
+    }
 
     @Suppress("UNCHECKED_CAST")
     fun act(session: String, type: String, body: Any?) {
