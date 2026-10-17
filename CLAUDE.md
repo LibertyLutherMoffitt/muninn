@@ -85,7 +85,7 @@ Python (`python/src/muninn/`) — shared by CLI, GUI, bot, tests:
 - `node.py` — `Node`: identity + storage + mesh + transport, dialer, discovery, presence
 - `storage.py` — SQLite (schema migrations in `_migrate`)
 - `transport.py` (`BtTransport`, `ScanResult`), `bt/bluez.py`, `bt/winrt.py`
-- `scanpolicy.py` — eager/balanced/quiet (mirror: `android/core/.../ScanPolicy.kt`, tested)
+- `scanpolicy.py` — find mode (temporary scanning for new people) + reconnect speed fast/saver (mirror: `android/core/.../ScanPolicy.kt`, tested)
 - `gamehost.py` + `games/*.js` — generic game sessions + plugins (API in games/README.md)
 - `emoji.py` + `assets/emoji.json`, `assets/stickers/*.gif` — shared with Android
 - `sim/hub.py`, `sim/transport.py`, `sim/lab.py` — radio simulator; `bot.py` — headless node

@@ -7,7 +7,7 @@ import pathlib
 import sys
 
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QFont, QIcon, QOpenGLContext
+from PySide6.QtGui import QFont, QOpenGLContext
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from muninn.instance import AlreadyRunning
 from muninn.node import Node, default_transport
 
-from . import notifications
+from . import notifications, tray
 from .bridge import ChatBridge
 from .models import MessageListModel, PeerListModel
 from .vim import VimEditor
@@ -62,6 +62,8 @@ def main() -> None:
     app.setApplicationName("Muninn")
     app.setOrganizationName("Muninn")
     app.setQuitOnLastWindowClosed(True)
+    app.setWindowIcon(tray.icon())
+    background_start = "--background" in sys.argv[1:]
     font = QFont("JetBrains Mono")
     font.setStyleHint(QFont.StyleHint.Monospace)
     font.setPointSize(11)
@@ -76,10 +78,15 @@ def main() -> None:
         QMessageBox.critical(None, "Muninn", f"Could not start Muninn:\n\n{e}")
         sys.exit(1)
 
-    notifications.init(app, QIcon())
+    notifications.init(app, tray.icon())
     peer_model = PeerListModel(node.mesh, node.presence)
     msg_model = MessageListModel(node.mesh)
     bridge = ChatBridge(node, peer_model, msg_model)
+    # Keep running in the tray when the window closes — only if a tray exists.
+    keep = tray.available() and node.storage.get_setting("background", "on") != "off"
+    bridge.keepRunning = keep
+    if keep:
+        app.setQuitOnLastWindowClosed(False)
     vim = VimEditor()
 
     engine = QQmlApplicationEngine()
@@ -92,6 +99,16 @@ def main() -> None:
     engine.load(QUrl.fromLocalFile(str(_QML_DIR / "Main.qml")))
     if not engine.rootObjects():
         sys.exit(1)
+    window = engine.rootObjects()[0]
+    tray_icon = None
+    if keep:
+        tray_icon = tray.Tray(app, window, node, bridge.runCommand)
+        notifications.use_tray(tray_icon)
+        bridge.trayShowRequested.connect(tray_icon.show_window)
+    if background_start and keep:
+        window.hide()
+    else:
+        window.show()
 
     try:
         node.start()

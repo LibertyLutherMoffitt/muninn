@@ -344,7 +344,7 @@ Rectangle {
         { icon: "🎮", label: ":game",     sub: "start a game here",                action: "cmd", convId: "", cmd: "game" },
         { icon: "🎲", label: ":games",    sub: "games in this conversation (Ctrl+G)", action: "cmd", convId: "", cmd: "games" },
         { icon: "📡", label: ":status",   sub: "links, routes, queues",            action: "cmd", convId: "", cmd: "status" },
-        { icon: "📡", label: ":scanmode",  sub: "how hard to look for new people", action: "cmd", convId: "", cmd: "scanmode" },
+        { icon: "📡", label: ":find",      sub: "look for new people for 5 minutes",  action: "cmd", convId: "", cmd: "find" },
         { icon: "👤", label: ":whoami",    sub: "your name, id and radio",          action: "cmd", convId: "", cmd: "whoami" },
         { icon: "⟳",  label: ":reconnect", sub: "retry all known devices now",     action: "cmd", convId: "", cmd: "reconnect" },
         { icon: "+",  label: ":add",      sub: "add people to this group",         action: "cmd", convId: "", cmd: "add " },

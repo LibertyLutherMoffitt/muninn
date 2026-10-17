@@ -165,13 +165,13 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   adaptive low-res/low-fps video over the mesh (budget ~5–15 kB/s per
   hop; think 240p at 1–5 fps, keyframes + diffs).
 - [ ] Auto-update for the Linux/Windows executables (like Android).
-- [ ] Rethink scan modes: explain clearly whether they govern discovery of
+- [x] Rethink scan modes (done 2026-10-16: reconnect by address, fast/saver; temporary find mode): explain clearly whether they govern discovery of
   new people, reconnecting to known ones, or both. Proposal from the user:
   reconnecting to known people should just be fast and reliable (optionally
   a battery-saving "lazy" mode), while looking for *new* people becomes a
   temporary "Find people" mode (on for a minute or until turned off),
   because new contacts are rare.
-- [ ] Desktop GUI keeps running in the background with a tray icon (Linux,
+- [x] Desktop GUI keeps running in the background with a tray icon (Linux,
   Windows, Nix) so messages arrive with the window closed.
 
 ### 2.7 Backlog (only after everything else is done & polished)

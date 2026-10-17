@@ -6,7 +6,8 @@ Who gets dialled (good Bluetooth citizen):
 1. peers we've talked to before (their stored radio addresses) — always,
    with a short capped backoff, so a returning seat neighbour reconnects fast;
 2. devices whose service record says Muninn;
-3. within the scan policy's budget, an *unknown phone or computer* gets one
+3. only while finding new people (scanpolicy: a few minutes on request, or
+   while we know nobody), an *unknown phone or computer* gets one
    quiet probe without pairing. Headsets, watches and the like are never
    contacted, and a device that isn't Muninn is left alone for a long time.
 """
@@ -74,7 +75,12 @@ class Node:
             log=log,
         )
         self.log = log or (lambda s: None)
-        self.policy = scanpolicy.get(self.storage.get_setting(scanpolicy.SETTING_KEY))
+        self.reconnect = scanpolicy.get(
+            self.storage.get_setting(scanpolicy.SETTING_KEY)
+        )
+        self.find_until = 0.0  # wall clock; find mode on until then
+        # find automatically while we know nobody (first run "just works")
+        self.auto_find = self.storage.get_setting("auto_find", "on") != "off"
         self._stop = threading.Event()
         self._scan_now = threading.Event()
         self._backoff: dict[str, tuple[float, float]] = {}  # addr -> (next_ok, delay)
@@ -124,15 +130,34 @@ class Node:
 
     # --- settings -------------------------------------------------------------
 
-    def set_scan_mode(self, name: str) -> scanpolicy.ScanPolicy:
-        if name not in scanpolicy.POLICIES:
-            raise ValueError(
-                f"scan mode must be one of: {', '.join(scanpolicy.POLICIES)}"
-            )
-        self.policy = scanpolicy.POLICIES[name]
+    def set_reconnect_mode(self, name: str) -> scanpolicy.ReconnectMode:
+        if name not in scanpolicy.MODES:
+            raise ValueError(f"reconnect must be one of: {', '.join(scanpolicy.MODES)}")
+        self.reconnect = scanpolicy.MODES[name]
         self.storage.set_setting(scanpolicy.SETTING_KEY, name)
+        return self.reconnect
+
+    def set_auto_find(self, on: bool) -> None:
+        self.auto_find = on
+        self.storage.set_setting("auto_find", "on" if on else "off")
+
+    @property
+    def finding(self) -> bool:
+        """Looking for new people right now (scans + polite probes)?"""
+        if time.time() < self.find_until:
+            return True
+        return self.auto_find and not self.mesh.active_peers()
+
+    def find_left(self) -> int:
+        return max(0, int(self.find_until - time.time()))
+
+    def find_people(self, seconds: float = scanpolicy.FIND_SECONDS) -> None:
+        """Look for new people for a while (Nearby / ⟳ / "Find people")."""
+        self.find_until = max(self.find_until, time.time() + seconds)
         self._scan_now.set()
-        return self.policy
+
+    def stop_finding(self) -> None:
+        self.find_until = 0.0
 
     # --- inbound ------------------------------------------------------------
 
@@ -274,7 +299,7 @@ class Node:
                     delay = min(max(delay * 2, HINT_BACKOFF_MIN), HINT_BACKOFF_MAX)
                 else:
                     delay = min(
-                        max(delay * 2, DIAL_BACKOFF_MIN), self.policy.peer_backoff_max
+                        max(delay * 2, DIAL_BACKOFF_MIN), self.reconnect.backoff_max
                     )
                 self._backoff[addr] = (
                     time.monotonic() + delay * random.uniform(0.8, 1.2),
@@ -298,23 +323,22 @@ class Node:
     # --- discovery ----------------------------------------------------------
 
     def _scan_loop(self) -> None:
-        first = True
         while not self._stop.is_set():
             try:
                 for addr, _ in self.transport.discover():
                     self._mark_confirmed(addr)
-                pol = self.policy
-                interval = (
-                    pol.inquiry_linked if self.mesh.connected() else pol.inquiry_alone
+                # No scanning at all unless we're looking for new people:
+                # known ones are dialled by address.
+                due = (
+                    self.finding
+                    and time.monotonic() - self.last_inquiry >= scanpolicy.FIND_INQUIRY
                 )
-                due = interval and time.monotonic() - self.last_inquiry >= interval
-                if (first and pol.inquiry_alone) or due or self._scan_now.is_set():
+                if due or self._scan_now.is_set():
                     self._scan_now.clear()
                     with self._scan_lock:
                         self._ingest(self.transport.scan(5.0))
             except Exception as e:
                 self.log(f"scan: {e!r}")
-            first = False
             self._scan_now.wait(2.0 * random.uniform(0.8, 1.2))
 
     def _ingest(self, results: list[ScanResult], manual: bool = False) -> None:
@@ -323,7 +347,7 @@ class Node:
         self.last_inquiry = time.monotonic()
         self.scan_results = results
         now = time.time()
-        budget = MANUAL_PROBES if manual else self.policy.probe_budget
+        budget = MANUAL_PROBES if manual else scanpolicy.FIND_PROBES
         known = {a for _, a, _ in self.storage.load_transports()}
         for r in sorted(results, key=lambda r: -(r.rssi or -100)):
             addr = r.addr.upper()
@@ -349,11 +373,7 @@ class Node:
         """A probe didn't find Muninn. Could be a radio hiccup the first time
         (short pause); after that the device is left alone for hours."""
         n = self._refusals[addr] = self._refusals.get(addr, 0) + 1
-        wait = (
-            self.policy.probe_backoff
-            if n > 1
-            else min(600.0, self.policy.probe_backoff)
-        )
+        wait = scanpolicy.PROBE_BACKOFF if n > 1 else 600.0
         self._refused[addr] = time.time() + wait
         self._refused_at[addr] = time.time()
 
@@ -366,6 +386,8 @@ class Node:
             self._backoff.pop(addr, None)
 
     def scan_now(self, duration: float = 5.0) -> list[ScanResult]:
+        # the user is looking: keep looking for a while (this scan counts)
+        self.find_until = max(self.find_until, time.time() + scanpolicy.FIND_SECONDS)
         with self._scan_lock:
             results = self.transport.scan(duration)
             self._ingest(results, manual=True)
@@ -420,7 +442,9 @@ class Node:
 
     def status(self) -> dict:
         return {
-            "scan_mode": self.policy.name,
+            "reconnect": self.reconnect.name,
+            "finding": self.finding,
+            "find_left": self.find_left(),
             "last_inquiry_ago": round(time.monotonic() - self.last_inquiry)
             if self.last_inquiry
             else None,

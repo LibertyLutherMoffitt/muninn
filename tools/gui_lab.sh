@@ -25,6 +25,8 @@ start)
     --control 7541 --data "$S/gl/bob" > "$S/gl/bob.log" 2>&1 & echo $! >> "$S/gl/pids"
   MUNINN_SIM=127.0.0.1:7440 python -m muninn.bot --name carol --pos 5,0 --echo \
     --control 7542 --data "$S/gl/carol" > "$S/gl/carol.log" 2>&1 & echo $! >> "$S/gl/pids"
+  # private D-Bus: tray icons / notifications must not land on the host's desktop
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent \
   QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software MUNINN_SIM=127.0.0.1:7440 \
     MUNINN_DATA="$S/gl/me" MUNINN_NAME=me \
     python -c 'from muninn.gui.main import main; main()' > "$S/gl/gui.log" 2>&1 & echo $! >> "$S/gl/pids"

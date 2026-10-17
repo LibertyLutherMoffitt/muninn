@@ -110,7 +110,7 @@ fun ConversationsScreen() {
                 !bt -> "Bluetooth is off"
                 direct == 0 -> "Looking for people nearby…"
                 else -> "$direct connected" + if (reach > direct) " · ${reach - direct} via relay" else ""
-            }
+            } + if (n.finding && direct > 0) " · finding people" else ""
         }
     }
     // selection mode: long-press a chat, tap others to add

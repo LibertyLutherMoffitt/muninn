@@ -46,7 +46,7 @@ def test_user_scans_stay_polite():
     try:
         lab.admin("decoys", n=60, hidden_phones=True)
         a = lab.node("a", (0, 0), start=False)
-        a.set_scan_mode("quiet")  # only the user's scans
+        a.set_auto_find(False)  # only the user's scans
         a.start()
         for _ in range(3):
             a.scan_now(2.0)
@@ -72,7 +72,7 @@ def test_relayed_neighbours_link_up_directly(lab):
     c = lab.node("c", (0, 1), start=False, advertise=False)
     paired_style: list[str] = []
     for n in (a, c):
-        n.set_scan_mode("quiet")
+        n.set_auto_find(False)
         real = n.transport.connect
 
         def connect(addr, *args, _real=real, _n=n, **kw):
@@ -95,15 +95,32 @@ def test_relayed_neighbours_link_up_directly(lab):
     assert b  # b only relays
 
 
-def test_quiet_mode_never_inquires_but_known_peers_reconnect(lab):
+def test_known_people_reconnect_without_scanning(lab):
     a = lab.node("a", (0, 0))
     b = lab.node("b", (1, 0))
     wait_until(lambda: b.node_id in a.mesh.connected(), 30)
-    a.set_scan_mode("quiet")
-    b.set_scan_mode("quiet")
-    assert a.storage.get_setting(scanpolicy.SETTING_KEY) == "quiet"
+    assert not a.finding and not b.finding  # they know someone: no more looking
+    scans = (a.last_inquiry, b.last_inquiry)
     lab.admin("kill", addr=lab.addr_of("a"))
     wait_until(lambda: b.node_id in a.mesh.connected(), 30, msg="known peer redialled")
+    assert (a.last_inquiry, b.last_inquiry) == scans  # by address, no inquiry
+
+
+def test_find_mode_is_temporary(lab):
+    a = lab.node("a", (0, 0))
+    b = lab.node("b", (1, 0))
+    wait_until(lambda: b.node_id in a.mesh.connected(), 30)
+    before = a.last_inquiry
+    a.find_people(60)
+    assert a.finding and 0 < a.find_left() <= 60
+    wait_until(lambda: a.last_inquiry != before, 15, msg="find mode looks around")
+    a.stop_finding()
+    assert not a.finding
+    a.set_reconnect_mode("saver")
+    assert (
+        a.reconnect.backoff_max == 60
+        and a.storage.get_setting(scanpolicy.SETTING_KEY) == "saver"
+    )
 
 
 def test_presence_states(lab):
@@ -127,20 +144,12 @@ def test_scan_policies_match_kotlin():
         Path(__file__).resolve().parents[2]
         / "android/core/src/main/kotlin/com/muninn/core/ScanPolicy.kt"
     ).read_text()
-    found = {
-        m[0]: (float(m[2]), float(m[3]), int(m[4]), float(m[5]), float(m[6]))
-        for m in re.findall(
-            r'ScanPolicy\("(\w+)", "(\w+)", ([\d.]+), ([\d.]+), (\d+), ([\d.]+), ([\d.]+)\)',
-            kt,
-        )
-    }
-    assert set(found) == set(scanpolicy.POLICIES)
-    for name, p in scanpolicy.POLICIES.items():
-        assert found[name] == (
-            p.inquiry_alone,
-            p.inquiry_linked,
-            p.probe_budget,
-            p.probe_backoff,
-            p.peer_backoff_max,
-        ), name
-    assert "DEFAULT = BALANCED" in kt and scanpolicy.DEFAULT is scanpolicy.BALANCED
+    modes = dict(
+        (m[0], float(m[2]))
+        for m in re.findall(r'ReconnectMode\("(\w+)", "([\w ]+)", ([\d.]+)\)', kt)
+    )
+    assert modes == {n: m.backoff_max for n, m in scanpolicy.MODES.items()}
+    for const in ("FIND_SECONDS", "FIND_INQUIRY", "FIND_PROBES", "PROBE_BACKOFF"):
+        m = re.search(rf"const val {const}\s*=\s*([\d.]+)", kt)
+        assert m and float(m.group(1)) == float(getattr(scanpolicy, const)), const
+    assert "DEFAULT = FAST" in kt and scanpolicy.DEFAULT is scanpolicy.FAST

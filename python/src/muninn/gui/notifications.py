@@ -31,6 +31,13 @@ def init(app, icon) -> None:
         _tray = None
 
 
+def use_tray(t) -> None:
+    """The background tray (tray.Tray) shows balloons when notify-send can't."""
+    global _tray
+    if not _notify_send:
+        _tray = t.tray
+
+
 def notify(title: str, body: str) -> None:
     ns = _notify_send
     if ns:

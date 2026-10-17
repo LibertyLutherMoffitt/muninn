@@ -14,6 +14,7 @@ import time
 from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 
 from muninn import emoji
@@ -64,6 +65,8 @@ class ChatBridge(QObject):
     selectionChanged = Signal(int)  # row index to scroll to
     messageSent = Signal()  # the chat view jumps to the bottom
     removeRequested = Signal(list, str)  # convs, how — QML asks to confirm
+    trayShowRequested = Signal()
+    keepRunningChanged = Signal()
     typingChanged = Signal()
     filePickRequested = Signal()
     emojiPickerRequested = Signal(str)  # mode: "insert" | "react"
@@ -664,6 +667,36 @@ class ChatBridge(QObject):
 
         threading.Thread(target=run, daemon=True).start()
 
+    _keep_running = False
+
+    def _get_keep(self) -> bool:
+        return self._keep_running
+
+    def _set_keep(self, v: bool) -> None:
+        self._keep_running = bool(v)
+        self.keepRunningChanged.emit()
+
+    keepRunning = Property(bool, _get_keep, _set_keep, notify=keepRunningChanged)
+
+    @Slot()
+    def wentToBackground(self) -> None:
+        if self.node.storage.get_setting("bg_notice") != "1":
+            self.node.storage.set_setting("bg_notice", "1")
+            notifications.notify(
+                "Muninn keeps running",
+                "Messages still arrive and relay in the background. "
+                "Quit from the tray icon (or :background off).",
+            )
+
+    @Slot(result=str)
+    def findingStatus(self) -> str:
+        if not self.node.finding:
+            return ""
+        left = self.node.find_left()
+        return (
+            f"finding people {left // 60}:{left % 60:02d}" if left else "finding people"
+        )
+
     @Slot(list, result=dict)
     def deviceStates(self, addrs: list) -> dict:
         """Live per-device state for the scan dialog (probes finish later)."""
@@ -808,7 +841,9 @@ class ChatBridge(QObject):
         "games",
         "scores",
         "sharegame",
-        "scanmode",
+        "find",
+        "background",
+        "autostart",
         "whoami",
         "members",
         "mute",
@@ -870,7 +905,13 @@ class ChatBridge(QObject):
         (":status", "links, routes and queues"),
         (":scan / :connect <addr>", "find / dial a nearby device"),
         (":reconnect", "retry every known device now"),
-        (":scanmode [eager|balanced|quiet]", "how hard to look for new people"),
+        (":find [minutes|off]", "look for new people for a while (default 5 min)"),
+        (":background [on|off]", "keep running in the tray when the window is closed"),
+        (":autostart [on|off]", "start Muninn (hidden, in the tray) when you log in"),
+        (
+            ":reconnect [fast|saver]",
+            "retry known people now / how eagerly to redial them",
+        ),
         (":whoami", "your name, id, radio and scan mode"),
         (":history [N]", "load more history"),
         (":next / :prev", "cycle conversations (Ctrl-N / Ctrl-P)"),
@@ -1174,29 +1215,46 @@ class ChatBridge(QObject):
                 )
             except (OSError, ValueError, KeyError) as e:
                 self.errorOccurred.emit(f"can't share: {e}")
-        elif head == "scanmode":
-            from muninn import scanpolicy
-
-            if args:
-                try:
-                    pol = self.node.set_scan_mode(args[0].lower())
-                except ValueError as e:
-                    return self.errorOccurred.emit(str(e))
-                self.notify.emit(f"scan mode: {pol.label} — {pol.description}")
+        elif head == "find":
+            if args and args[0] == "off":
+                self.node.stop_finding()
+                self.notify.emit("stopped looking for new people")
             else:
-                cur = self.node.policy.name
-                self._info(
-                    "scan mode",
-                    [
-                        self._item(
-                            ("● " if p.name == cur else "  ") + p.label,
-                            p.description,
-                            action="cmd",
-                            cmd=f"scanmode {p.name}",
-                        )
-                        for p in scanpolicy.POLICIES.values()
-                    ],
+                mins = (
+                    float(args[0]) if args and args[0].replace(".", "").isdigit() else 5
                 )
+                self.node.find_people(mins * 60)
+                self.notify.emit(f"looking for new people for {mins:g} min")
+            self.statusChanged.emit()
+        elif head == "background":
+            on = not args or args[0] != "off"
+            self.node.storage.set_setting("background", "on" if on else "off")
+            from . import tray
+
+            if on and not tray.available():
+                return self.errorOccurred.emit(
+                    "no system tray here — Muninn quits when closed"
+                )
+            self.keepRunning = on and tray.available()
+            QApplication.instance().setQuitOnLastWindowClosed(not self.keepRunning)
+            self.notify.emit(
+                "closing the window keeps Muninn running (tray)"
+                if on
+                else "closing the window quits Muninn"
+            )
+        elif head == "autostart":
+            from . import tray
+
+            on = not args or args[0] != "off"
+            try:
+                where = tray.set_autostart(on)
+            except OSError as e:
+                return self.errorOccurred.emit(f"autostart: {e}")
+            self.notify.emit(f"start at login {'on' if on else 'off'} ({where})")
+        elif head == "scanmode":
+            self.notify.emit(
+                ":find looks for new people for a while · :reconnect fast|saver"
+            )
         elif head == "search":
             if not args:
                 return self.errorOccurred.emit("usage: :search <words>")
@@ -1297,13 +1355,30 @@ class ChatBridge(QObject):
                         "",
                     ),
                     (
-                        "scan mode",
-                        f"{self.node.policy.label} — {self.node.policy.description}",
+                        "reconnect",
+                        f"{self.node.reconnect.label} — {self.node.reconnect.description}",
+                        "",
+                    ),
+                    (
+                        "finding new people",
+                        f"yes, {st['find_left']}s left"
+                        if st["find_left"]
+                        else (
+                            "yes (you know nobody yet)"
+                            if st["finding"]
+                            else "no — :find"
+                        ),
                         "",
                     ),
                 ],
             )
         elif head == "reconnect":
+            if args:
+                try:
+                    m = self.node.set_reconnect_mode(args[0].lower())
+                except ValueError as e:
+                    return self.errorOccurred.emit(str(e))
+                return self.notify.emit(f"reconnect: {m.label} — {m.description}")
             self.node.poke()
             self.notify.emit("retrying all known devices")
         elif head == "connect":

@@ -30,7 +30,7 @@ val MUNINN_RFCOMM_UUID: UUID = UUID.fromString("320bcf9c-94fe-46f4-b9bf-83535caf
  * Insecure RFCOMM (no bonding, no pairing prompts between Android devices).
  * Good-citizen rules: we only ever dial addresses the core hands us — peers we
  * already talked to, or devices whose SDP record advertises the Muninn UUID.
- * Background inquiry follows the user's scan mode (Node/ScanPolicy); unknown
+ * Background inquiry only happens in find mode (Node.finding, ScanPolicy); unknown
  * devices are only probed if they are phones or computers, never paired.
  */
 @SuppressLint("MissingPermission")

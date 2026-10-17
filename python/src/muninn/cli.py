@@ -71,7 +71,8 @@ HELP = """\
 /file <path> [caption]     send a file / picture
 /get <#n>                  download an offered file (big files are manual)
 /scan                      look for nearby devices
-/scanmode [eager|balanced|quiet]  how hard to look for new people
+/find [minutes|off]        look for new people for a while (default 5 min)
+/reconnect [fast|saver]    retry known people now / how eagerly to redial them
 /whoami                    your name, id, radio and scan mode
 /connect <addr>            dial a device by Bluetooth address
 /status                    links, routes, queues
@@ -472,25 +473,40 @@ class ChatUI:
                         "" if nid == mesh.node_id else self.node.presence(nid)["text"]
                     )
                     self.out(f"  {who:20} {where}")
-        elif cmd == "scanmode":
-            from muninn import scanpolicy
-
+        elif cmd == "find":
+            if args and args[0] == "off":
+                self.node.stop_finding()
+                self.out("  stopped looking for new people")
+            else:
+                mins = (
+                    float(args[0]) if args and args[0].replace(".", "").isdigit() else 5
+                )
+                self.node.find_people(mins * 60)
+                self.out(
+                    f"  looking for new people for {mins:g} min (scans + polite probes)"
+                )
+        elif cmd == "reconnect":
             if args:
                 try:
-                    pol = self.node.set_scan_mode(args[0].lower())
-                    self.out(f"  scan mode {pol.label}: {pol.description}")
+                    m = self.node.set_reconnect_mode(args[0].lower())
+                    self.out(f"  reconnect: {m.label} — {m.description}")
                 except ValueError as e:
                     self.out(f"! {e}")
             else:
-                for p in scanpolicy.POLICIES.values():
-                    mark = "*" if p is self.node.policy else " "
-                    self.out(f"  {mark} {p.name:9} {p.description}")
+                self.node.poke()
+                self.out("  retrying everyone you know")
+        elif cmd == "scanmode":
+            self.out(
+                "  scan modes are gone: /find looks for new people for a while,"
+                " /reconnect fast|saver sets how eagerly known people are redialled"
+            )
         elif cmd == "whoami":
             st = self.node.status()
             self.out(f"  {mesh.name or '(no name: /nick <name>)'}  id {mesh.node_id}")
             self.out(
                 f"  radio {self.node.transport.local_addr()} · {len(mesh.connected())} connected"
-                f" · {st['sighted']} devices seen · scan mode {self.node.policy.name}"
+                f" · {st['sighted']} devices seen · reconnect {self.node.reconnect.name}"
+                + (f" · finding ({st['find_left']}s left)" if st["finding"] else "")
             )
         elif cmd == "connect" and args:
             threading.Thread(target=self._connect, args=(args[0],), daemon=True).start()

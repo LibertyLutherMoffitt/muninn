@@ -93,10 +93,10 @@ What Muninn does to a device that isn't running Muninn — the complete list
 | Device | What can happen | How often |
 |---|---|---|
 | Headset, watch, mouse, speaker, "other" | nothing — never dialled, probed, paired or SDP-queried | never |
-| Stranger's phone/laptop, *visible* and not revealing its services | one pairing-free probe (SDP lookup of the Muninn UUID; no prompt, no bond) | ≤ 2 per look (balanced), then: 10 min pause after a first miss, 6 h after a second (eager 1 h, quiet 12 h) |
+| Stranger's phone/laptop, *visible* and not revealing its services | one pairing-free probe (SDP lookup of the Muninn UUID; no prompt, no bond) — **only in find mode** | ≤ 3 per look; then 10 min pause after a first miss, 6 h after a second |
 | …same, user taps "look again" | probe the 6 strongest unknowns | a device at most once a minute |
 | Stranger's phone that is *not* visible (most phones) | nothing — it never shows up in an inquiry | never |
-| Any device | hears our inquiry (a broadcast; every phone's BT settings screen does the same) | balanced: every 25 s while alone, every 3 min once connected; quiet: never |
+| Any device | hears our inquiry (a broadcast; every phone's BT settings screen does the same) | **only in find mode**: every 15 s for 5 min after you open Nearby / ⟳ / `:find`, or while you know nobody; otherwise never |
 
 Pairing only ever happens (a) when the user explicitly connects from a scan
 list, or (b) once a day with a *known* Muninn peer whose link demands it —
@@ -108,8 +108,10 @@ peers are not marked Trusted, Muninn's agent is never the default agent and
 only authorizes Muninn's own service. Android uses insecure RFCOMM throughout
 (never bonds) and only becomes discoverable when the user asks.
 
-Known Muninn peers are redialled with a short, capped back-off; that only
-pages devices that ran Muninn with us before.
+Known Muninn peers are redialled by address with a short, capped back-off
+(*fast*: ≤ 15 s, *battery saver*: ≤ 60 s) — no scanning involved; that only
+pages devices that ran Muninn with us before. Finding *new* people is a
+separate, temporary **find mode**, because new contacts are rare.
 
 ## Clients
 

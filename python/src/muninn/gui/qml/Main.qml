@@ -10,7 +10,12 @@ ApplicationWindow {
     height: 740
     minimumWidth: 800
     minimumHeight: 500
-    visible: true
+    visible: false  // main.py shows it (or keeps it in the tray with --background)
+    // Close = hide to the tray while background mode is on: links, relaying
+    // and notifications keep going. Quit from the tray menu or :q.
+    onClosing: (close) => {
+        if (bridge.keepRunning) { close.accepted = false; root.hide(); bridge.wentToBackground() }
+    }
     color: "#0f1115"
 
     // Helper to check if we are in navigation mode
@@ -98,6 +103,19 @@ ApplicationWindow {
                              ? " · " + (bridge.reachablePeerCount - bridge.connectedPeerCount) + " via relay" : "")
                     color: bridge.connectedPeerCount > 0 ? Theme.success : Theme.textMuted
                     font.pixelSize: 11
+                }
+                Text {
+                    id: findingText
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: text !== ""
+                    color: Theme.accent
+                    font.pixelSize: 11
+                    Timer { interval: 1000; running: true; repeat: true; triggeredOnStart: true
+                            onTriggered: findingText.text = bridge.findingStatus() }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                ToolTip.visible: containsMouse; hoverEnabled: true
+                                ToolTip.text: "Looking for new people (scans + polite probes). Click to stop."
+                                onClicked: { bridge.runCommand("find off"); findingText.text = "" } }
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter

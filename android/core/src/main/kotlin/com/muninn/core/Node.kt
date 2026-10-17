@@ -31,7 +31,7 @@ interface Transport {
 /**
  * One device: identity + storage + mesh + transport + dialer. Mirrors
  * python/src/muninn/node.py, including the good-citizen dialling rules:
- * known peers always; Muninn-confirmed devices; within the scan policy's
+ * known peers always; Muninn-confirmed devices; only in find mode
  * budget one quiet, pairing-free probe of an *unknown phone or computer*.
  * Headsets, watches and peripherals are never contacted.
  */
@@ -43,7 +43,7 @@ class Node(
 ) {
     val identity: Identity
     val mesh: Mesh
-    @Volatile var policy: ScanPolicy = ScanPolicy.get(storage.getSetting(ScanPolicy.SETTING_KEY))
+    @Volatile var reconnect: ReconnectMode = ScanPolicy.get(storage.getSetting(ScanPolicy.SETTING_KEY))
         private set
     private val stopped = AtomicBoolean(false)
     private val scanNow = java.util.concurrent.Semaphore(0)
@@ -99,13 +99,27 @@ class Node(
         mesh.stop()
     }
 
-    fun setScanMode(name: String): ScanPolicy {
-        val p = ScanPolicy.ALL[name] ?: throw IllegalArgumentException("scan mode must be one of ${ScanPolicy.ALL.keys}")
-        policy = p
+    fun setReconnectMode(name: String): ReconnectMode {
+        val m = ScanPolicy.ALL[name] ?: throw IllegalArgumentException("reconnect must be one of ${ScanPolicy.ALL.keys}")
+        reconnect = m
         storage.setSetting(ScanPolicy.SETTING_KEY, name)
-        scanNow.release()
-        return p
+        return m
     }
+
+    // ---- find mode (mirrors node.py) ----------------------------------------------
+
+    @Volatile var findUntil = 0L // wall clock ms
+    @Volatile var autoFind = storage.getSetting("auto_find") != "off"
+        private set
+    fun setAutoFind(on: Boolean) { autoFind = on; storage.setSetting("auto_find", if (on) "on" else "off") }
+    /** Looking for new people right now (scans + polite probes)? */
+    val finding: Boolean get() = System.currentTimeMillis() < findUntil || (autoFind && mesh.activePeers().isEmpty())
+    fun findLeft(): Int = maxOf(0L, (findUntil - System.currentTimeMillis()) / 1000).toInt()
+    fun findPeople(seconds: Double = ScanPolicy.FIND_SECONDS) {
+        findUntil = maxOf(findUntil, System.currentTimeMillis() + (seconds * 1000).toLong())
+        scanNow.release()
+    }
+    fun stopFinding() { findUntil = 0 }
 
     // ---- presence ----------------------------------------------------------
 
@@ -189,7 +203,7 @@ class Node(
             else {
                 val prev = (backoff[addr]?.second ?: 1.0) * 2
                 val d = if (addr in hints) minOf(maxOf(prev, HINT_BACKOFF_MIN), HINT_BACKOFF_MAX)
-                        else minOf(maxOf(prev, 2.0), policy.peerBackoffMax)
+                        else minOf(maxOf(prev, 2.0), reconnect.backoffMax)
                 backoff[addr] = (mono() + d * (0.8 + Math.random() * 0.4)) to d
             }
             return
@@ -206,17 +220,14 @@ class Node(
     // ---- discovery -------------------------------------------------------------
 
     private fun scanLoop() {
-        var first = true
         while (!stopped.get()) {
             try {
                 transport.discover().forEach { markSeen(it.first) }
-                val p = policy
-                val interval = if (mesh.connected().isEmpty()) p.inquiryAlone else p.inquiryLinked
-                val due = interval > 0 && mono() - lastInquiry >= interval
+                // no scanning unless looking for new people: known ones are dialled by address
+                val due = finding && mono() - lastInquiry >= ScanPolicy.FIND_INQUIRY
                 val forced = scanNow.tryAcquire()
-                if ((first && p.inquiryAlone > 0) || due || forced) synchronized(scanLock) { ingest(transport.scan(5000)) }
+                if (due || forced) synchronized(scanLock) { ingest(transport.scan(5000)) }
             } catch (e: Throwable) { log("scan: $e") }
-            first = false
             scanNow.tryAcquire((2000 * (0.8 + Math.random() * 0.4)).toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
                 .let { if (it) scanNow.release() }
         }
@@ -228,7 +239,7 @@ class Node(
         lastInquiry = mono()
         scanResults = results
         val now = System.currentTimeMillis()
-        var budget = if (manual) MANUAL_PROBES else policy.probeBudget
+        var budget = if (manual) MANUAL_PROBES else ScanPolicy.FIND_PROBES
         val known = storage.loadTransports().map { it.second }.toSet()
         for (r in results.sortedByDescending { it.rssi ?: -100 }) {
             val addr = r.addr.uppercase()
@@ -246,7 +257,7 @@ class Node(
      *  pause), after that the device is left alone for hours. */
     private fun refuse(addr: String) {
         val n = refusals.merge(addr, 1, Int::plus)!!
-        val wait = if (n > 1) policy.probeBackoff else minOf(600.0, policy.probeBackoff)
+        val wait = if (n > 1) ScanPolicy.PROBE_BACKOFF else 600.0
         val now = System.currentTimeMillis()
         refused[addr] = now + (wait * 1000).toLong()
         refusedAt[addr] = now
@@ -260,8 +271,11 @@ class Node(
         if (fresh) backoff.remove(a)
     }
 
-    fun scanNow(durationMs: Long = 6000): List<ScanResult> =
-        synchronized(scanLock) { transport.scan(durationMs).also { ingest(it, manual = true) } }
+    fun scanNow(durationMs: Long = 6000): List<ScanResult> {
+        // the user is looking: keep looking for a while (this scan counts)
+        findUntil = maxOf(findUntil, System.currentTimeMillis() + (ScanPolicy.FIND_SECONDS * 1000).toLong())
+        return synchronized(scanLock) { transport.scan(durationMs).also { ingest(it, manual = true) } }
+    }
 
     /** What the Nearby screen shows for a scanned device. */
     fun deviceState(addr: String): String {
@@ -296,7 +310,7 @@ class Node(
     }
 
     fun status(): Map<String, Any?> = mapOf(
-        "scan_mode" to policy.name,
+        "reconnect" to reconnect.name, "finding" to finding, "find_left" to findLeft(),
         "sighted" to sightedAt.values.count { System.currentTimeMillis() - it < 120_000 },
         "probe_queue" to probeQueue.size,
     )

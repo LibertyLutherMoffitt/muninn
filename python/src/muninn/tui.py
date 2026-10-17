@@ -420,7 +420,14 @@ class Tui(ChatUI):
         status = f" {self.mesh.name or 'no name'} · {direct} connected"
         if relayed:
             status += f" · {relayed} via relay"
-        status += f" · {self.node.policy.name} "
+        if self.node.finding:
+            left = self.node.find_left()
+            status += (
+                f" · finding {left // 60}:{left % 60:02d}" if left else " · finding"
+            )
+        if self.node.reconnect.name != "fast":
+            status += f" · {self.node.reconnect.label.lower()}"
+        status += " "
         vm = str(self.vim.mode) if self.vim_on else ""
         if self.panel:
             prompt = " ↑↓ scroll · Esc/q/Enter close "

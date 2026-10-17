@@ -528,23 +528,25 @@ fun SettingsScreen() {
                 }
             }) { Text("Allow background") }
             HorizontalDivider()
-            Text("Finding new people", style = MaterialTheme.typography.titleSmall)
-            var mode by remember { mutableStateOf(Runtime.node?.policy?.name ?: com.muninn.core.ScanPolicy.DEFAULT.name) }
-            com.muninn.core.ScanPolicy.ALL.values.forEach { pol ->
+            Text("Reconnecting", style = MaterialTheme.typography.titleSmall)
+            Text("People you've met are reconnected by address — no scanning, nothing sent to other devices. " +
+                "Finding *new* people only happens for a few minutes when you open Nearby (or while you know nobody).",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            var mode by remember { mutableStateOf(Runtime.node?.reconnect?.name ?: com.muninn.core.ScanPolicy.DEFAULT.name) }
+            com.muninn.core.ScanPolicy.ALL.values.forEach { m ->
                 Row(Modifier.fillMaxWidth().clickable {
-                    mode = pol.name
-                    Thread { runCatching { Runtime.node?.setScanMode(pol.name) } }.start()
+                    mode = m.name
+                    Thread { runCatching { Runtime.node?.setReconnectMode(m.name) } }.start()
                 }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    androidx.compose.material3.RadioButton(selected = mode == pol.name, onClick = null)
+                    androidx.compose.material3.RadioButton(selected = mode == m.name, onClick = null)
                     Spacer(Modifier.width(8.dp))
                     Column {
-                        Text(pol.label)
-                        Text(pol.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(m.label)
+                        Text(m.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
-            Text("Muninn never pairs with or prompts other people's devices; headsets and watches are never contacted. " +
-                "Looking around briefly slows Bluetooth audio — choose Quiet if that bothers you.",
+            Text("Muninn never pairs with or prompts other people's devices; headsets and watches are never contacted.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Start after reboot", Modifier.weight(1f))
