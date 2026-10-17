@@ -63,3 +63,24 @@ def test_utf8_cut_never_splits_a_codepoint():
         assert len(b) <= 255
         b.decode("utf-8")  # must not raise
         assert name.startswith(b.decode("utf-8"))
+
+
+def test_selfupdate_versions_and_asset_names(monkeypatch):
+    import sys
+
+    from muninn import selfupdate
+
+    assert selfupdate.newer("0.10.0", "0.9.9") and not selfupdate.newer(
+        "0.4.0", "0.4.0"
+    )
+    assert selfupdate.newer("v1.0", "0.99.99") and not selfupdate.newer("0.3.9", "0.4")
+    assert selfupdate.asset_name() is None  # not a frozen build
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/opt/muninn-gui-linux-x86_64")
+    assert selfupdate.asset_name() == "muninn-gui-linux-x86_64"
+    monkeypatch.setattr(
+        sys, "executable", r"C:\Apps\muninn-windows-x86_64.exe".replace("\\", "/")
+    )
+    assert selfupdate.asset_name() == "muninn-windows-x86_64.exe"
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    assert selfupdate.asset_name() is None

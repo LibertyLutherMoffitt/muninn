@@ -20,7 +20,8 @@ key="${MUNINN_KEYSTORE:-$HOME/.config/muninn/android-signing.keystore}"
 
 sed -i -E "s/^version = \"[^\"]+\"/version = \"$ver\"/" python/pyproject.toml
 sed -i -E "s/version = \"[0-9]+\.[0-9]+\.[0-9]+\";/version = \"$ver\";/" flake.nix
-git add python/pyproject.toml flake.nix
+sed -i -E "s/^__version__ = \"[^\"]+\"/__version__ = \"$ver\"/" python/src/muninn/__init__.py
+git add python/pyproject.toml flake.nix python/src/muninn/__init__.py
 git commit -m "release: v$ver" -m "${notes:-Muninn $ver}"
 
 (cd android && gradle -q :app:assembleRelease)

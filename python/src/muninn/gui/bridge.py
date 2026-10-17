@@ -816,6 +816,46 @@ class ChatBridge(QObject):
         name = next((g["name"] for g in self.games.catalog() if g["id"] == gid), gid)
         self.notify.emit(f"installed {name} — :game {gid} to play")
 
+    def _self_update(self, install: bool) -> None:
+        from muninn import __version__, selfupdate
+
+        if not selfupdate.asset_name():
+            return self.notify.emit(
+                f"Muninn {__version__} — this copy updates through Nix/pip, not by itself"
+                if install
+                else f"Muninn {__version__}"
+            )
+
+        def run():
+            try:
+                rel = selfupdate.check()
+                selfupdate.mark_checked(self.node.storage)
+                if rel is None:
+                    return self.notify.emit(f"Muninn {__version__} is up to date")
+                if not install:
+                    return self.notify.emit(
+                        f"Muninn {rel.version} is available — :update installs it"
+                    )
+                self.notify.emit(f"downloading Muninn {rel.version}…")
+                exe = selfupdate.install(rel)
+                self.notify.emit(f"updated to {rel.version} — restarting")
+                time.sleep(1.5)
+                self.node.stop()
+                selfupdate.restart(exe)
+            except Exception as e:
+                self.errorOccurred.emit(f"update: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    @Slot()
+    def startupUpdateCheck(self) -> None:
+        """Quietly look for a newer standalone build (every 12 h)."""
+        from muninn import selfupdate
+
+        selfupdate.cleanup_old()
+        if selfupdate.asset_name() and selfupdate.due(self.node.storage):
+            self._self_update(install=False)
+
     @Slot(str)
     def importGame(self, path: str) -> None:
         try:
@@ -857,6 +897,8 @@ class ChatBridge(QObject):
         "games",
         "scores",
         "importgame",
+        "update",
+        "version",
         "sharegame",
         "find",
         "background",
@@ -915,6 +957,10 @@ class ChatBridge(QObject):
         (":emoji", "emoji picker (Ctrl+E). :shortcodes: expand on send"),
         (":game [name] [opt=value]", "start a game in this conversation"),
         (":games", "games in this conversation"),
+        (
+            ":update / :version",
+            "install the newest standalone build (Linux/Windows) / show version",
+        ),
         (
             ":importgame [path]",
             "install a game file (.js) — or click a game someone sent",
@@ -1185,6 +1231,8 @@ class ChatBridge(QObject):
                     ],
                 )
             self.startGame(args[0], self._active, opts)
+        elif head in ("update", "version"):
+            self._self_update(install=head == "update")
         elif head == "importgame":
             if args:
                 self.importGame(os.path.expanduser(" ".join(args)))

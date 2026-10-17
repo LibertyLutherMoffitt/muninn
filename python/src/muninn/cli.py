@@ -80,6 +80,7 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/update  /version          install the newest standalone build / show version
 /scores                    who won how many of each game (this chat, or all)
 /clear                     delete this chat on this device (a room: leave it too)
 /forget <peer> [...]       forget people: chat, saved addresses, pairing
@@ -427,6 +428,36 @@ class ChatUI:
                     self.out(f"  {'blocked' if cmd == 'block' else 'forgot'} {name}")
                     if self.conv == "dm:" + nid:
                         self.conv = ""
+        elif cmd in ("update", "version"):
+            from muninn import __version__, selfupdate
+
+            if not selfupdate.asset_name():
+                self.out(
+                    f"  Muninn {__version__}"
+                    + (
+                        " — this copy updates through Nix/pip"
+                        if cmd == "update"
+                        else ""
+                    )
+                )
+                return True
+            try:
+                rel = selfupdate.check()
+            except Exception as e:
+                self.out(f"! update check failed: {e}")
+                return True
+            if rel is None:
+                self.out(f"  Muninn {__version__} is up to date")
+            elif cmd == "version":
+                self.out(
+                    f"  Muninn {__version__}; {rel.version} is available — /update"
+                )
+            else:
+                self.out(f"  downloading Muninn {rel.version}…")
+                exe = selfupdate.install(rel)
+                self.out("  updated — restarting")
+                self.node.stop()
+                selfupdate.restart(exe)
         elif cmd == "scores":
             from muninn.gamehost import GameRegistry
 

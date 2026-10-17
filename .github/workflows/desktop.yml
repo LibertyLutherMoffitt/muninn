@@ -65,6 +65,13 @@ jobs:
         run: |
           MUNINN_SELFTEST=1 ./dist/muninn-${{ matrix.suffix }}${{ matrix.exe }}
           MUNINN_SELFTEST=1 QT_QPA_PLATFORM=offscreen ./dist/muninn-gui-${{ matrix.suffix }}${{ matrix.exe }}
+      - name: checksums (the self-updater verifies them)
+        run: |
+          cd dist
+          for f in muninn-*; do
+            case "$f" in *.sha256) ;; *) python -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest(), sys.argv[1])" "$f" > "$f.sha256";; esac
+          done
+          ls -la
       - uses: actions/upload-artifact@v4
         with:
           name: muninn-${{ matrix.suffix }}

@@ -6,7 +6,7 @@ import os
 import pathlib
 import sys
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QFont, QOpenGLContext
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
@@ -116,6 +116,7 @@ def main() -> None:
         QMessageBox.critical(None, "Muninn", f"Could not start Bluetooth:\n\n{e}")
         node.stop()
         sys.exit(1)
+    QTimer.singleShot(8000, bridge.startupUpdateCheck)  # standalone builds only
     ret = app.exec()
     node.stop()
     sys.exit(ret)
