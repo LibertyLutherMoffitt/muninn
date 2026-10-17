@@ -72,6 +72,17 @@ interface Storage {
     /** `old` reinstalled as `new`: move history/receipts/reactions/groups; returns old's outbox (removed). */
     fun migratePeer(old: String, new: String): List<OutboxEntry>
 
+    /** Delete a conversation's messages, receipts, reactions, unsent messages,
+     *  files and games; returns file paths to remove from disk. */
+    fun deleteConversation(conv: String): List<String>
+    /** Their chat, saved addresses, queued packets and pinned key. */
+    fun forgetPeer(nodeId: String): List<String>
+    fun deleteGroup(groupId: ByteArray): List<String>
+    fun blocked(): Set<String> =
+        (getSetting("blocked")?.let { runCatching { Json.parse(it) as? List<*> }.getOrNull() } ?: emptyList<Any>())
+            .map { it.toString() }.toSet()
+    fun setBlocked(ids: Set<String>) = setSetting("blocked", Json.write(ids.sorted()))
+
     fun saveTransport(nodeId: String, addr: String)
     fun loadTransports(): List<Triple<String, String, Long>> // node, addr, lastOk (newest first)
     /** Gossiped address (lastOk = 0: never connected there). True if new. */
@@ -169,6 +180,31 @@ class MemStorage(override val filesDir: File) : Storage {
         val out = outbox.values.filter { it.dst == old }
         outbox.values.removeIf { it.dst == old }
         out
+    }
+
+    override fun deleteConversation(conv: String): List<String> = synchronized(lock) {
+        val ids = messages.values.filter { it.conv == conv }.map { it.msgId.hex() }.toSet()
+        ids.forEach { messages.remove(it); recipients.remove(it); reactions.remove(it) }
+        outbox.values.removeIf { e -> e.msgId?.hex() in ids }
+        val paths = files.values.filter { it.conv == conv }.map { it.path }
+        files.values.removeIf { it.conv == conv }
+        appEvents.values.removeIf { it.conv == conv }
+        paths.filter { it.isNotEmpty() }
+    }
+    override fun forgetPeer(nodeId: String): List<String> {
+        val paths = deleteConversation("dm:$nodeId")
+        synchronized(lock) {
+            transports.keys.removeIf { it.first == nodeId }
+            outbox.values.removeIf { it.dst == nodeId }
+            relay.values.removeIf { it.first == nodeId }
+            peers.remove(nodeId)
+        }
+        return paths
+    }
+    override fun deleteGroup(groupId: ByteArray): List<String> {
+        val paths = deleteConversation("group:" + groupId.hex())
+        synchronized(lock) { groups.remove(groupId.hex()) }
+        return paths
     }
 
     override fun saveTransport(nodeId: String, addr: String) = synchronized(lock) { transports[nodeId to addr] = P.now() }

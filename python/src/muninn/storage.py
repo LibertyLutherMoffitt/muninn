@@ -325,6 +325,66 @@ class Storage:
             for r in rows
         ]
 
+    # --- forgetting -------------------------------------------------------------
+
+    def delete_conversation(self, conv: str) -> list[str]:
+        """Delete a conversation's messages, receipts, reactions, unsent
+        messages, files and games. Returns file paths to remove from disk."""
+        with self._lock:
+            if self._closed:
+                return []
+            c = self._conn
+            c.execute("BEGIN")
+            try:
+                ids = [
+                    r[0]
+                    for r in c.execute(
+                        "SELECT msg_id FROM messages WHERE conv = ?", (conv,)
+                    )
+                ]
+                for i in range(0, len(ids), 500):
+                    chunk = ids[i : i + 500]
+                    marks = ",".join("?" * len(chunk))
+                    c.execute(f"DELETE FROM reactions WHERE msg_id IN ({marks})", chunk)
+                    c.execute(f"DELETE FROM outbox WHERE msg_id IN ({marks})", chunk)
+                    c.execute(
+                        f"DELETE FROM recipients WHERE msg_id IN ({marks})", chunk
+                    )
+                paths = [
+                    r[0]
+                    for r in c.execute("SELECT path FROM files WHERE conv = ?", (conv,))
+                ]
+                c.execute("DELETE FROM files WHERE conv = ?", (conv,))
+                c.execute("DELETE FROM app_events WHERE conv = ?", (conv,))
+                c.execute("DELETE FROM messages WHERE conv = ?", (conv,))
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
+        return [p for p in paths if p]
+
+    def forget_peer(self, node_id: str) -> list[str]:
+        """Everything about a person: their chat, saved radio addresses,
+        anything still queued for them, and the pinned key."""
+        paths = self.delete_conversation("dm:" + node_id)
+        self._x("DELETE FROM transports WHERE node_id = ?", (node_id,))
+        self._x("DELETE FROM outbox WHERE dst = ?", (node_id,))
+        self._x("DELETE FROM relay_store WHERE dst = ?", (node_id,))
+        self._x("DELETE FROM peers WHERE node_id = ?", (node_id,))
+        return paths
+
+    def delete_group(self, group_id: bytes) -> list[str]:
+        paths = self.delete_conversation("group:" + group_id.hex())
+        self._x("DELETE FROM group_members WHERE group_id = ?", (group_id,))
+        self._x("DELETE FROM groups WHERE group_id = ?", (group_id,))
+        return paths
+
+    def blocked(self) -> set[str]:
+        return set(json.loads(self.get_setting("blocked", "[]") or "[]"))
+
+    def set_blocked(self, ids: set[str]) -> None:
+        self.set_setting("blocked", json.dumps(sorted(ids)))
+
     # --- transports -------------------------------------------------------------
 
     def save_transport(self, node_id: str, addr: str) -> None:

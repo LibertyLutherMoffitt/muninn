@@ -114,6 +114,13 @@ class Mesh(
     private val serveQ = ArrayList<Triple<String, ByteArray, Int>>()
     val typing = ConcurrentHashMap<Pair<String, String>, Double>()
     var autoDownloadMax = Tun.AUTO_DOWNLOAD_MAX
+    val blocked: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet(storage.blocked()))
+    // forgotten people stay out of the lists until they write to us again
+    @Volatile var hidden: Set<String> =
+        (storage.getSetting("forgotten_ids")?.let { runCatching { Json.parse(it) as? List<*> }.getOrNull() } ?: emptyList<Any>())
+            .map { it.toString() }.toSet()
+        private set
+    private fun setHidden(ids: Set<String>) { hidden = ids; storage.setSetting("forgotten_ids", Json.write(ids.sorted())) }
     val stats = ConcurrentHashMap<String, AtomicLong>()
 
     private val listeners = java.util.concurrent.CopyOnWriteArrayList<MeshListener>()
@@ -267,6 +274,7 @@ class Mesh(
             hello = P.decodeHello(f.payload)
             if (hello.version != P.VERSION) throw IllegalStateException("protocol version ${hello.version}")
             if (hello.nodeId == nodeId) throw IllegalStateException("connected to self")
+            if (hello.nodeId in blocked) throw IllegalStateException("blocked")
         } catch (e: Throwable) {
             done.set(true)
             log("handshake with $transportAddr failed: $e")
@@ -365,7 +373,7 @@ class Mesh(
     fun isMuted(conv: String) = storage.getSetting("mute:$conv") == "1"
     fun setMuted(conv: String, muted: Boolean) { storage.setSetting("mute:$conv", if (muted) "1" else "0"); emit { it.onPeers() } }
 
-    fun activePeers(): List<PeerInfo> = synchronized(lock) { peers.values.filter { it.replacedBy == null } }
+    fun activePeers(): List<PeerInfo> = synchronized(lock) { peers.values.filter { it.replacedBy == null && it.nodeId !in hidden } }
 
     private fun preferNew(old: Link, new: Link): Boolean {
         if (mono() - old.lastRx > Tun.PING_INTERVAL * 2.5) return true
@@ -433,7 +441,7 @@ class Mesh(
     // ================================================================ peers / roster
 
     private fun learnPeer(e: P.RosterEntry): List<P.RosterEntry> {
-        if (e.nodeId == nodeId) return emptyList()
+        if (e.nodeId == nodeId || e.nodeId in blocked) return emptyList()
         val peer: PeerInfo
         synchronized(lock) {
             val p = peers[e.nodeId]
@@ -464,7 +472,7 @@ class Mesh(
     private fun onAddrs(link: Link, entries: List<Pair<String, String>>) {
         var learned = false
         for ((id, addr) in entries) {
-            val skip = synchronized(lock) { id == nodeId || id in links || peers[id]?.replacedBy != null || id !in peers }
+            val skip = synchronized(lock) { id == nodeId || id in blocked || id in links || peers[id]?.replacedBy != null || id !in peers }
             if (!skip && storage.addTransportHint(id, addr)) {
                 log("addr hint $id at $addr from ${link.nodeId}")
                 learned = true
@@ -741,6 +749,8 @@ class Mesh(
     private fun dispatch(pkt: P.Packet, body: Body.B) {
         val m = body.meta
         val src = pkt.src
+        if (src in blocked) return // acked (so they stop retrying), never shown
+        if (src in hidden && (body.kind == Body.TEXT || body.kind == Body.FILE)) setHidden(hidden - src)
         val ts = minOf(pkt.ts, P.now() + 60) // sender clock (app event order)
         val arrived = P.now() // chat is ordered by arrival (see mesh.py)
         when (body.kind) {
@@ -907,6 +917,55 @@ class Mesh(
     }
 
     fun leaveGroup(gid: ByteArray) = updateGroup(gid, remove = listOf(nodeId))
+
+    // ================================================================ forgetting (mirrors mesh.py)
+
+    private fun dropFiles(paths: List<String>) {
+        paths.forEach { runCatching { java.io.File(it).delete() } }
+        val gone = paths.toSet()
+        synchronized(lock) {
+            files.entries.filter { it.value.path in gone }.map { it.key }.forEach { files.remove(it); downloads.remove(it) }
+        }
+    }
+
+    /** Delete a chat on this device only; a group is also left (the others
+     *  are told) and removed from the list. */
+    fun deleteConversation(conv: String) {
+        val gid = convGroupId(conv)
+        val doomed = storage.loadHistory(conv, 1_000_000).map { it.msgId.hex() }.toSet()
+        val paths = if (gid != null) {
+            val g = synchronized(lock) { groups[gid.hex()] }
+            if (g != null && !g.left && nodeId in g.members) runCatching { leaveGroup(gid) }.onFailure { log("leave $conv: $it") }
+            synchronized(lock) { groups.remove(gid.hex()) }
+            storage.deleteGroup(gid)
+        } else storage.deleteConversation(conv)
+        synchronized(lock) { outbox.values.removeIf { it.msgId?.hex() in doomed } }
+        dropFiles(paths)
+        emit { it.onPeers() }
+    }
+
+    /** Forget a person (chat, addresses, queue, pinned key); with [block] also
+     *  refuse their links and messages. Returns their radio addresses. */
+    fun forget(id: String, block: Boolean = false): List<String> {
+        val addrs = storage.loadTransports().filter { it.first == id }.map { it.second }
+        if (block) { blocked.add(id); storage.setBlocked(blocked.toSet()) }
+        setHidden(hidden + id)
+        val link = synchronized(lock) {
+            peers.remove(id)
+            outbox.values.removeIf { it.dst == id }
+            links[id]
+        }
+        if (block) link?.close()
+        dropFiles(storage.forgetPeer(id))
+        log("forgot $id${if (block) " (blocked)" else ""}")
+        emit { it.onPeers() }
+        return addrs
+    }
+
+    fun unblock(id: String) {
+        blocked.remove(id); storage.setBlocked(blocked.toSet())
+        emit { it.onPeers() }
+    }
 
     private fun onGroupInfo(src: String, m: Map<String, Any?>) {
         val gidHex = m.str("g")

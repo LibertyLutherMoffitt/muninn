@@ -85,6 +85,23 @@ fun SimpleScaffold(title: String, actions: @Composable () -> Unit = {}, content:
     }) { pad -> content(Modifier.padding(pad)) }
 }
 
+// ---------------------------------------------------------------- blocked
+
+@Composable
+fun BlockedCard() {
+    val tick by Runtime.tick.collectAsState()
+    val blocked = remember(tick) { Runtime.node?.mesh?.blocked?.toList()?.sorted() ?: emptyList() }
+    if (blocked.isEmpty()) return
+    Text("Blocked", style = MaterialTheme.typography.titleSmall)
+    blocked.forEach { id ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(id, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = { Thread { Runtime.node?.mesh?.unblock(id); Runtime.bump() }.start() }) { Text("Unblock") }
+        }
+    }
+    HorizontalDivider()
+}
+
 // ---------------------------------------------------------------- updates
 
 @Composable
@@ -416,6 +433,7 @@ fun SettingsScreen() {
             Text("Be visible", style = MaterialTheme.typography.titleSmall)
             VisibilityCard()
             HorizontalDivider()
+            BlockedCard()
             Text("Updates", style = MaterialTheme.typography.titleSmall)
             UpdateCard()
             HorizontalDivider()

@@ -13,6 +13,7 @@ Who gets dialled (good Bluetooth citizen):
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import threading
@@ -89,6 +90,11 @@ class Node:
         self.scan_results: list[ScanResult] = []
         self._dialing: set[str] = set()
         self._hints: set[str] = set()
+        # radio addresses of people the user forgot: never auto-dialled again
+        # (they can still reach us; a manual connect clears it)
+        self._forgotten: set[str] = set(
+            json.loads(self.storage.get_setting("forgotten_addrs", "[]") or "[]")
+        )
         self._dial_lock = threading.Lock()
         self.last_inquiry = 0.0
         self._scan_lock = threading.Lock()  # concurrent inquiries cancel each other
@@ -131,6 +137,8 @@ class Node:
     # --- inbound ------------------------------------------------------------
 
     def _incoming(self, sock, addr: str) -> None:
+        if addr.upper() in self._forgotten:  # they came back on their own
+            self._set_forgotten(self._forgotten - {addr.upper()})
         threading.Thread(
             target=self.mesh.add_link, args=(sock, addr, False), daemon=True
         ).start()
@@ -213,7 +221,7 @@ class Node:
             own = self.transport.local_addr().upper()
         except Exception:
             own = ""
-        return [(a, p) for a, p in out if a != own]
+        return [(a, p) for a, p in out if a != own and a not in self._forgotten]
 
     def _dial_loop(self) -> None:
         while not self._stop.wait(0.5):
@@ -381,10 +389,27 @@ class Node:
             return "ignored"
         return "unknown"
 
+    def forget(self, node_id: str, block: bool = False) -> None:
+        """Forget (and optionally block) a person; also drops any OS-level
+        Bluetooth pairing with their device and never auto-dials it again."""
+        addrs = {a.upper() for a in self.mesh.forget(node_id, block)}
+        self._set_forgotten(self._forgotten | addrs)
+        for a in addrs:
+            try:
+                self.transport.forget(a)
+            except Exception as e:
+                self.log(f"unpair {a}: {e!r}")
+
+    def _set_forgotten(self, addrs: set[str]) -> None:
+        self._forgotten = addrs
+        self.storage.set_setting("forgotten_addrs", json.dumps(sorted(addrs)))
+
     def connect_to(self, addr: str, probe: bool = False) -> str | None:
         """Explicit user-initiated connect (e.g. from a scan dialog). `probe`
         for a device not confirmed to run Muninn: never pairs."""
         addr = addr.upper()
+        if addr in self._forgotten:
+            self._set_forgotten(self._forgotten - {addr})
         self._backoff.pop(addr, None)
         sock = (
             self.transport.probe(addr)

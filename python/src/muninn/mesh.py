@@ -21,6 +21,7 @@ dedup windows are time-bounded so retransmits always get through.
 from __future__ import annotations
 
 import hashlib
+import json
 import itertools
 import os
 import queue
@@ -252,6 +253,12 @@ class Mesh:
         self.typing: dict[tuple[str, str], float] = {}  # (conv, node) -> until
         self.auto_download_max = AUTO_DOWNLOAD_MAX
         self.stats = defaultdict(int)
+        self.blocked: set[str] = storage.blocked()
+        # forgotten people stay out of the lists (their device may still be
+        # around and relaying) until they actually write to us again
+        self.hidden: set[str] = set(
+            json.loads(storage.get_setting("forgotten_ids", "[]") or "[]")
+        )
 
         self._subs: dict[str, list[Callable]] = defaultdict(list)
         self._events: queue.Queue = queue.Queue()
@@ -354,6 +361,8 @@ class Mesh:
                 raise ConnectionError(f"protocol version {hello.version}")
             if hello.node_id == self.node_id:
                 raise ConnectionError("connected to self")
+            if hello.node_id in self.blocked:
+                raise ConnectionError("blocked")
         except Exception as e:
             self._log(f"handshake with {transport_addr} failed: {e!r}")
             with self.lock:
@@ -574,7 +583,7 @@ class Mesh:
 
     def _learn_peer(self, e: P.RosterEntry) -> list[P.RosterEntry]:
         """Merge roster info. Returns entries that changed (to gossip on)."""
-        if e.node_id == self.node_id:
+        if e.node_id == self.node_id or e.node_id in self.blocked:
             return []
         with self.lock:
             peer = self.peers.get(e.node_id)
@@ -614,6 +623,7 @@ class Mesh:
             with self.lock:
                 skip = (
                     nid == self.node_id
+                    or nid in self.blocked
                     or nid in self.links
                     or nid not in self.peers
                     or bool(self.peers[nid].replaced_by)
@@ -664,7 +674,11 @@ class Mesh:
     def active_peers(self) -> list[PeerInfo]:
         """Known peers, minus identities that were replaced by a reinstall."""
         with self.lock:
-            return [p for p in self.peers.values() if not p.replaced_by]
+            return [
+                p
+                for p in self.peers.values()
+                if not p.replaced_by and p.node_id not in self.hidden
+            ]
 
     def display_name(self, node_id: str) -> str:
         if node_id == self.node_id:
@@ -998,6 +1012,10 @@ class Mesh:
 
     def _dispatch(self, pkt: P.Packet, body: C.Body) -> None:
         k, m, src = body.kind, body.meta, pkt.src
+        if src in self.blocked:
+            return  # acked (so they stop retrying), never shown
+        if src in self.hidden and k in (C.K_TEXT, C.K_FILE):
+            self._set_hidden(self.hidden - {src})  # forgotten, but wrote again
         ts = min(pkt.ts, int(time.time()) + 60)  # sender clock (app event order)
         # Chat is ordered by arrival: a wrong clock on the sender's device or a
         # long wait at a relay can't bury a new message in the history.
@@ -1235,6 +1253,77 @@ class Mesh:
 
     def leave_group(self, gid: bytes) -> None:
         self.update_group(gid, remove=[self.node_id])
+
+    # ------------------------------------------------------------------ forgetting
+
+    def _drop_files(self, paths: list[str]) -> None:
+        for path in paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        gone = set(paths)
+        with self.lock:
+            for fid in [f for f, r in self.files.items() if r.path in gone]:
+                self.files.pop(fid, None)
+                self.downloads.pop(fid, None)
+
+    def delete_conversation(self, conv: str) -> None:
+        """Delete a chat's history on this device only. A group is also left
+        (the others are told) and removed from the list."""
+        gid = conv_group_id(conv)
+        doomed = {m.msg_id for m in self.storage.load_history(conv, 1_000_000)}
+        if gid is not None:
+            g = self.groups.get(gid)
+            if g is not None and not g.left and self.node_id in g.members:
+                try:
+                    self.leave_group(gid)
+                except Exception as e:
+                    self._log(f"leave {conv}: {e!r}")
+            paths = self.storage.delete_group(gid)
+            with self.lock:
+                self.groups.pop(gid, None)
+        else:
+            paths = self.storage.delete_conversation(conv)
+        with self.lock:  # unsent messages of this chat won't be retried
+            self.outbox = {
+                k: v for k, v in self.outbox.items() if v.msg_id not in doomed
+            }
+        self._drop_files(paths)
+        self._emit("peers")
+        if gid is not None:
+            self._emit("group", gid)
+
+    def forget(self, node_id: str, block: bool = False) -> list[str]:
+        """Forget a person: their chat, saved addresses, queued messages and
+        pinned key; Muninn stops reconnecting to them. They come back only
+        if they get in touch again — unless `block`, which also refuses
+        their links and messages. Returns their radio addresses (so the
+        transport can drop an OS-level Bluetooth pairing)."""
+        addrs = [a for n, a, _ in self.storage.load_transports() if n == node_id]
+        if block:
+            self.blocked.add(node_id)
+            self.storage.set_blocked(self.blocked)
+        self._set_hidden(self.hidden | {node_id})
+        with self.lock:
+            link = self.links.get(node_id)
+            self.peers.pop(node_id, None)
+            self.outbox = {k: v for k, v in self.outbox.items() if v.dst != node_id}
+        if link is not None and block:
+            link.close()
+        self._drop_files(self.storage.forget_peer(node_id))
+        self._log(f"forgot {node_id}{' (blocked)' if block else ''}")
+        self._emit("peers")
+        return addrs
+
+    def _set_hidden(self, ids: set[str]) -> None:
+        self.hidden = ids
+        self.storage.set_setting("forgotten_ids", json.dumps(sorted(ids)))
+
+    def unblock(self, node_id: str) -> None:
+        self.blocked.discard(node_id)
+        self.storage.set_blocked(self.blocked)
+        self._emit("peers")
 
     def _on_group_info(self, src: str, m: dict) -> None:
         gid = bytes.fromhex(m["g"])

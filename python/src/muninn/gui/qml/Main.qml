@@ -39,6 +39,7 @@ ApplicationWindow {
 
             PeerList {
                 id: peerList
+                onRemoveRequested: (convs, how) => confirmRemove.open(convs, how)
                 Layout.preferredWidth: 240
                 Layout.fillHeight: true
                 onConvSelected: (cid) => {
@@ -203,6 +204,7 @@ ApplicationWindow {
     property bool overlayOpen:
         cmdPalette.visible || scanDialog.visible || infoMenu.visible
         || emojiPicker.visible || imageViewer.visible || gameView.visible
+        || confirmRemove.visible
 
     Shortcut {
         sequence: "Esc"
@@ -304,6 +306,9 @@ ApplicationWindow {
 
     ScanDialog { id: scanDialog; anchors.fill: parent; z: 10
         onVisibleChanged: root.overlayVisibility(scanDialog) }
+    ConfirmRemove { id: confirmRemove; anchors.fill: parent; z: 14
+        onVisibleChanged: { root.overlayVisibility(confirmRemove); peerList.confirmOpen = visible }
+        onDone: peerList.clearPicked() }
 
     CommandPalette {
         id: cmdPalette
@@ -429,6 +434,7 @@ ApplicationWindow {
         function onEmojiPickerRequested(mode) { emojiPicker.open(mode, "") }
         function onImageViewRequested(url) { imageViewer.open(url) }
         function onGameOpenRequested(sid) { gameView.open(sid) }
+        function onRemoveRequested(convs, how) { confirmRemove.open(convs, how) }
         function onInfoMenuRequested(title, items) {
             // If the palette is still open (raw `:` command path), close it
             // first so the info menu owns focus cleanly.

@@ -1,5 +1,10 @@
 package com.muninn
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.combinedClickable
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -108,12 +113,57 @@ fun ConversationsScreen() {
             }
         }
     }
+    // selection mode: long-press a chat, tap others to add
+    var picked by remember { mutableStateOf(setOf<String>()) }
+    var confirm by remember { mutableStateOf<String?>(null) } // delete | forget | block
+    val scope = rememberCoroutineScope()
+    BackHandler(enabled = picked.isNotEmpty()) { picked = emptySet() }
+    val allPeople = picked.isNotEmpty() && picked.all { it.startsWith("dm:") }
+    confirm?.let { how ->
+        val names = items.filter { it.conv in picked }.map { it.title }
+        val who = if (names.size <= 3) names.joinToString(", ") else "${names.size} chats"
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(when (how) { "block" -> "Block $who?"; "forget" -> "Forget $who?"; else -> "Delete $who?" }) },
+            text = { Text(when (how) {
+                "block" -> "Deletes the chat and saved addresses and refuses their connections and messages from now on. Unblock in Settings."
+                "forget" -> "Deletes the chat and saved addresses; Muninn stops reconnecting and hides them. If they write again they show up as a new chat."
+                else -> "Removes messages, files and games on this phone only — the others keep theirs." +
+                    if (picked.any { it.startsWith("group:") }) " Rooms are left: the members are told." else ""
+            }) },
+            confirmButton = {
+                TextButton(onClick = {
+                    val sel = picked; picked = emptySet(); confirm = null
+                    scope.launch(Dispatchers.IO) {
+                        val n = Runtime.node ?: return@launch
+                        for (c in sel) {
+                            if (c.startsWith("dm:") && how != "delete") n.forget(c.substring(3), block = how == "block")
+                            else n.mesh.deleteConversation(c)
+                        }
+                        Runtime.bump()
+                        Runtime.toast(when (how) { "block" -> "Blocked"; "forget" -> "Forgotten"; else -> "Deleted" })
+                    }
+                }) { Text(when (how) { "block" -> "Block"; "forget" -> "Forget"; else -> "Delete" },
+                          color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+        )
+    }
     var askName by remember { mutableStateOf(false) }
     LaunchedEffect(tick) { if (Runtime.node?.mesh?.name?.isEmpty() == true) askName = true }
     if (askName) WelcomeDialog { askName = false }
     Scaffold(
         topBar = {
-            TopAppBar(
+            if (picked.isNotEmpty()) TopAppBar(
+                navigationIcon = { IconButton(onClick = { picked = emptySet() }) { Text("✕") } },
+                title = { Text("${picked.size} selected") },
+                actions = {
+                    TextButton(onClick = { confirm = "delete" }) { Text("Delete") }
+                    if (allPeople) TextButton(onClick = { confirm = "forget" }) { Text("Forget") }
+                    if (allPeople) TextButton(onClick = { confirm = "block" }) {
+                        Text("Block", color = MaterialTheme.colorScheme.error) }
+                },
+            ) else TopAppBar(
                 title = {
                     Column {
                         Text("Muninn", fontWeight = FontWeight.SemiBold)
@@ -161,19 +211,30 @@ fun ConversationsScreen() {
                             Column(Modifier.padding(12.dp)) { UpdateCard(compact = true) }
                         }
                 }
-                items(items, key = { it.conv }) { c -> ConvRow(c) }
+                items(items, key = { it.conv }) { c ->
+                    ConvRow(c, selected = c.conv in picked, selecting = picked.isNotEmpty(),
+                        onToggle = { picked = if (c.conv in picked) picked - c.conv else picked + c.conv })
+                }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ConvRow(c: Runtime.ConvItem) {
+private fun ConvRow(c: Runtime.ConvItem, selected: Boolean, selecting: Boolean, onToggle: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable { Nav.go(Screen.Chat(c.conv)) }.padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth()
+            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+            .combinedClickable(
+                onClick = { if (selecting) onToggle() else Nav.go(Screen.Chat(c.conv)) },
+                onLongClick = onToggle,
+            ).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(c.title, if (c.isGroup) "group" else c.status)
+        if (selected) Box(Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center) { Text("✓", color = MaterialTheme.colorScheme.onPrimary, fontSize = 20.sp) }
+        else Avatar(c.title, if (c.isGroup) "group" else c.status)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

@@ -69,6 +69,9 @@ class Transport:
         """True if we should give the peer a head start dialing us first."""
         return False
 
+    def forget(self, addr: str) -> None:
+        """Drop any OS-level pairing / cached record of this device."""
+
 
 class BtTransport(Transport):
     """Wraps a backend module (muninn.bt.bluez / muninn.bt.winrt)."""
@@ -174,6 +177,11 @@ class BtTransport(Transport):
             ScanResult(a.upper(), n, a.upper() in muninn or None, "other")
             for a, n in seen
         ]
+
+    def forget(self, addr: str) -> None:
+        if hasattr(self.bt, "forget_device"):
+            self.bt.forget_device(addr)
+        self._pair_tried.pop(addr, None)
 
     def should_defer(self, addr: str) -> bool:
         # Simultaneous ConnectProfile calls can wedge bluetoothd: the higher

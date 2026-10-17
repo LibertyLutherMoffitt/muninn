@@ -24,6 +24,8 @@ interface Transport {
     /** Active inquiry (costly: only when useful). */
     fun scan(durationMs: Long = 5000): List<ScanResult> = emptyList()
     fun shouldDefer(addr: String): Boolean = false
+    /** Drop any OS-level pairing with this device. */
+    fun forget(addr: String) {}
 }
 
 /**
@@ -50,6 +52,10 @@ class Node(
     private val confirmed = ConcurrentHashMap<String, Long>()
     private val probeQueue = java.util.Collections.synchronizedList(ArrayList<String>())
     @Volatile private var hints: Set<String> = emptySet()
+    // radio addresses of people the user forgot: never auto-dialled again
+    @Volatile private var forgotten: Set<String> =
+        (storage.getSetting("forgotten_addrs")?.let { runCatching { Json.parse(it) as? List<*> }.getOrNull() } ?: emptyList<Any>())
+            .map { it.toString() }.toSet()
     private val refused = ConcurrentHashMap<String, Long>() // addr -> until (ms)
     private val refusedAt = ConcurrentHashMap<String, Long>()
     private val refusals = ConcurrentHashMap<String, Int>()
@@ -78,7 +84,10 @@ class Node(
 
     fun start() {
         mesh.start()
-        transport.start { conn, addr -> Thread({ mesh.addLink(conn, addr, false) }, "incoming").apply { isDaemon = true; start() } }
+        transport.start { conn, addr ->
+            if (addr.uppercase() in forgotten) setForgotten(forgotten - addr.uppercase()) // they came back
+            Thread({ mesh.addLink(conn, addr, false) }, "incoming").apply { isDaemon = true; start() }
+        }
         Thread({ dialLoop() }, "dialer").apply { isDaemon = true; start() }
         Thread({ scanLoop() }, "scanner").apply { isDaemon = true; start() }
     }
@@ -145,7 +154,7 @@ class Node(
         confirmed.entries.sortedByDescending { it.value }.forEach { if (now - it.value < 180_000) out.putIfAbsent(it.key, false) }
         synchronized(probeQueue) { probeQueue.toList() }.forEach { out.putIfAbsent(it, true) }
         val own = runCatching { transport.localAddr().uppercase() }.getOrNull()
-        return out.filter { it.key != own }.map { it.key to it.value }
+        return out.filter { it.key != own && it.key !in forgotten }.map { it.key to it.value }
     }
 
     private fun dialLoop() {
@@ -268,7 +277,20 @@ class Node(
         }
     }
 
+    private fun setForgotten(a: Set<String>) {
+        forgotten = a
+        storage.setSetting("forgotten_addrs", Json.write(a.sorted()))
+    }
+
+    /** Forget (optionally block) a person and never auto-dial them again. */
+    fun forget(id: String, block: Boolean = false) {
+        val addrs = mesh.forget(id, block).map { it.uppercase() }.toSet()
+        setForgotten(forgotten + addrs)
+        addrs.forEach { a -> runCatching { transport.forget(a) } }
+    }
+
     fun connectTo(addr: String, probe: Boolean = false): String? {
+        if (addr.uppercase() in forgotten) setForgotten(forgotten - addr.uppercase())
         backoff.remove(addr.uppercase())
         return mesh.addLink(if (probe) transport.probe(addr) else transport.connect(addr), addr, true)
     }

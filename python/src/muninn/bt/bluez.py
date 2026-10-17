@@ -423,6 +423,20 @@ def _pair(addr: str) -> None:
             raise ConnectionError(f"Pairing failed: {e}") from e
 
 
+def forget_device(addr: str) -> None:
+    """Unpair and drop BlueZ's record of a device (user forgot that person)."""
+    try:
+        adapter = dbus.Interface(
+            dbus.SystemBus().get_object("org.bluez", "/org/bluez/hci0"),
+            "org.bluez.Adapter1",
+        )
+        adapter.RemoveDevice(dbus.ObjectPath(_device_path(addr)))
+        log.info("removed %s", addr)
+    except dbus.DBusException as e:
+        if e.get_dbus_name() != "org.bluez.Error.DoesNotExist":
+            log.warning("remove %s: %s", addr, e)
+
+
 def ensure_paired(addr: str) -> None:
     if not is_paired(addr):
         pair(addr)

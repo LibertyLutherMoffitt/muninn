@@ -63,6 +63,7 @@ class ChatBridge(QObject):
     editTargetChanged = Signal(str)  # text to load into composer
     selectionChanged = Signal(int)  # row index to scroll to
     messageSent = Signal()  # the chat view jumps to the bottom
+    removeRequested = Signal(list, str)  # convs, how — QML asks to confirm
     typingChanged = Signal()
     filePickRequested = Signal()
     emojiPickerRequested = Signal(str)  # mode: "insert" | "react"
@@ -277,6 +278,10 @@ class ChatBridge(QObject):
     def editPreview(self) -> str:
         return "Editing message" if self._edit_id else ""
 
+    @Slot(str, result=str)
+    def convTitle(self, conv: str) -> str:
+        return self._conv_title(conv)
+
     def _conv_title(self, conv: str) -> str:
         if conv.startswith("dm:"):
             return self.mesh.display_name(conv[3:])
@@ -344,6 +349,39 @@ class ChatBridge(QObject):
                 self.mesh.send_typing(self._active)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------ forgetting
+
+    @Slot(list, str)
+    def removeConvs(self, convs: list, how: str) -> None:
+        """how: "delete" (chats only) | "forget" | "block" (people; rooms in
+        the selection are always just deleted = left)."""
+        names = []
+        for conv in [str(c) for c in convs]:
+            names.append(self._conv_title(conv))
+            if conv.startswith("dm:") and how in ("forget", "block"):
+                self.node.forget(conv[3:], block=how == "block")
+            else:
+                self.mesh.delete_conversation(conv)
+            if conv == self._active:
+                self.setActiveConv("")
+        self._peers.refresh()
+        verb = {"delete": "deleted", "forget": "forgot", "block": "blocked"}[how]
+        self.notify.emit(
+            f"{verb} {', '.join(names)}"
+            if len(names) < 4
+            else f"{verb} {len(names)} chats"
+        )
+
+    @Slot(result=list)
+    def blockedPeople(self) -> list:
+        return sorted(self.mesh.blocked)
+
+    def _conv_title(self, conv: str) -> str:
+        if conv.startswith("dm:"):
+            return self.mesh.display_name(conv[3:])
+        g = self.mesh.groups.get(conv_group_id(conv) or b"")
+        return g.name if g else "room"
 
     @Slot(str)
     def selectMessage(self, msg_id: str) -> None:
@@ -747,6 +785,11 @@ class ChatBridge(QObject):
         "whoami",
         "members",
         "mute",
+        "clear",
+        "forget",
+        "block",
+        "unblock",
+        "blocked",
         "unmute",
         "search",
         "clear",
@@ -771,6 +814,12 @@ class ChatBridge(QObject):
         (":add <peer…> / :kick <peer>", "change members of this group"),
         (":rename <name> / :leave", "rename or leave this group"),
         (":members", "who's in this group and who's in range"),
+        (":clear", "delete this chat on this device (a room is also left)"),
+        (
+            ":forget <peer…> / :block <peer…>",
+            "forget people (chat, addresses, pairing) / also refuse them",
+        ),
+        (":unblock <id> / :blocked", "allow someone again / list blocked people"),
         (":mute / :unmute", "silence notifications for this chat"),
         (":search <words>", "find messages in all chats"),
         (":nick <name>", "set your display name"),
@@ -1123,6 +1172,42 @@ class ChatBridge(QObject):
                     )
                 )
             self._info(f"search “{q}”", rows)
+        elif head in ("clear", "forget", "block"):
+            if head == "clear" or not args:
+                if not self._active:
+                    return self.errorOccurred.emit("open a conversation first")
+                convs = [self._active]
+            else:
+                ids = [self._resolve_or_err(a) for a in args]
+                if None in ids:
+                    return
+                convs = [dm_conv(i) for i in ids if i]
+            if head != "clear" and not all(c.startswith("dm:") for c in convs):
+                return self.errorOccurred.emit(
+                    f":{head} is for people — use :clear for a room"
+                )
+            self.removeRequested.emit(convs, "delete" if head == "clear" else head)
+        elif head == "unblock":
+            hit = [
+                b
+                for b in mesh.blocked
+                if args and (b == args[0].upper() or b.endswith(args[0].upper()))
+            ]
+            for b in hit:
+                mesh.unblock(b)
+            if hit:
+                self.notify.emit("unblocked " + ", ".join(hit))
+            else:
+                self.errorOccurred.emit("usage: :unblock <id> (see :blocked)")
+        elif head == "blocked":
+            self._info(
+                "blocked",
+                [
+                    self._item(b, "Enter to unblock", action="cmd", cmd=f"unblock {b}")
+                    for b in sorted(mesh.blocked)
+                ]
+                or [("nobody is blocked", "")],
+            )
         elif head in ("mute", "unmute"):
             if not self._active:
                 return self.errorOccurred.emit("open a conversation first")

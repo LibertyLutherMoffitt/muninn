@@ -10,6 +10,7 @@ import com.muninn.core.FileRecord
 import com.muninn.core.GroupRow
 import com.muninn.core.Identity
 import com.muninn.core.Json
+import com.muninn.core.hex
 import com.muninn.core.OutboxEntry
 import com.muninn.core.P
 import com.muninn.core.PeerRow
@@ -133,6 +134,48 @@ class AndroidStorage(ctx: Context) : SQLiteOpenHelper(ctx, "muninn2.db", null, 3
         } finally {
             db.endTransaction()
         }
+    }
+
+    // ---- forgetting -----------------------------------------------------------
+
+    override fun deleteConversation(conv: String): List<String> = w { db ->
+        db.beginTransaction()
+        try {
+            val sub = "(SELECT msg_id FROM messages WHERE conv = ?)"
+            db.execSQL("DELETE FROM reactions WHERE msg_id IN $sub", arrayOf(conv))
+            db.execSQL("DELETE FROM outbox WHERE msg_id IN $sub", arrayOf(conv))
+            db.execSQL("DELETE FROM recipients WHERE msg_id IN $sub", arrayOf(conv))
+            val paths = db.rawQuery("SELECT path FROM files WHERE conv = ?", arrayOf(conv)).use { c ->
+                val l = ArrayList<String>(); while (c.moveToNext()) c.getString(0)?.takeIf { it.isNotEmpty() }?.let(l::add); l
+            }
+            db.execSQL("DELETE FROM files WHERE conv = ?", arrayOf(conv))
+            db.execSQL("DELETE FROM app_events WHERE conv = ?", arrayOf(conv))
+            db.execSQL("DELETE FROM messages WHERE conv = ?", arrayOf(conv))
+            db.setTransactionSuccessful()
+            paths
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    override fun forgetPeer(nodeId: String): List<String> {
+        val paths = deleteConversation("dm:$nodeId")
+        w { db ->
+            db.execSQL("DELETE FROM transports WHERE node_id = ?", arrayOf(nodeId))
+            db.execSQL("DELETE FROM outbox WHERE dst = ?", arrayOf(nodeId))
+            db.execSQL("DELETE FROM relay_store WHERE dst = ?", arrayOf(nodeId))
+            db.execSQL("DELETE FROM peers WHERE node_id = ?", arrayOf(nodeId))
+        }
+        return paths
+    }
+
+    override fun deleteGroup(groupId: ByteArray): List<String> {
+        val paths = deleteConversation("group:" + groupId.hex())
+        w { db ->
+            db.execSQL("DELETE FROM group_members WHERE group_id = ?", arrayOf(groupId))
+            db.execSQL("DELETE FROM groups WHERE group_id = ?", arrayOf(groupId))
+        }
+        return paths
     }
 
     // ---- transports ---------------------------------------------------------

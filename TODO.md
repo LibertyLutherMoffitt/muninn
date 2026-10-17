@@ -145,6 +145,35 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   validation rules (UTF-8-safe name truncation — v2 has the same bug).
 - [ ] Notifications VISIBILITY_PRIVATE on the lock screen.
 
+### 2.6c User requests (2026-10-16) — in progress now
+- [~] NFC tap-to-pair (Android↔Android): HCE + reader mode exchange
+  identity/key/address; fall back to one "visible" prompt + name search.
+- [~] Delete chats / forget / block people, leave+delete rooms; multi-select
+  on GUI + Android, commands in terminal.
+- [ ] Scoreboard: who won how many of each game (per conversation + overall).
+- [ ] Unsend a game invitation (creator cancels before/while others join).
+
+### 2.6d Ideas (2026-10-16, nearer the backlog)
+- [ ] Extensive game testing, especially end/win conditions of every game.
+- [ ] Spectators: everyone in a group can watch a 2-player game live.
+- [ ] Easy game import (pick a .js on desktop/phone) and one-tap "send this
+  game to …" so the code spreads through Muninn itself.
+- [ ] GAME_API docs written for AIs: one self-contained document with the
+  protocol, plugin contract, canvas subset, examples and a checklist, so a
+  model can write a game without reading the repo.
+- [ ] Screen share for group watching (anime etc.), mostly from phones:
+  adaptive low-res/low-fps video over the mesh (budget ~5–15 kB/s per
+  hop; think 240p at 1–5 fps, keyframes + diffs).
+- [ ] Auto-update for the Linux/Windows executables (like Android).
+- [ ] Rethink scan modes: explain clearly whether they govern discovery of
+  new people, reconnecting to known ones, or both. Proposal from the user:
+  reconnecting to known people should just be fast and reliable (optionally
+  a battery-saving "lazy" mode), while looking for *new* people becomes a
+  temporary "Find people" mode (on for a minute or until turned off),
+  because new contacts are rare.
+- [ ] Desktop GUI keeps running in the background with a tray icon (Linux,
+  Windows, Nix) so messages arrive with the window closed.
+
 ### 2.7 Backlog (only after everything else is done & polished)
 - [ ] **Linked devices ("same person")** — phone + laptop act as one contact.
   Sketch:

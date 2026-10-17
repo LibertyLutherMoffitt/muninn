@@ -9,6 +9,17 @@ Rectangle {
     property alias listView: listView
 
     signal convSelected(string convId)
+    signal removeRequested(var convs, string how)
+    property bool confirmOpen: false   // set by Main while the confirm dialog shows
+    property bool menuOpen: false
+
+    // Multi-select: Ctrl/Shift-click picks rows; right-click acts on the
+    // picked rows (or just the clicked one).
+    property var picked: ({})
+    readonly property var pickedList: Object.keys(picked)
+    function togglePick(c) { const p = Object.assign({}, picked); if (p[c]) delete p[c]; else p[c] = true; picked = p }
+    function clearPicked() { picked = ({}) }
+    readonly property bool allPeople: pickedList.length > 0 && pickedList.every(c => c.startsWith("dm:"))
 
     // Window-space center of the row for `convId`, or null if the row is
     // not currently realized (off-screen / unknown). Used by the cursor-
@@ -28,9 +39,63 @@ Rectangle {
         return null
     }
 
+    // selection bar
+    Rectangle {
+        id: selBar
+        anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
+        // only for Ctrl/Shift-picked selections, not a lone right-click
+        height: root.pickedList.length && !root.menuOpen ? 74 : 0
+        visible: height > 0
+        color: Theme.surfaceRaised
+        z: 2
+        Column {
+            anchors.fill: parent; anchors.margins: 8; spacing: 6
+            Row {
+                spacing: 6
+                Text { text: root.pickedList.length + " selected"; color: Theme.textPrimary; font.pixelSize: 12; font.bold: true }
+                Text { text: "✕ clear"; color: Theme.textMuted; font.pixelSize: 11
+                       MouseArea { anchors.fill: parent; anchors.margins: -4; cursorShape: Qt.PointingHandCursor
+                                   onClicked: root.clearPicked() } }
+            }
+            Row {
+                spacing: 4
+                SelBtn { label: "Delete"; onClicked: root.removeRequested(root.pickedList, "delete") }
+                SelBtn { label: "Forget"; visible: root.allPeople; onClicked: root.removeRequested(root.pickedList, "forget") }
+                SelBtn { label: "Block"; visible: root.allPeople; danger: true
+                         onClicked: root.removeRequested(root.pickedList, "block") }
+            }
+        }
+    }
+
+    component SelBtn: Rectangle {
+        id: sb
+        property string label
+        property bool danger: false
+        signal clicked()
+        width: sbl.implicitWidth + 18; height: 24; radius: 12
+        color: sbm.containsMouse ? (danger ? "#3f1d24" : Theme.accentSoft) : "transparent"
+        border.color: danger ? Theme.error : Theme.accentSoft
+        Text { id: sbl; anchors.centerIn: parent; text: sb.label; font.pixelSize: 11
+               color: sb.danger ? Theme.error : Theme.textPrimary }
+        MouseArea { id: sbm; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: sb.clicked() }
+    }
+
+    component RowItem: MenuItem {
+        id: ri
+        property bool danger: false
+        property bool shown: true
+        visible: shown
+        height: shown ? 30 : 0
+        contentItem: Text { text: ri.text; font.pixelSize: 13; verticalAlignment: Text.AlignVCenter
+                            color: ri.danger ? Theme.error : Theme.textPrimary }
+        background: Rectangle { radius: 6; color: ri.highlighted ? (ri.danger ? "#3f1d24" : Theme.accentSoft) : "transparent" }
+    }
+
     ListView {
         id: listView
-        anchors.fill: parent
+        anchors.top: parent.top; anchors.left: parent.left
+        anchors.right: parent.right; anchors.bottom: selBar.top
         model: peerModel
         clip: true
         currentIndex: -1
@@ -57,9 +122,14 @@ Rectangle {
             width: listView.width
             height: 60
             highlighted: model.convId === root.activeConvId
+            readonly property bool isPicked: !!root.picked[model.convId]
 
             background: Rectangle {
-                color: del.highlighted ? Theme.surfaceRaised
+                border.color: del.isPicked ? Theme.accent : "transparent"
+                border.width: del.isPicked ? 2 : 0
+                radius: 6
+                color: del.isPicked ? Theme.accentSoft
+                     : del.highlighted ? Theme.surfaceRaised
                      : del.hovered     ? Qt.lighter(Theme.surface, 1.12)
                                        : "transparent"
 
@@ -175,6 +245,46 @@ Rectangle {
             }
 
             onClicked: root.convSelected(model.convId)
+
+            // Ctrl/Shift-click = pick; right-click = menu for the picked rows
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                propagateComposedEvents: true
+                onPressed: (m) => {
+                    if (m.button === Qt.RightButton) {
+                        if (!del.isPicked) { root.menuOpen = true; root.picked = ({ [model.convId]: true }) }
+                        rowMenu.popup()
+                        m.accepted = true
+                    } else if (m.modifiers & (Qt.ControlModifier | Qt.ShiftModifier)) {
+                        root.togglePick(model.convId)
+                        m.accepted = true
+                    } else {
+                        if (root.pickedList.length) root.clearPicked()
+                        m.accepted = false
+                    }
+                }
+            }
+
+            Menu {
+                id: rowMenu
+                padding: 6
+                background: Rectangle { implicitWidth: 220; color: Theme.surfaceRaised; radius: 10
+                                        border.color: Theme.accentSoft }
+                RowItem { text: root.pickedList.length > 1 ? "Delete " + root.pickedList.length + " chats"
+                                : model.convId.startsWith("group:") ? "Leave & delete room" : "Delete chat"
+                          onTriggered: root.removeRequested(root.pickedList, "delete") }
+                RowItem { text: "Forget" + (root.pickedList.length > 1 ? " " + root.pickedList.length + " people" : "")
+                          shown: root.allPeople; onTriggered: root.removeRequested(root.pickedList, "forget") }
+                RowItem { text: "Block"; danger: true; shown: root.allPeople
+                          onTriggered: root.removeRequested(root.pickedList, "block") }
+                onOpened: root.menuOpen = root.pickedList.length === 1
+                // a one-row "selection" made by the right-click itself ends with the menu
+                onClosed: {
+                    if (root.menuOpen && !root.confirmOpen) Qt.callLater(root.clearPicked)
+                    root.menuOpen = false
+                }
+            }
         }
     }
 }

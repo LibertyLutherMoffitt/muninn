@@ -79,6 +79,9 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/clear                     delete this chat on this device (a room: leave it too)
+/forget <peer> [...]       forget people: chat, saved addresses, pairing
+/block <peer>  /unblock <peer>   refuse / allow someone again;  /blocked lists
 /vim [on|off]              vim keys in the full-screen client (default on)
 /search <words>            find messages in all chats
 /quit
@@ -234,6 +237,23 @@ class ChatUI:
             return None
         return mid
 
+    _armed: tuple[str, float] = ("", 0.0)
+
+    def _confirm(self, line: str) -> bool:
+        """Destructive commands run when typed twice within 15 s."""
+        key = line.strip()
+        if self._armed[0] == key and time.monotonic() - self._armed[1] < 15:
+            self._armed = ("", 0.0)
+            return True
+        self._armed = (key, time.monotonic())
+        what = {
+            "clear": "deletes this chat on this device (a room is also left)",
+            "forget": "deletes their chat, saved addresses and pairing; Muninn stops reconnecting",
+            "block": "forgets them and refuses their connections and messages",
+        }[key.split()[0].lstrip("/")]
+        self.out(f"  this {what} — repeat the command to confirm")
+        return False
+
     def _need_conv(self) -> bool:
         if not self.conv:
             self.out("! no active conversation (/dm or /group first)")
@@ -385,6 +405,39 @@ class ChatUI:
                 self.out(
                     f"  {self._conv_name(m.conv)} · {t} · {who}: {(m.text or m.meta.get('n', ''))[:80]}"
                 )
+        elif cmd in ("clear", "forget", "block"):
+            if cmd == "clear" and not self._need_conv():
+                return True
+            if cmd != "clear" and not args:
+                self.out(f"! usage: /{cmd} <peer> [...]")
+                return True
+            if not self._confirm(line):
+                return True
+            if cmd == "clear":
+                name = self._conv_name(self.conv)
+                mesh.delete_conversation(self.conv)
+                self.out(f"  deleted {name}")
+                self.conv = ""
+            else:
+                for nid in self._peers_of(args) or []:
+                    name = mesh.display_name(nid)
+                    self.node.forget(nid, block=cmd == "block")
+                    self.out(f"  {'blocked' if cmd == 'block' else 'forgot'} {name}")
+                    if self.conv == "dm:" + nid:
+                        self.conv = ""
+        elif cmd == "unblock" and args:
+            hit = [
+                b
+                for b in mesh.blocked
+                if b == args[0].upper() or b.endswith(args[0].upper())
+            ]
+            for b in hit:
+                mesh.unblock(b)
+                self.out(f"  unblocked {b}")
+            if not hit:
+                self.out("! not blocked: " + args[0] + " (see /blocked)")
+        elif cmd == "blocked":
+            self.out("\n".join(f"  {b}" for b in sorted(mesh.blocked)) or "  nobody")
         elif cmd in ("mute", "unmute") and self._need_conv():
             mesh.set_muted(self.conv, cmd == "mute")
             self.out("  muted" if cmd == "mute" else "  unmuted")
