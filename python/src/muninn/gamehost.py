@@ -215,8 +215,15 @@ class GameRegistry:
             rest = [p for p in players if p != ended[0].sender]
             result = {"winners": rest if len(rest) == 1 else [], "text": "resigned"}
         me = self.mesh.me
+        # over by the rules (someone's move produced a result) or by resign/end
+        finished = bool(ended) or result is not None
         if withdrawn:
             status = "invite withdrawn"
+        elif result is not None and not ended:
+            status = "finished · " + (
+                str(result.get("text") or "")
+                or ("draw" if not result.get("winners") else "game over")
+            )
         elif ended:
             status = f"{self.mesh.display_name(ended[0].sender)} " + (
                 "resigned" if ended[0].type == "resign" else "ended the game"
@@ -243,7 +250,8 @@ class GameRegistry:
             "players": players if started else joined,
             "declined": declined,
             "started": started,
-            "ended": bool(ended),
+            "ended": finished,
+            "finished": finished,
             "endedBy": ended[0].sender if ended else "",
             "endType": ended[0].type if ended else "",
             "me": me,
@@ -272,11 +280,16 @@ class GameRegistry:
         return (inv.body or {}).get("code", "") if inv else ""
 
     def sessions(self, conv: str | None, include_withdrawn: bool = False) -> list[dict]:
+        """Games in a chat: open invites and running games first (newest
+        first), then finished ones."""
         out = []
         for session, app, c, _ts in self.mesh.storage.list_app_sessions(conv):
             info = self.session_info(session)
             if info and (include_withdrawn or not info["withdrawn"]):
                 out.append(info)
+        out.sort(
+            key=lambda s: s["finished"] or s["withdrawn"]
+        )  # stable: keeps newest first
         return out
 
     def scores(self, conv: str | None = None) -> list[dict]:

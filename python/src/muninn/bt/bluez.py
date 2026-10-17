@@ -260,7 +260,10 @@ def inquiry(duration: float = 5.0) -> list[dict]:
         if "RSSI" not in d:
             continue  # only in BlueZ's cache, not actually seen this time
         uuids = [str(u).lower() for u in d.get("UUIDs", [])]
-        muninn = True if SERVICE_UUID.lower() in uuids else (False if uuids else None)
+        # A UUID list without ours proves nothing: inquiry (EIR) lists are cut
+        # to ~240 bytes and phones often leave out app-specific 128-bit
+        # UUIDs. Only our own probe can say "not Muninn" (refusal back-off).
+        muninn = True if SERVICE_UUID.lower() in uuids else None
         out.append(
             {
                 "addr": str(d["Address"]).upper(),

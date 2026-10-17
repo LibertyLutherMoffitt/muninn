@@ -134,10 +134,13 @@ class BtTransport(private val ctx: Context) : Transport {
         return found.values.toList()
     }
 
+    /** true = advertises Muninn; null = can't tell. Never false: a UUID
+     *  list without ours proves nothing (EIR is cut to ~240 bytes and phones
+     *  drop app-specific 128-bit UUIDs) — only our probe can say "not
+     *  Muninn", and a miss backs off (Node.refuse). */
     private fun muninnOf(d: BluetoothDevice): Boolean? {
         val u = d.uuids ?: return null
-        if (u.isEmpty()) return null
-        return u.any { it.uuid == MUNINN_RFCOMM_UUID }
+        return if (u.any { it.uuid == MUNINN_RFCOMM_UUID }) true else null
     }
 
     private fun kindOf(d: BluetoothDevice): String = when (d.bluetoothClass?.majorDeviceClass) {

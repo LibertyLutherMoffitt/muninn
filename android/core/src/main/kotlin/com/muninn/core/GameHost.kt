@@ -109,8 +109,12 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
             result = mapOf("winners" to (if (rest.size == 1) rest else emptyList()), "text" to "resigned")
         }
         val me = mesh.me
+        // over by the rules (someone's move produced a result) or by resign/end
+        val finished = ended.isNotEmpty() || result != null
         val status = when {
             withdrawn -> "invite withdrawn"
+            result != null && ended.isEmpty() -> "finished · " + ((result["text"] as? String)?.takeIf { it.isNotEmpty() }
+                ?: if ((result["winners"] as? List<*>).isNullOrEmpty()) "draw" else "game over")
             ended.isNotEmpty() -> "${mesh.displayName(ended[0].sender)} " + if (ended[0].type == "resign") "resigned" else "ended the game"
             started -> "in progress · ${moves.size} moves"
             players.size >= mn -> "${players.size}/$mx joined — ready, the host can start"
@@ -122,7 +126,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
             "session" to session, "app" to inv.app, "conv" to inv.conv, "name" to b.str("name", inv.app),
             "icon" to b.str("icon", "🎮"), "creator" to creator, "seed" to b.long("seed"), "opts" to ((b["opts"] as? Map<*, *>) ?: emptyMap<String, Any?>()), "min" to mn, "max" to mx,
             "joined" to joined, "players" to shown, "declined" to declined, "started" to started,
-            "ended" to ended.isNotEmpty(), "endedBy" to (ended.firstOrNull()?.sender ?: ""),
+            "ended" to finished, "finished" to finished, "endedBy" to (ended.firstOrNull()?.sender ?: ""),
             "endType" to (ended.firstOrNull()?.type ?: ""), "me" to me, "amPlayer" to (me in shown),
             // a full or running game can still be watched, not joined
             "invitedMe" to (me != creator && me !in joined && me !in declined && !started && !withdrawn && joined.size < mx),
@@ -141,6 +145,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
     fun sessions(conv: String?, includeWithdrawn: Boolean = false): List<Map<String, Any?>> =
         mesh.storage.listAppSessions(conv).map { sessionInfo(it) }
             .filter { it.isNotEmpty() && (includeWithdrawn || it["withdrawn"] != true) }
+            .sortedBy { it["finished"] == true || it["withdrawn"] == true } // open and running first (stable: newest first)
 
     data class Score(val app: String, val name: String, val icon: String, var played: Int = 0, var draws: Int = 0,
                      val wins: MutableMap<String, Int> = LinkedHashMap())

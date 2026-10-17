@@ -582,17 +582,32 @@ private fun GamesSheet(conv: String, onDone: () -> Unit) {
         value = withContext(Dispatchers.IO) { Runtime.games?.sessions(conv) ?: emptyList() }
     }
     val scope = rememberCoroutineScope()
+    var showAllDone by remember { mutableStateOf(false) }
     Column(Modifier.padding(bottom = 24.dp)) {
-        if (sessions.isNotEmpty()) {
-            Text("Games here", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp, 8.dp))
-            sessions.forEach { s ->
-                Row(Modifier.fillMaxWidth().clickable { onDone(); Nav.go(Screen.Game(s["session"] as String)) }
-                    .padding(horizontal = 20.dp, vertical = 10.dp)) {
-                    Text("${s["icon"]}  ${s["name"]}", modifier = Modifier.weight(1f))
-                    Text((if (s["invitedMe"] == true) "invites you · " else "") + s["status"],
-                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+        val live = sessions.filter { it["finished"] != true }
+        val done = sessions.filter { it["finished"] == true }
+        @Composable
+        fun row(s: Map<String, Any?>) {
+            Row(Modifier.fillMaxWidth().clickable { onDone(); Nav.go(Screen.Game(s["session"] as String)) }
+                .padding(horizontal = 20.dp, vertical = 10.dp)) {
+                Text("${s["icon"]}  ${s["name"]}", modifier = Modifier.weight(1f))
+                Text((if (s["invitedMe"] == true) "invites you · " else "") + s["status"],
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+        if (live.isNotEmpty()) {
+            Text("Games here", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp, 8.dp))
+            live.forEach { row(it) }
+            HorizontalDivider()
+        }
+        if (done.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().clickable { showAllDone = !showAllDone }.padding(16.dp, 8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Recent results", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                if (done.size > 3) Text(if (showAllDone) "Show fewer" else "All ${done.size}",
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            }
+            (if (showAllDone) done else done.take(3)).forEach { row(it) }
             HorizontalDivider()
         }
         val board by produceState(emptyList<com.muninn.core.GameHost.Score>(), tick) {

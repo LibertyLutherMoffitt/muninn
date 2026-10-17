@@ -1550,6 +1550,9 @@ class ChatBridge(QObject):
             )
         elif head == "games":
             sess = self.games.sessions(self._active or None)
+            live = [s for s in sess if not s["finished"]]
+            done = [s for s in sess if s["finished"]]
+            shown = live + done[: 5 if args[:1] != ["all"] else None]
             self._info(
                 "games",
                 [
@@ -1559,8 +1562,20 @@ class ChatBridge(QObject):
                         action="game",
                         session=s["session"],
                     )
-                    for s in sess
+                    for s in shown
                 ]
+                + (
+                    [
+                        self._item(
+                            f"… {len(done) - 5} older results",
+                            ":games all",
+                            action="cmd",
+                            cmd="games all",
+                        )
+                    ]
+                    if len(done) > 5 and args[:1] != ["all"]
+                    else []
+                )
                 or [
                     self._item(
                         "(no games yet)",

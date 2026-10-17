@@ -78,6 +78,10 @@ Rectangle {
             }
             state = s
             st = game.status ? game.status(state, info.names || {}) : { over: false, text: "" }
+            // over but never recorded (an older client, or the mover's view was
+            // closed): a player records it now — the first result counts
+            if (st.over && !info.result && info.amPlayer && info.started)
+                bridge.gameAction(session, "result", { winners: st.winners || [], text: st.text || "" })
         } catch (e) {
             error = "Game error: " + e
         }

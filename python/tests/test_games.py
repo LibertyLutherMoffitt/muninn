@@ -577,3 +577,29 @@ def test_checkers_small_board_and_optional_capture(engine):
       return [t.b.length, cnt(t), d.b.length, cnt(d), m.length];""",
     )
     assert r == [36, 12, 36, 6, 3]  # the capture + 2 sideways steps when not mandatory
+
+
+def test_finished_games_say_so_and_sort_last(lab):
+    """A game won by the rules (a `result` event, not a resign) is finished:
+    its status says so and chat game lists put it after open/running ones."""
+    from muninn.gamehost import GameRegistry
+    from muninn.mesh import dm_conv
+    from muninn.sim.lab import wait_until
+
+    a, b = lab.node("a", (0, 0)), lab.node("b", (1, 0))
+    wait_until(lambda: b.node_id in a.mesh.connected(), 30)
+    ra, rb = GameRegistry(a), GameRegistry(b)
+    conv = dm_conv(b.node_id)
+    sid = ra.invite(conv, "tictactoe")
+    wait_until(lambda: rb.session_info(sid).get("invitedMe"), 15)
+    rb.act(sid, "join", {})
+    wait_until(lambda: ra.session_info(sid).get("started"), 15)
+    assert ra.session_info(sid)["status"].startswith("in progress")
+    ra.act(sid, "result", {"winners": [a.node_id], "text": "a wins!"})
+    wait_until(lambda: rb.session_info(sid)["finished"], 15)
+    info = rb.session_info(sid)
+    assert info["ended"] and info["status"] == "finished · a wins!"
+    newer = ra.invite(conv, "connect4")
+    wait_until(lambda: len(rb.sessions(dm_conv(a.node_id))) == 2, 15)
+    order = [s["session"] for s in rb.sessions(dm_conv(a.node_id))]
+    assert order == [newer, sid]  # the open invite first, the finished game after

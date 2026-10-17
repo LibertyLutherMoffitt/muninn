@@ -116,6 +116,7 @@
     update: function (json) {
       info = JSON.parse(json);
       replay(); paint(); report();
+      if (info.amPlayer && info.started) reportResult(state); // over but never recorded: record it now
     },
     rt: function (sender, json) {
       if (!game || !game.onRt) return;

@@ -184,6 +184,15 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   progress, emoji completion, toasts, spring scrolling, narrow layout. Drives
   the Python core via `muninn --api` (stdio JSON, `api.py`), so no protocol
   port. No games. Tests: Go unit tests + tmux end-to-end (`test_tea.py`).
+- [ ] **Rules visible to the invited player**: an invite (e.g. checkers with
+  Turkish rules, 6×6) should show the chosen rules/options before you join —
+  on the invite card, the game screen, and the notification — not only to
+  the host (`:gamerules` exists on desktop; show it everywhere).
+- [ ] **BLE beacon for discovery**: Classic inquiry can't tell Muninn devices
+  apart (EIR UUID lists are truncated), so every phone needs an SDP probe and
+  phones must be "visible". A small BLE advertisement (Muninn service UUID +
+  node id) would identify Muninn devices instantly, even when not Classic-
+  discoverable. Needs a privacy decision (it broadcasts that you run Muninn).
 - [ ] **Clickable links**: URLs in messages are plain text everywhere today —
   you have to copy and paste them. Make them tappable/clickable on all
   clients (GUI: open in browser; Android: open intent; Bubble Tea / TUI:
