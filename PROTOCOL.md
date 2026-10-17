@@ -103,7 +103,9 @@ entry as a *dial hint* for a known peer that they reach only through relays,
 and try it with a long back-off (10 s → 5 min) while that peer is ≤ 3 hops
 away. Hints are never forwarded. They are what lets two phones that are
 both linked to a laptop (but not discoverable) connect directly, and they
-never count as evidence for reinstall detection.
+never count as evidence for reinstall detection. An entry for the receiver
+itself tells it its own radio address — Android apps can't read their own
+Bluetooth address, and need it for tap-to-meet.
 
 ## Mesh frames
 
@@ -215,5 +217,12 @@ Muninn runs over anything that yields a reliable byte stream:
   registers an RFCOMM profile without authentication; known peers may be
   paired (link keys persist), unconfirmed devices are only ever probed
   without pairing.
+- **NFC tap-to-meet** (Android, first contact only): the reading phone
+  sends `SELECT AID F04D554E494E4E` then `80 10 00 00 Lc <info>`; the other
+  phone (host card emulation, unlocked) answers `<info> 90 00`. `info` is
+  JSON `{i: node id, k: pubkey hex, n: name, a: own BT address or "", b:
+  Bluetooth device name}`. Both sides pin the key (as if gossiped) and dial
+  the address if they got one; otherwise the reader becomes discoverable and
+  both search by Bluetooth name.
 - **Simulator** (`muninn-simhub`): TCP + JSON-lines control protocol, see
   `python/src/muninn/sim/hub.py`.

@@ -120,6 +120,20 @@ class Mesh(
         (storage.getSetting("forgotten_ids")?.let { runCatching { Json.parse(it) as? List<*> }.getOrNull() } ?: emptyList<Any>())
             .map { it.toString() }.toSet()
         private set
+    /** Our own Bluetooth address as seen by a neighbour, if any linked yet. */
+    @Volatile var ownAddr: String? = storage.getSetting("own_addr")
+        private set
+
+    /** First contact by tap (NFC): learn who it is before any radio link. */
+    fun introduce(id: String, pubkey: ByteArray, name: String) {
+        if (id == nodeId) return
+        if (id in blocked) unblock(id)
+        if (id in hidden) setHidden(hidden - id)
+        val changed = learnPeer(P.RosterEntry(id, pubkey, name, 0))
+        if (changed.isNotEmpty()) gossip(changed, null)
+        emit { it.onPeers() }
+    }
+
     private fun setHidden(ids: Set<String>) { hidden = ids; storage.setSetting("forgotten_ids", Json.write(ids.sorted())) }
     val stats = ConcurrentHashMap<String, AtomicLong>()
 
@@ -472,6 +486,10 @@ class Mesh(
     private fun onAddrs(link: Link, entries: List<Pair<String, String>>) {
         var learned = false
         for ((id, addr) in entries) {
+            if (id == nodeId) { // how a neighbour sees *our* radio (Android can't ask its own adapter)
+                if (addr != ownAddr) { ownAddr = addr; storage.setSetting("own_addr", addr) }
+                continue
+            }
             val skip = synchronized(lock) { id == nodeId || id in blocked || id in links || peers[id]?.replacedBy != null || id !in peers }
             if (!skip && storage.addTransportHint(id, addr)) {
                 log("addr hint $id at $addr from ${link.nodeId}")

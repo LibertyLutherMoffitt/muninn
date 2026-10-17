@@ -184,6 +184,74 @@ fun VisibilityCard() {
     }
 }
 
+/** "Tap phones": read the other phone over NFC (see TapPair.kt). */
+@Composable
+fun TapCard() {
+    val ctx = LocalContext.current
+    val activity = ctx as? android.app.Activity ?: return
+    if (!TapPair.available(ctx)) return
+    val st by TapPair.state.collectAsState()
+    var enabled by remember { mutableStateOf(TapPair.enabled(ctx)) }
+    val visible = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        if (r.resultCode > 0) Runtime.visibleUntil = System.currentTimeMillis() + r.resultCode * 1000L
+    }
+    DisposableEffect(Unit) { onDispose { TapPair.stopReading(activity); TapPair.reset() } }
+    LaunchedEffect(st) {
+        val s = st
+        if (s is TapPair.State.Reading) { delay(60_000); TapPair.stopReading(activity) }
+        // neither phone knows the other's address: let this one be found
+        if (s is TapPair.State.Connecting && s.visibleNeeded) runCatching {
+            visible.launch(Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120))
+        }
+    }
+    LaunchedEffect(Unit) { while (true) { enabled = TapPair.enabled(ctx); delay(1500) } }
+    androidx.compose.material3.Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("📱 Tap phones to meet", fontWeight = FontWeight.SemiBold)
+            val s = st
+            when {
+                !enabled -> {
+                    Text("NFC is off.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = {
+                        runCatching { ctx.startActivity(Intent(Settings.ACTION_NFC_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                    }) { Text("Turn on NFC") }
+                }
+                s is TapPair.State.Idle -> {
+                    Text("The quickest way to meet someone: no searching, no visibility. Press the button, then hold the backs " +
+                        "of the two phones together (theirs unlocked, Muninn installed).",
+                        style = MaterialTheme.typography.bodySmall)
+                    Button(onClick = { TapPair.startReading(activity) }) { Text("Tap phones") }
+                }
+                s is TapPair.State.Reading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Text("  Hold the other phone against the back of this one…", Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { TapPair.stopReading(activity) }) { Text("Cancel") }
+                }
+                s is TapPair.State.Connecting -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Text("  Met ${s.name} — connecting over Bluetooth…" +
+                        if (s.visibleNeeded) " (allow visibility so their phone can find this one)" else "",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                s is TapPair.State.Connected -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("✓ Connected to ${s.name}", Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
+                    Button(onClick = { TapPair.reset(); Nav.back(); Nav.go(Screen.Chat(dmConv(s.nodeId))) }) { Text("Open chat") }
+                }
+                s is TapPair.State.Failed -> {
+                    Text(s.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Button(onClick = { TapPair.startReading(activity) }) { Text("Try again") }
+                }
+            }
+        }
+    }
+}
+
 private val STATE_LABEL = mapOf(
     "connected" to "connected",
     "checking" to "checking for Muninn…",
@@ -245,6 +313,7 @@ fun NearbyScreen() {
         else IconButton(onClick = { scan() }) { Icon(Icons.Default.Refresh, "Look again") }
     }) { mod ->
         Column(mod.fillMaxSize()) {
+            TapCard()
             VisibilityCard()
             HorizontalDivider()
             Text(

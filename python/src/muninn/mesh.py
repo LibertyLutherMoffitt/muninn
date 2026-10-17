@@ -254,6 +254,7 @@ class Mesh:
         self.auto_download_max = AUTO_DOWNLOAD_MAX
         self.stats = defaultdict(int)
         self.blocked: set[str] = storage.blocked()
+        self.own_addr: str | None = None  # as seen by a neighbour (ADDRS)
         # forgotten people stay out of the lists (their device may still be
         # around and relaying) until they actually write to us again
         self.hidden: set[str] = set(
@@ -620,6 +621,9 @@ class Mesh:
         only neighbours-of-neighbours are likely to be in radio range."""
         learned = False
         for nid, addr in entries:
+            if nid == self.node_id:  # how a neighbour sees our own radio
+                self.own_addr = addr
+                continue
             with self.lock:
                 skip = (
                     nid == self.node_id
