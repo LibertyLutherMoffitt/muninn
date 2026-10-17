@@ -71,7 +71,7 @@
 
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn";
-          version = "0.7.0";
+          version = "0.8.0";
           src = ./python;
           pyproject = true;
 
@@ -101,7 +101,7 @@
 
         muninn-gui = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn-gui";
-          version = "0.7.0";
+          version = "0.8.0";
           src = ./python;
           pyproject = true;
 
