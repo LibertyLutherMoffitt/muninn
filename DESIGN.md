@@ -98,15 +98,17 @@ What Muninn does to a device that isn't running Muninn — the complete list
 | Stranger's phone that is *not* visible (most phones) | nothing — it never shows up in an inquiry | never |
 | Any device | hears our inquiry (a broadcast; every phone's BT settings screen does the same) | **only in find mode**: every 15 s for 5 min after you open Nearby / ⟳ / `:find`, or while you know nobody; otherwise never |
 
-Pairing only ever happens (a) when the user explicitly connects from a scan
-list, or (b) once a day with a *known* Muninn peer whose link demands it —
-never from a probe, and never to an address learned from gossip (ADDRS hints
-are dialled like strangers). The laptop is made discoverable but **not
-pairable** (pairable is switched on only for the seconds of a pairing Muninn
-itself starts), the previous discoverable state is restored on exit, paired
-peers are not marked Trusted, Muninn's agent is never the default agent and
-only authorizes Muninn's own service. Android uses insecure RFCOMM throughout
-(never bonds) and only becomes discoverable when the user asks.
+**Muninn never pairs** — no bonds, no "Pair with …?" prompts, no Trusted
+flag, no pairing agent. A bond is what lets a phone treat a laptop as a
+headset/speaker (that happened with Muninn ≤ 0.2, which paired as a
+fallback and marked the peer Trusted); Muninn's RFCOMM profile is open on
+both sides, so links never need one. On start, Muninn clears Trusted on its
+peers; `:unpair` / `/unpair` removes old bonds. The laptop is discoverable
+but **not pairable**, its previous discoverable state is restored on exit.
+Android uses insecure RFCOMM throughout (never bonds), becomes discoverable
+only when the user asks, and never cancels another app's Bluetooth scan
+(e.g. the user pairing headphones in Settings) — it skips its own look
+instead.
 
 Known Muninn peers are redialled by address with a short, capped back-off
 (*fast*: ≤ 15 s, *battery saver*: ≤ 60 s) — no scanning involved; that only

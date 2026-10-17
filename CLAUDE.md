@@ -59,7 +59,7 @@ pair/chat between them over real RFCOMM.
 
 - **Static keypairs** — generated once per install, persisted, pinned by peers (TOFU). Reinstalls are detected and migrated, not trusted blindly.
 - **SQLite write-through persistence** — messages, pubkeys, groups, display names, unacked state, and seen-dedup are all persisted via `storage.py`. WAL mode, `threading.Lock` serialization. The DB file growing is not a bug; pruning is out of scope.
-- **D-Bus pairing via Device1.Pair()** — not bluetoothctl subprocess. Required: subprocess pairing uses store_hint=0 so link keys aren't persisted, causing br-connection-key-missing on ConnectProfile.
+- **Muninn never pairs** (and never sets Trusted, never registers a pairing agent). A bond with a phone made Android use the laptop as speakers; Muninn's RFCOMM profile is open on both sides, so links don't need one — if a laptop can't dial a phone unbonded, the phone dials the laptop. Old bonds: `:unpair` / `/unpair`; Trusted is cleared on start.
 - **No forward secrecy** — acceptable for this use case.
 - **Routing metadata is plaintext** — src/dst/ids/ACKs; bodies are encrypted. Needed for relaying.
 - **Good Bluetooth citizen** — never pair with, prompt, or dial devices that aren't (possibly) Muninn; headsets/watches are never contacted.

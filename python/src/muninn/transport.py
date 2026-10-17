@@ -10,7 +10,6 @@ settimeout / gettimeout). Implementations:
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -72,6 +71,12 @@ class Transport:
     def forget(self, addr: str) -> None:
         """Drop any OS-level pairing / cached record of this device."""
 
+    def distrust(self, addrs: list[str]) -> list[str]:
+        return []
+
+    def unpair(self, addrs: list[str]) -> list[str]:
+        return []
+
 
 class BtTransport(Transport):
     """Wraps a backend module (muninn.bt.bluez / muninn.bt.winrt)."""
@@ -83,7 +88,6 @@ class BtTransport(Transport):
             backend = bt.load()
         self.bt = backend
         self._addr: str | None = None
-        self._pair_tried: dict[str, float] = {}
         self._stop = threading.Event()
 
     def local_addr(self) -> str:
@@ -124,30 +128,32 @@ class BtTransport(Transport):
         except Exception:
             pass
 
-    PAIR_RETRY = 24 * 3600
-
     def connect(self, addr: str, timeout: float = 20.0):
-        # Known / Muninn-confirmed peers only (strangers go through probe()).
-        # Try without a bond first; if the link needs one, pair — but at
-        # most once a day per device, so a phone never sees repeated
-        # "Pair with …?" prompts while a peer keeps redialling it.
-        try:
-            sock, _ = self.bt.connect(addr)
-            return sock
-        except Exception:
-            if self.bt.is_paired(addr):
-                raise
-            now = time.time()
-            if now - self._pair_tried.get(addr, 0) < self.PAIR_RETRY:
-                raise
-            self._pair_tried[addr] = now
-            self.bt.ensure_paired(addr)
-            sock, _ = self.bt.connect(addr)
-            return sock
+        """Known / Muninn-confirmed peers only (strangers go through probe()).
+
+        Never pairs. A Bluetooth bond with a phone is what makes it start
+        using this computer as speakers/headset (and a pairing prompt on
+        someone's phone is unwelcome anyway). Muninn's link is an open RFCOMM
+        profile on both sides, so no bond is needed; if a device can't be
+        dialled without one, it dials us instead."""
+        sock, _ = self.bt.connect(addr)
+        return sock
 
     def connect_interactive(self, addr: str):
-        self._pair_tried.pop(addr, None)  # the user asked; a prompt is expected
         return self.connect(addr)
+
+    def distrust(self, addrs: list[str]) -> list[str]:
+        """Undo "Trusted" on Muninn peers (old versions set it): a trusted,
+        bonded phone may connect audio without asking."""
+        if hasattr(self.bt, "distrust"):
+            return self.bt.distrust(addrs)
+        return []
+
+    def unpair(self, addrs: list[str]) -> list[str]:
+        """Remove leftover bonds with these (Muninn) devices."""
+        if hasattr(self.bt, "unpair"):
+            return self.bt.unpair(addrs)
+        return []
 
     def probe(self, addr: str):
         # Unconfirmed device: never pair (a pairing prompt on a stranger's
@@ -181,7 +187,6 @@ class BtTransport(Transport):
     def forget(self, addr: str) -> None:
         if hasattr(self.bt, "forget_device"):
             self.bt.forget_device(addr)
-        self._pair_tried.pop(addr, None)
 
     def should_defer(self, addr: str) -> bool:
         # Simultaneous ConnectProfile calls can wedge bluetoothd: the higher

@@ -153,3 +153,29 @@ def test_scan_policies_match_kotlin():
         m = re.search(rf"const val {const}\s*=\s*([\d.]+)", kt)
         assert m and float(m.group(1)) == float(getattr(scanpolicy, const)), const
     assert "DEFAULT = FAST" in kt and scanpolicy.DEFAULT is scanpolicy.FAST
+
+
+def test_bluetooth_transport_never_pairs():
+    """A bond is what made a phone use the laptop as speakers: Muninn must
+    never create one, even when a connect fails."""
+    import pytest
+
+    from muninn.transport import BtTransport
+
+    calls = []
+
+    class FakeBackend:
+        def __getattr__(self, name):
+            def f(*a, **k):
+                calls.append(name)
+                if name == "connect":
+                    raise ConnectionError("needs a bond")
+                return []
+
+            return f
+
+    t = BtTransport(FakeBackend())
+    for dial in (t.connect, t.connect_interactive, t.probe):
+        with pytest.raises(ConnectionError):
+            dial("AA:BB:CC:DD:EE:FF")
+    assert calls == ["connect"] * 3, calls  # no pair / ensure_paired / trust

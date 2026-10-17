@@ -113,6 +113,12 @@ class Node:
     def start(self) -> None:
         self.mesh.start()
         self.transport.start(self._incoming)
+        # Muninn ≤ 0.2 marked paired peers Trusted, which let a phone use this
+        # computer as a headset without asking. Take that back.
+        try:
+            self.transport.distrust(self._peer_addrs())
+        except Exception as e:
+            self.log(f"distrust: {e!r}")
         for target in (self._dial_loop, self._scan_loop):
             threading.Thread(target=target, daemon=True, name=target.__name__).start()
 
@@ -410,6 +416,14 @@ class Node:
         if seen is not None and not seen.probeable and not seen.muninn:
             return "ignored"
         return "unknown"
+
+    def _peer_addrs(self) -> list[str]:
+        return sorted({a for _, a, _ in self.storage.load_transports()})
+
+    def unpair_peers(self) -> list[str]:
+        """Remove OS Bluetooth bonds with Muninn peers (Muninn never needs
+        them; old versions created them). Returns the addresses unpaired."""
+        return self.transport.unpair(self._peer_addrs())
 
     def forget(self, node_id: str, block: bool = False) -> None:
         """Forget (and optionally block) a person; also drops any OS-level

@@ -15,7 +15,6 @@ SERVICE_UUID = "320bcf9c-94fe-46f4-b9bf-83535cafcd55"
 SERVICE_NAME = "Muninn"
 RFCOMM_CHANNEL = 3
 _PROFILE_PATH = "/org/muninn/rfcomm"
-_AGENT_PATH = "/org/muninn/agent"
 
 _incoming_queue: queue.Queue = queue.Queue()
 # Per-address queues for connections we initiated via ConnectProfile.
@@ -26,57 +25,6 @@ _loop: GLib.MainLoop | None = None
 _ready = threading.Event()
 _start_error: list[Exception] = []
 log = logging.getLogger("muninn.bt")
-
-
-class _Agent(dbus.service.Object):
-    """NoInputNoOutput pairing agent — auto-accepts all pairing requests.
-
-    Ensures the link key is stored (store_hint=1) when Device1.Pair() is used,
-    which is required for subsequent ConnectProfile calls to succeed.
-    """
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
-    def Release(self):
-        pass
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
-    def RequestPinCode(self, device):
-        return "0000"
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
-    def DisplayPinCode(self, device, pincode):
-        pass
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
-    def RequestPasskey(self, device):
-        return dbus.UInt32(0)
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="ouu", out_signature="")
-    def DisplayPasskey(self, device, passkey, entered):
-        pass
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
-    def RequestConfirmation(self, device, passkey):
-        # Just Works: auto-confirm without user interaction
-        pass
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
-    def RequestAuthorization(self, device):
-        pass
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
-    def AuthorizeService(self, device, uuid):
-        # Good citizen: being paired with us for Muninn must not open up any
-        # other profile (audio, network, file transfer...) on this machine.
-        if str(uuid).lower() != SERVICE_UUID.lower():
-            raise dbus.DBusException(
-                "Muninn only authorizes its own service",
-                name="org.bluez.Error.Rejected",
-            )
-
-    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
-    def Cancel(self):
-        pass
 
 
 class _Profile(dbus.service.Object):
@@ -122,17 +70,9 @@ def _dbus_loop() -> None:
 def _register() -> None:
     bus = dbus.SystemBus()
 
-    # Register pairing agent so link keys are persisted (store_hint=1).
-    _Agent(bus, _AGENT_PATH)
-    agent_manager = dbus.Interface(
-        bus.get_object("org.bluez", "/org/bluez"),
-        "org.bluez.AgentManager1",
-    )
-    # Registered, but NOT as the default agent: it then only answers for
-    # pairings Muninn itself starts. Becoming the default would silently
-    # auto-confirm every pairing on this machine (the user's own headphones,
-    # strangers) while Muninn runs.
-    agent_manager.RegisterAgent(_AGENT_PATH, "NoInputNoOutput")
+    # No pairing agent: Muninn never pairs (a bond is what lets a phone use
+    # this computer as a headset), so it never needs to answer pairing
+    # requests either.
 
     # Register RFCOMM profile.
     _Profile(bus, _PROFILE_PATH)
@@ -205,13 +145,13 @@ _prev_discoverable: bool | None = None
 def set_discoverable(enabled: bool) -> None:
     """Visible to inquiries (so seat neighbours can find us). Deliberately
     NOT pairable: strangers must not be able to start pairing with this
-    machine just because Muninn is running. Muninn's own links don't need
-    a bond (open RFCOMM profile); see pair() for the rare exception."""
+    machine just because Muninn is running. Muninn's own links never need
+    a bond (open RFCOMM profile) and Muninn never pairs."""
     _set_adapter("Discoverable", enabled)
 
 
 def create_server() -> None:
-    """Register agent + RFCOMM profile via D-Bus. Starts background GLib loop."""
+    """Register the RFCOMM profile via D-Bus. Starts background GLib loop."""
     # Must be called before any SystemBus() so the mainloop is set first.
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     _ready.clear()
@@ -387,40 +327,38 @@ def is_paired(addr: str) -> bool:
         return False
 
 
-def pair(addr: str) -> None:
-    """Pair via D-Bus Device1.Pair() with our registered NoInputNoOutput agent.
-
-    Using the D-Bus API (rather than a bluetoothctl subprocess) ensures the
-    link key is stored with store_hint=1, which is required for ConnectProfile
-    to succeed afterwards.
-    """
-    log.info("pairing with %s", addr)
-    # Bonding needs the adapter pairable; only for the few seconds of this
-    # pairing (with a known Muninn peer), then back to how it was.
-    was_pairable = _get_adapter("Pairable")
-    if not was_pairable:
-        _set_adapter("Pairable", True)
-    try:
-        _pair(addr)
-    finally:
-        if was_pairable is False:
-            _set_adapter("Pairable", False)
+def _props(addr: str):
+    return dbus.Interface(
+        dbus.SystemBus().get_object("org.bluez", _device_path(addr)),
+        "org.freedesktop.DBus.Properties",
+    )
 
 
-def _pair(addr: str) -> None:
-    # Not marked Trusted: Muninn's profile needs no authorization anyway, and
-    # a trusted device could use every other profile (audio, network…)
-    # without the user being asked.
-    try:
-        device = dbus.Interface(
-            dbus.SystemBus().get_object("org.bluez", _device_path(addr)),
-            "org.bluez.Device1",
-        )
-        device.Pair(timeout=30)
-        log.info("paired %s", addr)
-    except dbus.exceptions.DBusException as e:
-        if e.get_dbus_name() != "org.bluez.Error.AlreadyExists":
-            raise ConnectionError(f"Pairing failed: {e}") from e
+def distrust(addrs: list[str]) -> list[str]:
+    """Clear Trusted on these devices (Muninn ≤ 0.2 set it after pairing; a
+    trusted bonded phone could then use this computer as a headset without
+    asking). Returns the addresses changed."""
+    changed = []
+    for a in addrs:
+        try:
+            p = _props(a)
+            if bool(p.Get("org.bluez.Device1", "Trusted")):
+                p.Set("org.bluez.Device1", "Trusted", dbus.Boolean(False))
+                changed.append(a)
+                log.info("untrusted %s (Muninn never needs trust)", a)
+        except dbus.DBusException:
+            continue
+    return changed
+
+
+def unpair(addrs: list[str]) -> list[str]:
+    """Remove bonds with these devices (Muninn never needs one)."""
+    done = []
+    for a in addrs:
+        if is_paired(a):
+            forget_device(a)
+            done.append(a)
+    return done
 
 
 def forget_device(addr: str) -> None:
@@ -435,11 +373,6 @@ def forget_device(addr: str) -> None:
     except dbus.DBusException as e:
         if e.get_dbus_name() != "org.bluez.Error.DoesNotExist":
             log.warning("remove %s: %s", addr, e)
-
-
-def ensure_paired(addr: str) -> None:
-    if not is_paired(addr):
-        pair(addr)
 
 
 def mac_to_int(mac: str) -> int:

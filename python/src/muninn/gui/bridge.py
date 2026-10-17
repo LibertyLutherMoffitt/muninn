@@ -899,6 +899,7 @@ class ChatBridge(QObject):
         "importgame",
         "update",
         "version",
+        "unpair",
         "sharegame",
         "find",
         "background",
@@ -1231,6 +1232,18 @@ class ChatBridge(QObject):
                     ],
                 )
             self.startGame(args[0], self._active, opts)
+        elif head == "unpair":
+            done = self.node.unpair_peers()
+            if done:
+                self.notify.emit(
+                    "removed Bluetooth pairings with "
+                    + ", ".join(done)
+                    + " — also Forget this computer on those phones"
+                )
+            else:
+                self.notify.emit(
+                    "no Bluetooth pairings with Muninn people (none needed)"
+                )
         elif head in ("update", "version"):
             self._self_update(install=head == "update")
         elif head == "importgame":

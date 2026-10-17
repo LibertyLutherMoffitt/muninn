@@ -80,6 +80,7 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/unpair                    remove leftover Bluetooth pairings with Muninn people
 /update  /version          install the newest standalone build / show version
 /scores                    who won how many of each game (this chat, or all)
 /clear                     delete this chat on this device (a room: leave it too)
@@ -428,6 +429,15 @@ class ChatUI:
                     self.out(f"  {'blocked' if cmd == 'block' else 'forgot'} {name}")
                     if self.conv == "dm:" + nid:
                         self.conv = ""
+        elif cmd == "unpair":
+            done = self.node.unpair_peers()
+            self.out(
+                "  removed Bluetooth pairings with "
+                + ", ".join(done)
+                + " — also 'Forget' this computer in those phones' Bluetooth settings"
+                if done
+                else "  no Bluetooth pairings with Muninn people (Muninn doesn't need any)"
+            )
         elif cmd in ("update", "version"):
             from muninn import __version__, selfupdate
 

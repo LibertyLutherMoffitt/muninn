@@ -38,6 +38,7 @@ class BtTransport(private val ctx: Context) : Transport {
     private val adapter: BluetoothAdapter? = ctx.getSystemService(BluetoothManager::class.java)?.adapter
     @Volatile private var server: BluetoothServerSocket? = null
     @Volatile private var stopped = false
+    @Volatile private var ourScan = false
 
     val isReady: Boolean get() = adapter?.isEnabled == true
 
@@ -85,7 +86,9 @@ class BtTransport(private val ctx: Context) : Transport {
         if (!a.isEnabled) throw java.io.IOException("Bluetooth off")
         val dev = a.getRemoteDevice(addr)
         val sock = dev.createInsecureRfcommSocketToServiceRecord(MUNINN_RFCOMM_UUID)
-        if (a.isDiscovering) a.cancelDiscovery() // inquiry makes connects slow/flaky
+        // Our own inquiry makes connects slow/flaky — but never cancel someone
+        // else's (the user pairing headphones in Settings).
+        if (ourScan && a.isDiscovering) a.cancelDiscovery()
         try {
             sock.connect()
         } catch (e: Throwable) {
@@ -117,12 +120,15 @@ class BtTransport(private val ctx: Context) : Transport {
         ctx.registerReceiver(rx, IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_FOUND); addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
         })
+        // Someone else is scanning (e.g. the user pairing headphones in
+        // Settings): never cancel that — skip this look instead.
+        if (a.isDiscovering) { runCatching { ctx.unregisterReceiver(rx) }; return emptyList() }
         try {
-            if (a.isDiscovering) a.cancelDiscovery()
-            a.startDiscovery()
+            ourScan = a.startDiscovery()
             done.await(maxOf(durationMs, 13_000), TimeUnit.MILLISECONDS)
         } finally {
-            runCatching { a.cancelDiscovery() }
+            if (ourScan) runCatching { a.cancelDiscovery() }
+            ourScan = false
             runCatching { ctx.unregisterReceiver(rx) }
         }
         return found.values.toList()
