@@ -103,6 +103,7 @@ class Node:
         )
         self._dial_lock = threading.Lock()
         self.last_inquiry = 0.0
+        self._inquiry_gap = scanpolicy.FIND_INQUIRY
         self._scan_lock = threading.Lock()  # concurrent inquiries cancel each other
         self.mesh.on("peers", self._on_peers)
 
@@ -337,7 +338,7 @@ class Node:
                 # known ones are dialled by address.
                 due = (
                     self.finding
-                    and time.monotonic() - self.last_inquiry >= scanpolicy.FIND_INQUIRY
+                    and time.monotonic() - self.last_inquiry >= self._inquiry_gap
                 )
                 if due or self._scan_now.is_set():
                     self._scan_now.clear()
@@ -351,6 +352,9 @@ class Node:
         """`manual`: the user asked — check every phone/laptop in sight,
         including ones that weren't running Muninn last time."""
         self.last_inquiry = time.monotonic()
+        self._inquiry_gap = scanpolicy.FIND_INQUIRY + random.uniform(
+            0, scanpolicy.FIND_JITTER
+        )
         self.scan_results = results
         now = time.time()
         budget = MANUAL_PROBES if manual else scanpolicy.FIND_PROBES
@@ -379,7 +383,13 @@ class Node:
         """A probe didn't find Muninn. Could be a radio hiccup the first time
         (short pause); after that the device is left alone for hours."""
         n = self._refusals[addr] = self._refusals.get(addr, 0) + 1
-        wait = scanpolicy.PROBE_BACKOFF if n > 1 else 600.0
+        wait = (
+            scanpolicy.PROBE_RETRY_FIRST * random.uniform(0.8, 1.2)
+            if n == 1
+            else scanpolicy.PROBE_RETRY_SECOND
+            if n == 2
+            else scanpolicy.PROBE_BACKOFF
+        )
         self._refused[addr] = time.time() + wait
         self._refused_at[addr] = time.time()
 

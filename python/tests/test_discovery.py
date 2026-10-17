@@ -149,7 +149,15 @@ def test_scan_policies_match_kotlin():
         for m in re.findall(r'ReconnectMode\("(\w+)", "([\w ]+)", ([\d.]+)\)', kt)
     )
     assert modes == {n: m.backoff_max for n, m in scanpolicy.MODES.items()}
-    for const in ("FIND_SECONDS", "FIND_INQUIRY", "FIND_PROBES", "PROBE_BACKOFF"):
+    for const in (
+        "FIND_SECONDS",
+        "FIND_INQUIRY",
+        "FIND_JITTER",
+        "FIND_PROBES",
+        "PROBE_BACKOFF",
+        "PROBE_RETRY_FIRST",
+        "PROBE_RETRY_SECOND",
+    ):
         m = re.search(rf"const val {const}\s*=\s*([\d.]+)", kt)
         assert m and float(m.group(1)) == float(getattr(scanpolicy, const)), const
     assert "DEFAULT = FAST" in kt and scanpolicy.DEFAULT is scanpolicy.FAST

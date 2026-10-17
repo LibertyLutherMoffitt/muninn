@@ -922,6 +922,7 @@ class ChatBridge(QObject):
         "zoom",
         "photos",
         "theme",
+        "ping",
         "export",
         "import",
         "sharegame",
@@ -1346,6 +1347,31 @@ class ChatBridge(QObject):
                     )
                 ],
             )
+        elif head == "ping":
+            dst = (
+                self._resolve_or_err(args[0])
+                if args
+                else (
+                    self._active[3:]
+                    if self._active and self._active.startswith("dm:")
+                    else None
+                )
+            )
+            if not dst:
+                if not args:
+                    self.errorOccurred.emit("usage: :ping <name> [count]")
+                return
+            from muninn.mesh import ping_summary
+
+            n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 5
+            name = self.mesh.display_name(dst)
+            self.notify.emit(f"pinging {name}…")
+            threading.Thread(
+                target=lambda: self.notify.emit(
+                    ping_summary(name, self.mesh.ping(dst, n))
+                ),
+                daemon=True,
+            ).start()
         elif head == "doctor":
             rows = [
                 self._item(

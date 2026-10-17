@@ -78,7 +78,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 - [x] Kotlin core as a pure-JVM module + JVM node that joins the same sim hub →
   cross-language interop tests without emulators.
 - [x] Android app sim transport (debug) → emulators join the sim hub (10.0.2.2).
-- [ ] Real-BT emulator↔emulator via netsim (done manually; script it).
+- [x] Real-BT emulator↔emulator via netsim: `tools/netsim_lab.py` (up/meet/ping/bench).
 
 ### 2.2 Protocol v2 (P0) — additive, old clients ignore unknown frame types
 - [x] `PING`/`PONG` keepalive + dead-link detection.
@@ -111,7 +111,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 ### 2.5 Games (P2–P3)
 - [x] Game session API over reliable app events + datagrams.
 - [x] Chess, checkers (both clients).
-- [ ] Real-time demo + latency measurement.
+- [x] Real-time demo + latency measurement (`:ping`/`/ping`, netsim ~20 ms RTT; see TESTING.md).
 
 ### 2.6 User requests (2026-10-15)
 - [x] **Tap-to-pair (Android↔Android)**: NFC tap exchanges node id + BT address
@@ -192,13 +192,13 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   permissions, battery optimisation off, background running, version vs
   friends', last time each friend was seen, whether find mode is needed.
 - [x] Privacy toggles: read receipts and typing indicators on/off.
-- [ ] Export / import chat history (moving to a new phone; pairs with
-  linked devices later).
+- [x] Export / import chat history (`:export`/`:import`, Settings → Backup).
 - [x] Tap phones to add someone to a room (Room info → Add people → Tap phones; works before any radio link).
 - [x] React / reply from the Android notification (👍 + reply).
 - [x] Desktop zoom (Ctrl +/-/0, :zoom) and light theme (:theme light|dark|system).
-- [ ] Real-time game latency over real Bluetooth + relay (pong), and a
-  short note on what's playable.
+- [x] Real-time latency: end-to-end `ping` over the game datagram path
+  (relays included) in both cores; netsim numbers + playability note in
+  TESTING.md. Real-air numbers: hardware session.
 - [ ] Windows hardware pass (WinRT): dialing phones without a bond may not
   work — phones dial the PC; verify, plus tray/notifications.
 

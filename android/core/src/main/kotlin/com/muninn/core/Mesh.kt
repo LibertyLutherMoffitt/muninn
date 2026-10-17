@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicLong
  * receiver-driven file transfer, app events).
  */
 
+/** K_RT app reserved for end-to-end round trips ([Mesh.ping]). */
+const val PING_APP = "~ping"
 const val ZERO_GROUP_HEX = "00000000000000000000000000000000"
 
 fun dmConv(node: String) = "dm:$node"
@@ -816,7 +818,8 @@ class Mesh(
                 if (pOld != null && pNew != null && (pOld.name.isEmpty() || pOld.name == pNew.name) && !live)
                     supersede(old, new, announce = false)
             }
-            Body.RT -> emit { it.onRt(src, m.str("a"), m.str("s"), m["b"], body.blob) }
+            Body.RT -> if (m.str("a") == PING_APP) onPing(src, m.str("s"), m["b"], body.blob)
+                else emit { it.onRt(src, m.str("a"), m.str("s"), m["b"], body.blob) }
         }
     }
 
@@ -1217,6 +1220,25 @@ class Mesh(
 
     fun rtSend(conv: String, app: String, session: String, body: Any?, blob: ByteArray = ByteArray(0), to: List<String>? = null) {
         sendBody(to ?: convMembers(conv), Body.B(Body.RT, mapOf("a" to app, "s" to session, "b" to body), blob))
+    }
+
+    private class Ping(val sent: Long) { val done = java.util.concurrent.CountDownLatch(1); @Volatile var rttMs: Double? = null }
+    private val pings = ConcurrentHashMap<String, Ping>()
+
+    /** End-to-end round trips in ms (null = lost) over the real-time datagram
+     *  path games use, relays included; [size] pads each datagram. Blocks. */
+    fun ping(dst: String, count: Int = 5, size: Int = 0, timeoutMs: Long = 3000): List<Double?> = (1..count).map {
+        val sid = Nacl.randomBytes(6).hex()
+        val p = Ping(System.nanoTime()).also { pings[sid] = it }
+        sendBody(listOf(dst), Body.B(Body.RT, mapOf("a" to PING_APP, "s" to sid, "b" to "ping"), ByteArray(size)))
+        p.done.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        pings.remove(sid)
+        p.rttMs
+    }
+
+    private fun onPing(src: String, sid: String, what: Any?, blob: ByteArray) {
+        if (what == "ping") sendBody(listOf(src), Body.B(Body.RT, mapOf("a" to PING_APP, "s" to sid, "b" to "pong"), blob))
+        else if (what == "pong") pings[sid]?.let { if (it.rttMs == null) { it.rttMs = (System.nanoTime() - it.sent) / 1e6; it.done.countDown() } }
     }
 
     // ================================================================ maintenance

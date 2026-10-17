@@ -77,7 +77,26 @@ python tools/droid.py shot /tmp/a.png
 ```
 
 `tools/droid.py` taps by visible text (uiautomator), types, takes screenshots.
-For real Bluetooth between two emulators (netsim), see CLAUDE.md.
+### Real Android Bluetooth between emulators (netsim)
+
+```bash
+nix develop --command python tools/netsim_lab.py bench   # boot 2, meet, ping table
+nix develop --command python tools/netsim_lab.py up 3    # a, b, c with a fresh app each
+nix develop --command python tools/netsim_lab.py meet a b
+nix develop --command python tools/netsim_lab.py ping a b 20 200
+nix develop --command python tools/netsim_lab.py down
+```
+
+The app runs its real `BtTransport` (insecure RFCOMM, discovery, never
+pairing). netsim has no notion of range, so relays can't be forced here — use
+the sim for multi-hop. If every connect ends in `PAGE_TIMEOUT` (adb logcat),
+netsim's state is stale: `down`, kill `netsimd` (`pkill -x netsimd`), `up`
+again.
+
+Measured (2026-10-17, netsim, end-to-end RT ping = the game datagram path):
+~20 ms median round trip for 0–1000 B datagrams, no loss. netsim's radio is
+virtual; real RFCOMM adds air time (expect tens of ms per hop), so turn-based
+games are fine anywhere and pong-style games want ≤ 2 hops.
 
 ## What isn't covered
 

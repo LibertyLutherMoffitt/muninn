@@ -208,6 +208,10 @@ host built on them (invite / join / decline / start / move / resign, state =
 `setup` folded over moves) is specified in
 `python/src/muninn/games/README.md`.
 
+RT app `~ping` is reserved for end-to-end round trips: `b = "ping"` (blob =
+optional padding) is answered with an RT to the sender with the same `a`/`s`,
+`b = "pong"` and the same blob. Not delivered to apps.
+
 ## Transports
 
 Muninn runs over anything that yields a reliable byte stream:

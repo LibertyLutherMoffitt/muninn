@@ -64,6 +64,7 @@ class Node(
     private val dialing = ConcurrentHashMap.newKeySet<String>()
     @Volatile var scanResults: List<ScanResult> = emptyList()
     @Volatile var lastInquiry = 0.0
+    @Volatile private var inquiryGap = ScanPolicy.FIND_INQUIRY
     private val scanLock = Any() // one inquiry at a time: concurrent ones cancel each other
 
     init {
@@ -224,7 +225,7 @@ class Node(
             try {
                 transport.discover().forEach { markSeen(it.first) }
                 // no scanning unless looking for new people: known ones are dialled by address
-                val due = finding && mono() - lastInquiry >= ScanPolicy.FIND_INQUIRY
+                val due = finding && mono() - lastInquiry >= inquiryGap
                 val forced = scanNow.tryAcquire()
                 if (due || forced) synchronized(scanLock) { ingest(transport.scan(5000)) }
             } catch (e: Throwable) { log("scan: $e") }
@@ -237,6 +238,7 @@ class Node(
      *  sight, including ones that weren't running Muninn last time. */
     private fun ingest(results: List<ScanResult>, manual: Boolean = false) {
         lastInquiry = mono()
+        inquiryGap = ScanPolicy.FIND_INQUIRY + Math.random() * ScanPolicy.FIND_JITTER
         scanResults = results
         val now = System.currentTimeMillis()
         var budget = if (manual) MANUAL_PROBES else ScanPolicy.FIND_PROBES
@@ -257,7 +259,12 @@ class Node(
      *  pause), after that the device is left alone for hours. */
     private fun refuse(addr: String) {
         val n = refusals.merge(addr, 1, Int::plus)!!
-        val wait = if (n > 1) ScanPolicy.PROBE_BACKOFF else 600.0
+        // first miss is often a busy radio (the other phone mid-inquiry): retry soon
+        val wait = when (n) {
+            1 -> ScanPolicy.PROBE_RETRY_FIRST * (0.8 + Math.random() * 0.4)
+            2 -> ScanPolicy.PROBE_RETRY_SECOND
+            else -> ScanPolicy.PROBE_BACKOFF
+        }
         val now = System.currentTimeMillis()
         refused[addr] = now + (wait * 1000).toLong()
         refusedAt[addr] = now

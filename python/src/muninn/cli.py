@@ -83,6 +83,7 @@ HELP = """\
 /import <file> [pw=…]      add chats from a backup (pw= restores identity on a fresh install)
 /photos [compressed|original]  shrink photos before sending (default)
 /privacy [receipts|typing] [on|off]   send read receipts / typing indicators
+/ping <name> [n]           round-trip time to someone (relays included)
 /doctor                    check everything before a flight
 /unpair                    remove leftover Bluetooth pairings with Muninn people
 /update  /version          install the newest standalone build / show version
@@ -494,6 +495,20 @@ class ChatUI:
                 ("typing", "typing indicator"),
             ):
                 self.out(f"  {label:17} {'on' if mesh.privacy(w) else 'off'}")
+        elif cmd == "ping":
+            if not args:
+                self.out("! usage: /ping <name> [count]")
+                return True
+            dst = self._peer(args[0])
+            if dst:
+                from muninn.mesh import ping_summary
+
+                n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 5
+                self.out(f"  pinging {self.mesh.display_name(dst)}…")
+                self.out(
+                    "  "
+                    + ping_summary(self.mesh.display_name(dst), self.mesh.ping(dst, n))
+                )
         elif cmd == "doctor":
             for level, label, detail in self.node.doctor():
                 self.out(

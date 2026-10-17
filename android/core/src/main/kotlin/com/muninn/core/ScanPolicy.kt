@@ -17,7 +17,10 @@ object ScanPolicy {
     const val FIND_SECONDS = 300.0
     const val FIND_INQUIRY = 15.0
     const val FIND_PROBES = 3
+    const val FIND_JITTER = 8.0
     const val PROBE_BACKOFF = 21600.0
+    const val PROBE_RETRY_FIRST = 45.0
+    const val PROBE_RETRY_SECOND = 600.0
 
     val FAST = ReconnectMode("fast", "Fast", 15.0)
     val SAVER = ReconnectMode("saver", "Battery saver", 60.0)

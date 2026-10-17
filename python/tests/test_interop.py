@@ -300,3 +300,16 @@ def test_tap_to_add_stranger_to_room(lab, jvm):
     )
     c.mesh.send_text(group_conv(bytes.fromhex(gid)), "thanks!")
     wait_until(lambda: "thanks!" in py_texts(b, group_conv(bytes.fromhex(gid))), 30)
+
+
+def test_ping_both_ways_through_a_relay(lab, jvm):
+    """End-to-end RT ping (games' datagram path): py → kotlin relay → py, and
+    kotlin → py, both directions answer."""
+    a = lab.node("a", (0, 0))
+    k = jvm("k", (1, 0))
+    c = lab.node("c", (2, 0))  # out of a's range; via k
+    wait_until(lambda: a.mesh.reachable(c.node_id) and c.mesh.reachable(a.node_id), 40)
+    rtts = a.mesh.ping(c.node_id, count=4, size=200)
+    assert sum(r is not None for r in rtts) >= 3, rtts
+    krtts = k("ping", to=a.node_id, count=3)["rtt_ms"]
+    assert sum(r is not None for r in krtts) >= 2, krtts

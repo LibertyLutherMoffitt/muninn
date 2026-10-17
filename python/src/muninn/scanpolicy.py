@@ -27,7 +27,12 @@ SETTING_KEY = "reconnect"
 FIND_SECONDS = 300.0  # how long "Find people" stays on
 FIND_INQUIRY = 15.0  # seconds between looks while finding
 FIND_PROBES = 3  # unknown phones/laptops checked per look
+FIND_JITTER = 8.0  # + up to this much, so two phones both finding drift apart
 PROBE_BACKOFF = 6 * 3600.0  # a device that isn't Muninn is left alone this long
+# A failed probe is often just a busy radio (the other phone was mid-inquiry
+# and didn't answer the page): look once more soon, then at 10 min, then hours.
+PROBE_RETRY_FIRST = 45.0
+PROBE_RETRY_SECOND = 600.0
 
 
 @dataclass(frozen=True)

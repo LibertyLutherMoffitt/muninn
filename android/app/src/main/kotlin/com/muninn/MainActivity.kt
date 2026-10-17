@@ -82,7 +82,10 @@ class MainActivity : ComponentActivity() {
         i ?: return
         val p = Runtime.prefs(this)
         var restart = false
-        i.getStringExtra("sim")?.let { p.edit().putString("sim_hub", it).apply(); restart = true }
+        i.getStringExtra("sim")?.let { hub ->
+            // "host:port" joins the simulator; anything else ("bt", "off") goes back to Bluetooth
+            p.edit().putString("sim_hub", if (Regex("^[\\w.-]+:\\d+$").matches(hub)) hub else "").apply(); restart = true
+        }
         i.getStringExtra("pos")?.let { p.edit().putString("sim_pos", it).apply(); restart = true }
         i.getStringExtra("name")?.let { n -> p.edit().putString("name", n).apply(); Runtime.node?.mesh?.setName(n) }
         if (restart) {
@@ -103,6 +106,17 @@ class MainActivity : ComponentActivity() {
                     .onSuccess { android.util.Log.i("Backup", "imported $it as ${Runtime.node?.nodeId}") }
                     .onFailure { android.util.Log.e("Backup", "import failed", it) } }.start()
             }
+        }
+        if (BuildConfig.DEBUG && i.getBooleanExtra("find", false)) Thread { Runtime.node?.findPeople() }.start()
+        // adb shell am start … --es ping <node id|name> [--ei ping_n 20 --ei ping_size 200]
+        if (BuildConfig.DEBUG) i.getStringExtra("ping")?.let { who ->
+            val n = i.getIntExtra("ping_n", 10); val size = i.getIntExtra("ping_size", 0)
+            Thread {
+                val m = Runtime.node?.mesh ?: return@Thread
+                val dst = m.resolve(who) ?: return@Thread android.util.Log.e("Ping", "unknown peer $who").let { }
+                val r = m.ping(dst, n, size)
+                android.util.Log.i("Ping", "to $dst hops=${m.hops(dst)} size=$size rtt_ms=" + r.joinToString(",") { it?.let { "%.0f".format(it) } ?: "lost" })
+            }.start()
         }
         i.getStringExtra("conv")?.let { Nav.reset(Screen.Chat(it)) }
         i.getStringExtra("game")?.let { Nav.go(Screen.Game(it)) }

@@ -60,6 +60,7 @@ RETRY_MAX = 60.0
 RELAY_MAX_AGE = 6 * 3600
 RELAY_MAX_ROWS = 5000
 TYPING_TTL = 6.0
+PING_APP = "~ping"  # K_RT app reserved for end-to-end round trips (Mesh.ping)
 
 # file transfer
 CHUNK_SIZE = 16000
@@ -215,6 +216,17 @@ class Link:
             self.mesh._link_down(self)
 
 
+def ping_summary(name: str, rtts: list) -> str:
+    ok = sorted(r * 1000 for r in rtts if r is not None)
+    lost = len(rtts) - len(ok)
+    if not ok:
+        return f"{name}: no reply ({len(rtts)} lost)"
+    med = ok[len(ok) // 2]
+    return f"{name}: {med:.0f} ms median (min {ok[0]:.0f}, max {ok[-1]:.0f})" + (
+        f", {lost}/{len(rtts)} lost" if lost else ""
+    )
+
+
 class Mesh:
     def __init__(
         self,
@@ -251,6 +263,7 @@ class Mesh:
         self.files: dict[bytes, FileRecord] = {}
         self._serve_q: list[tuple[str, bytes, int]] = []  # (requester, file_id, idx)
         self.typing: dict[tuple[str, str], float] = {}  # (conv, node) -> until
+        self._pings: dict[str, list] = {}  # session -> [event, sent, rtt]
         self.auto_download_max = AUTO_DOWNLOAD_MAX
         self.stats = defaultdict(int)
         self.blocked: set[str] = storage.blocked()
@@ -1100,6 +1113,9 @@ class Mesh:
             if same_name and old not in self.links:
                 self._supersede(old, new, announce=False)
         elif k == C.K_RT:
+            if m.get("a") == PING_APP:
+                self._on_ping(src, str(m.get("s")), m.get("b"), body.blob)
+                return
             self._emit(
                 "rt", src, str(m.get("a")), str(m.get("s")), m.get("b"), body.blob
             )
@@ -1706,6 +1722,39 @@ class Mesh:
         """Unreliable, low-latency datagram (real-time games). May be lost."""
         dsts = to if to is not None else self.conv_members(conv)
         self._send_body(dsts, C.Body(C.K_RT, {"a": app, "s": session, "b": body}, blob))
+
+    def ping(
+        self, dst: str, count: int = 5, size: int = 0, timeout: float = 3.0
+    ) -> list[float | None]:
+        """End-to-end round trips (seconds; None = lost) over the same
+        unreliable real-time path games use, relays included. `size` pads
+        each datagram to measure larger game updates."""
+        out: list[float | None] = []
+        for _ in range(count):
+            sid = os.urandom(6).hex()
+            ev = threading.Event()
+            with self.lock:
+                self._pings[sid] = [ev, time.monotonic(), None]
+            self._send_body(
+                [dst],
+                C.Body(C.K_RT, {"a": PING_APP, "s": sid, "b": "ping"}, b"\0" * size),
+            )
+            ev.wait(timeout)
+            with self.lock:
+                out.append(self._pings.pop(sid)[2])
+        return out
+
+    def _on_ping(self, src: str, sid: str, what, blob: bytes) -> None:
+        if what == "ping":
+            self._send_body(
+                [src], C.Body(C.K_RT, {"a": PING_APP, "s": sid, "b": "pong"}, blob)
+            )
+        elif what == "pong":
+            with self.lock:
+                p = self._pings.get(sid)
+                if p and p[2] is None:
+                    p[2] = time.monotonic() - p[1]
+                    p[0].set()
 
     # ------------------------------------------------------------------ maintenance
 
