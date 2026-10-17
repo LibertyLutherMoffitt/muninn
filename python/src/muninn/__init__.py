@@ -1,3 +1,3 @@
 """Muninn — encrypted Bluetooth mesh chat."""
 
-__version__ = "0.8.0"  # bumped by tools/release.sh (with pyproject.toml and flake.nix)
+__version__ = "0.9.0"  # bumped by tools/release.sh (with pyproject.toml and flake.nix)

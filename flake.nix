@@ -71,7 +71,7 @@
 
         muninn-linux = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn";
-          version = "0.8.0";
+          version = "0.9.0";
           src = ./python;
           pyproject = true;
 
@@ -101,7 +101,7 @@
 
         muninn-gui = pkgs.python3Packages.buildPythonApplication {
           pname = "muninn-gui";
-          version = "0.8.0";
+          version = "0.9.0";
           src = ./python;
           pyproject = true;
 
@@ -141,7 +141,7 @@
         # (`muninn --api`); the wrapper points it at the packaged one.
         muninn-tea = pkgs.buildGoModule rec {
           pname = "muninn-tea";
-          version = "0.8.0";
+          version = "0.9.0";
           src = ./tea;
           vendorHash = "sha256-oJXQAoJBGWsZ6PSEjDm0zYU5gYxkXvk3vVADybhRXBc=";
           ldflags = ["-s" "-w" "-X main.version=${version}"];
