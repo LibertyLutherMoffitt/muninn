@@ -4,14 +4,16 @@
 S=${MUNINN_LAB:-/tmp/muninn-tea-lab}; mkdir -p "$S"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export PYTHONPATH=$ROOT/python/src
+# QUIET=1: bots that don't echo/react/play (for screenshots and demos)
+if [ -n "$QUIET" ]; then BOB=""; CAROL=""; else BOB="--echo --react --play"; CAROL="--echo"; fi
 case "$1" in
 start)
   rm -rf "$S/ta"; mkdir -p "$S/ta"
   (cd "$ROOT/tea" && go build -o "$S/ta/muninn-tea" .) || exit 1
   python -m muninn.sim.hub --port 7450 > "$S/ta/hub.log" 2>&1 & echo $! > "$S/ta/pids"
   sleep 1.5
-  MUNINN_SIM=127.0.0.1:7450 python -m muninn.bot --name bob --pos 1,0 --echo --react --control 7551 --data "$S/ta/bob" > "$S/ta/bob.log" 2>&1 & echo $! >> "$S/ta/pids"
-  MUNINN_SIM=127.0.0.1:7450 python -m muninn.bot --name carol --pos 0,1 --echo --control 7552 --data "$S/ta/carol" > "$S/ta/carol.log" 2>&1 & echo $! >> "$S/ta/pids"
+  MUNINN_SIM=127.0.0.1:7450 python -m muninn.bot --name bob --pos 1,0 $BOB --control 7551 --data "$S/ta/bob" > "$S/ta/bob.log" 2>&1 & echo $! >> "$S/ta/pids"
+  MUNINN_SIM=127.0.0.1:7450 python -m muninn.bot --name carol --pos 0,1 $CAROL --control 7552 --data "$S/ta/carol" > "$S/ta/carol.log" 2>&1 & echo $! >> "$S/ta/pids"
   tmux -L muninn-tea new-session -d -s tea -x "${COLS:-120}" -y "${ROWS:-34}" \
     "MUNINN_SIM=127.0.0.1:7450 MUNINN_DATA=$S/ta/me MUNINN_NAME=${NAME-me} MUNINN_CORE='python -m muninn.cli' PYTHONPATH=$PYTHONPATH TERM=xterm-256color COLORTERM=truecolor $S/ta/muninn-tea 2> $S/ta/tea.err"
   ;;

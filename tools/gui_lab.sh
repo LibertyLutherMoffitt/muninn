@@ -14,6 +14,8 @@ S=${MUNINN_LAB:-/tmp/muninn-gui-lab}
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH=$ROOT/python/src DISPLAY=${MUNINN_LAB_DISPLAY:-:97}
 mkdir -p "$S/gl"
+# QUIET=1: bots that don't echo/react/play (for screenshots and demos)
+if [ -n "$QUIET" ]; then BOB=""; CAROL=""; else BOB="--echo --react --play"; CAROL="--echo"; fi
 case "$1" in
 start)
   "$0" stop >/dev/null 2>&1
@@ -21,9 +23,9 @@ start)
   Xvfb "$DISPLAY" -screen 0 "${MUNINN_LAB_SIZE:-1280x800}x24" >/dev/null 2>&1 & echo $! >> "$S/gl/pids"
   python -m muninn.sim.hub --port 7440 --decoys 30 > "$S/gl/hub.log" 2>&1 & echo $! >> "$S/gl/pids"
   sleep 1.5
-  MUNINN_SIM=127.0.0.1:7440 python -m muninn.bot --name bob --pos 1,0 --echo --react --play \
+  MUNINN_SIM=127.0.0.1:7440 python -m muninn.bot --name bob --pos 1,0 $BOB \
     --control 7541 --data "$S/gl/bob" > "$S/gl/bob.log" 2>&1 & echo $! >> "$S/gl/pids"
-  MUNINN_SIM=127.0.0.1:7440 python -m muninn.bot --name carol --pos 5,0 --echo \
+  MUNINN_SIM=127.0.0.1:7440 python -m muninn.bot --name carol --pos 5,0 $CAROL \
     --control 7542 --data "$S/gl/carol" > "$S/gl/carol.log" 2>&1 & echo $! >> "$S/gl/pids"
   # private D-Bus: tray icons / notifications must not land on the host's desktop
   DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent \

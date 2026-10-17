@@ -184,6 +184,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
   progress, emoji completion, toasts, spring scrolling, narrow layout. Drives
   the Python core via `muninn --api` (stdio JSON, `api.py`), so no protocol
   port. No games. Tests: Go unit tests + tmux end-to-end (`test_tea.py`).
+- [ ] **Clickable links**: URLs in messages are plain text everywhere today —
+  you have to copy and paste them. Make them tappable/clickable on all
+  clients (GUI: open in browser; Android: open intent; Bubble Tea / TUI:
+  OSC 8 hyperlinks) and long-press / right-click to copy.
 - [ ] (later — everyone updates a week before the trip) **Protocol versioning** (`CAPS` / feature
   bits in HELLO): today a v2 node refuses any other version outright, so a
   friend who hasn't updated can't talk to you mid-flight. Make HELLO carry

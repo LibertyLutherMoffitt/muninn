@@ -2,13 +2,15 @@
 # Terminal client lab: hub + 2 bots + the TUI in a detached tmux session.
 # tools/tui_lab.sh start | keys <tmux keys...> | shot | stop
 S=${MUNINN_LAB:-/tmp/muninn-tui-lab}; mkdir -p "$S"; cd "$(dirname "$0")/../python"; export PYTHONPATH=$PWD/src
+# QUIET=1: bots that don't echo/react/play (for screenshots and demos)
+if [ -n "$QUIET" ]; then BOB=""; CAROL=""; else BOB="--echo --react --play"; CAROL="--echo"; fi
 case "$1" in
 start)
   rm -rf $S/tl; mkdir -p $S/tl
   python -m muninn.sim.hub --port 7430 > $S/tl/hub.log 2>&1 & echo $! > $S/tl/pids
   sleep 1.5
-  MUNINN_SIM=127.0.0.1:7430 python -m muninn.bot --name bob --pos 1,0 --echo --react --control 7531 --data $S/tl/bob > $S/tl/bob.log 2>&1 & echo $! >> $S/tl/pids
-  MUNINN_SIM=127.0.0.1:7430 python -m muninn.bot --name carol --pos 5,0 --echo --data $S/tl/carol > $S/tl/carol.log 2>&1 & echo $! >> $S/tl/pids
+  MUNINN_SIM=127.0.0.1:7430 python -m muninn.bot --name bob --pos 1,0 $BOB --control 7531 --data $S/tl/bob > $S/tl/bob.log 2>&1 & echo $! >> $S/tl/pids
+  MUNINN_SIM=127.0.0.1:7430 python -m muninn.bot --name carol --pos 5,0 $CAROL --control 7532 --data $S/tl/carol > $S/tl/carol.log 2>&1 & echo $! >> $S/tl/pids
   tmux -L muninn new-session -d -s tui -x 110 -y 30 "MUNINN_SIM=127.0.0.1:7430 MUNINN_DATA=$S/tl/me MUNINN_NAME=me PYTHONPATH=$PYTHONPATH python -m muninn.cli 2> $S/tl/tui.err"
   ;;
 keys) shift; tmux -L muninn send-keys -t tui "$@" ;;

@@ -270,6 +270,15 @@ def start_control(node: Node, reg: GameRegistry, port: int) -> None:
         if cmd == "name":
             mesh.set_name(c["name"])
             return {}
+        if cmd == "react":  # react to the newest message from someone
+            conv = dm_conv(peer(c["to"])) if c.get("to") else group(c["group"]).conv
+            last = [
+                m for m in mesh.storage.load_history(conv, 50) if m.sender != mesh.me
+            ]
+            if not last:
+                raise ValueError("nothing to react to")
+            mesh.react(conv, last[-1].msg_id, c["emoji"])
+            return {}
         if cmd == "linkcode":
             return {"code": mesh.link_code()}
         if cmd == "link":

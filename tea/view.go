@@ -356,7 +356,7 @@ func (m *Model) bubble(x Msg, group bool, maxW, width int, selected bool) string
 	if x.Mine {
 		return lipgloss.PlaceHorizontal(width-1, lipgloss.Right, box)
 	}
-	return " " + box
+	return " " + strings.ReplaceAll(box, "\n", "\n ") // a gutter on every line, not just the first
 }
 
 func (m *Model) emptyState(width int, icon, title, sub string) string {
