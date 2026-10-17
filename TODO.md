@@ -155,8 +155,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · **P0..P3** priority.
 
 ### 2.6d Ideas (2026-10-16, nearer the backlog)
 - [x] Extensive game testing, especially end/win conditions of every game (tools/gamecheck.py + hand-built end positions).
-- [ ] Spectators: everyone in a group can watch a 2-player game live.
-- [ ] Easy game import (pick a .js on desktop/phone) and one-tap "send this
+- [x] Spectators: everyone in a group can watch a 2-player game live.
+- [x] Easy game import (pick a .js on desktop/phone) and one-tap "send this
   game to …" so the code spreads through Muninn itself.
 - [x] GAME_API docs written for AIs (games/README.md, example kept valid by a test): one self-contained document with the
   protocol, plugin contract, canvas subset, examples and a checklist, so a

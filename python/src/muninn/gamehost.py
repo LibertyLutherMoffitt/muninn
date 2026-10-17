@@ -244,7 +244,14 @@ class GameRegistry:
             "endType": ended[0].type if ended else "",
             "me": me,
             "amPlayer": me in (players if started else joined),
-            "invitedMe": me != creator and me not in joined and me not in declined,
+            # a full or running game can still be watched, not joined
+            "invitedMe": me != creator
+            and me not in joined
+            and me not in declined
+            and not started
+            and not withdrawn
+            and len(joined) < mx,
+            "spectator": started and me not in players,
             "names": {p: self.mesh.display_name(p) for p in set(joined) | {me}},
             "moves": [
                 {"seq": e.seq, "sender": e.sender, "m": (e.body or {}).get("m")}
@@ -318,5 +325,10 @@ class GameRegistry:
     def rt(self, session: str, body) -> None:
         info = self.session_info(session)
         if info:
-            to = [p for p in info["players"] if p != self.mesh.node_id]
+            # everyone in the chat, so watchers see real-time games live too
+            to = [
+                p
+                for p in self.mesh.conv_members(info["conv"])
+                if p != self.mesh.node_id
+            ]
             self.mesh.rt_send(info["conv"], info["app"], session, body, to=to)

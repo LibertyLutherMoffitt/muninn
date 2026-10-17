@@ -124,7 +124,9 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
             "joined" to joined, "players" to shown, "declined" to declined, "started" to started,
             "ended" to ended.isNotEmpty(), "endedBy" to (ended.firstOrNull()?.sender ?: ""),
             "endType" to (ended.firstOrNull()?.type ?: ""), "me" to me, "amPlayer" to (me in shown),
-            "invitedMe" to (me != creator && me !in joined && me !in declined), "names" to names,
+            // a full or running game can still be watched, not joined
+            "invitedMe" to (me != creator && me !in joined && me !in declined && !started && !withdrawn && joined.size < mx),
+            "spectator" to (started && me !in players), "names" to names,
             "moves" to moves.map { mapOf("seq" to it.seq, "sender" to it.sender, "m" to (it.body as? Map<String, Any?>)?.get("m")) },
             "status" to status, "withdrawn" to withdrawn, "result" to result, "ts" to (evs.lastOrNull()?.ts ?: 0L),
         )
@@ -184,7 +186,7 @@ class GameHost(private val mesh: Mesh, private val bundled: () -> Map<String, St
     fun rt(session: String, body: Any?) {
         val info = sessionInfo(session)
         if (info.isEmpty()) return
-        val to = (info["players"] as List<String>).filter { it != mesh.nodeId }
+        val to = mesh.convMembers(info.str("conv")).filter { it != mesh.nodeId } // watchers see it live too
         mesh.rtSend(info.str("conv"), info.str("app"), session, body, to = to)
     }
 }

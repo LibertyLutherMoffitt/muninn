@@ -66,7 +66,7 @@
   }
   function report() {
     var st = status();
-    Android.status(JSON.stringify({ over: !!st.over, text: st.text || "", myTurn: myTurn(),
+    Android.status(JSON.stringify({ over: !!st.over, text: st.text || "", myTurn: myTurn(), spectator: !!info.spectator,
                                     realtime: !!(game && game.tick) }));
   }
   function replay() {

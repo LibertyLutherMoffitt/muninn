@@ -168,7 +168,8 @@ Rectangle {
                                         + " — " + root.info.status)
                 : root.info.ended ? root.info.status
                 : root.st.over ? root.st.text
-                : (root.st.text || "") + (root.myTurn() ? "  ·  your move" : "  ·  waiting for opponent")
+                : (root.st.text || "") + (root.info.spectator ? "  ·  👀 watching"
+                                         : root.myTurn() ? "  ·  your move" : "  ·  waiting for opponent")
         }
 
         RowLayout {

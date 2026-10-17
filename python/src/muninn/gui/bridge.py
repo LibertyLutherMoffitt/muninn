@@ -66,6 +66,7 @@ class ChatBridge(QObject):
     messageSent = Signal()  # the chat view jumps to the bottom
     removeRequested = Signal(list, str)  # convs, how — QML asks to confirm
     trayShowRequested = Signal()
+    gameImportRequested = Signal()
     keepRunningChanged = Signal()
     typingChanged = Signal()
     filePickRequested = Signal()
@@ -523,6 +524,8 @@ class ChatBridge(QObject):
         if r["fileState"] == "complete":
             if r["isImage"]:
                 self.imageViewRequested.emit(r["fileUrl"])
+            elif r["fileName"].endswith(".js"):  # a game: clicking installs it
+                self.installGame(r["msgId"])
             else:
                 QDesktopServices.openUrl(QUrl(r["fileUrl"]))
         elif r["fileState"] in ("offered", "failed"):
@@ -804,10 +807,23 @@ class ChatBridge(QObject):
             self.errorOccurred.emit("Download the game file first")
             return
         try:
-            gid = self.games.install(QUrl(r["fileUrl"]).toLocalFile())
-            self.notify.emit(f"installed game “{gid}”")
+            self._install_game_file(QUrl(r["fileUrl"]).toLocalFile())
         except ValueError as e:
             self.errorOccurred.emit(str(e))
+
+    def _install_game_file(self, path: str) -> None:
+        gid = self.games.install(path)
+        name = next((g["name"] for g in self.games.catalog() if g["id"] == gid), gid)
+        self.notify.emit(f"installed {name} — :game {gid} to play")
+
+    @Slot(str)
+    def importGame(self, path: str) -> None:
+        try:
+            self._install_game_file(
+                QUrl(path).toLocalFile() if path.startswith("file:") else path
+            )
+        except (OSError, ValueError) as e:
+            self.errorOccurred.emit(f"not a Muninn game: {e}")
 
     # ------------------------------------------------------------------ commands
 
@@ -840,6 +856,7 @@ class ChatBridge(QObject):
         "game",
         "games",
         "scores",
+        "importgame",
         "sharegame",
         "find",
         "background",
@@ -898,6 +915,10 @@ class ChatBridge(QObject):
         (":emoji", "emoji picker (Ctrl+E). :shortcodes: expand on send"),
         (":game [name] [opt=value]", "start a game in this conversation"),
         (":games", "games in this conversation"),
+        (
+            ":importgame [path]",
+            "install a game file (.js) — or click a game someone sent",
+        ),
         (":scores", "who won how many of each game (this chat, or all chats)"),
         (":sharegame <name>", "send a game's code to this conversation"),
         (":list", "conversations"),
@@ -1164,6 +1185,11 @@ class ChatBridge(QObject):
                     ],
                 )
             self.startGame(args[0], self._active, opts)
+        elif head == "importgame":
+            if args:
+                self.importGame(os.path.expanduser(" ".join(args)))
+            else:
+                self.gameImportRequested.emit()
         elif head == "scores":
             board = self.games.scores(self._active or None)
             where = self._conv_title(self._active) if self._active else "all chats"

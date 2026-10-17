@@ -20,6 +20,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.material3.TextButton
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -382,7 +383,11 @@ private fun Bubble(m: StoredMessage, me: String, showSender: Boolean, all: List<
             shape = RoundedCornerShape(16.dp, 16.dp, if (out) 4.dp else 16.dp, if (out) 16.dp else 4.dp),
             color = if (out) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
             modifier = Modifier.widthIn(max = 300.dp).combinedClickable(onClick = {
-                if (m.kind == "file") openFile(ctx, m) }, onLongClick = onLong),
+                if (m.kind == "file") {
+                    val rec = Runtime.node?.mesh?.files?.get(m.meta["f"]?.toString() ?: "")
+                    if (rec?.state == "complete" && rec.name.endsWith(".js")) installGame(File(rec.path))  // tap = install
+                    else openFile(ctx, m)
+                } }, onLongClick = onLong),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 if (showSender) Text(mesh?.displayName(m.sender) ?: m.sender, color = MaterialTheme.colorScheme.primary,
@@ -459,7 +464,7 @@ private fun FileContent(m: StoredMessage) {
             Column(Modifier.widthIn(max = 200.dp)) {
                 Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
                 Text(human(size) + " · " + when (state) {
-                    "complete" -> if (name.endsWith(".js")) "long-press → install game" else "tap to open"
+                    "complete" -> if (name.endsWith(".js")) "tap to install this game" else "tap to open"
                     "downloading" -> "downloading"
                     else -> "tap to download"
                 }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -556,8 +561,19 @@ private fun StickerSheet(onPick: (File) -> Unit) {
     }
 }
 
+/** Install a game plugin file (checks the header; the code also travels in invites). */
+fun installGame(f: File) {
+    runCatching { Runtime.games!!.install(f) }
+        .onSuccess { id ->
+            val name = Runtime.games?.catalog()?.firstOrNull { it.id == id }?.name ?: id
+            Runtime.toast("Installed $name — find it under 🎮"); Runtime.bump()
+        }
+        .onFailure { Runtime.toast("Not a Muninn game: ${it.message}") }
+}
+
 @Composable
 private fun GamesSheet(conv: String, onDone: () -> Unit) {
+    val ctx = LocalContext.current
     val tick by Runtime.tick.collectAsState()
     val catalog by produceState(emptyList<com.muninn.core.GameHost.Meta>()) {
         value = withContext(Dispatchers.IO) { Runtime.games?.catalog() ?: emptyList() }
@@ -627,9 +643,21 @@ private fun GamesSheet(conv: String, onDone: () -> Unit) {
         }
         if (catalog.isEmpty()) Text("No games installed", Modifier.padding(20.dp))
         HorizontalDivider()
+        val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri ?: return@rememberLauncherForActivityResult
+            scope.launch(Dispatchers.IO) {
+                runCatching {
+                    val f = File(ctx.cacheDir, "import.js")
+                    ctx.contentResolver.openInputStream(uri)!!.use { i -> f.outputStream().use { i.copyTo(it) } }
+                    installGame(f)
+                }.onFailure { Runtime.toast("Not a Muninn game: ${it.message}") }
+            }
+        }
+        TextButton(onClick = { picker.launch(arrayOf("*/*")) }, modifier = Modifier.padding(horizontal = 8.dp)) {
+            Text("📥  Import a game file…")
+        }
         Text("Share a game's code (they can install it)", style = MaterialTheme.typography.titleSmall,
             modifier = Modifier.padding(16.dp, 8.dp))
-        val ctx = LocalContext.current
         catalog.forEach { g ->
             Text("${g.icon}  ${g.id}.js", modifier = Modifier.fillMaxWidth().clickable {
                 scope.launch(Dispatchers.IO) {

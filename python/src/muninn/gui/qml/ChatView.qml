@@ -289,7 +289,7 @@ Item {
                                             color: Theme.textMuted; font.pixelSize: 10
                                             text: model.fileSize + " · " + (
                                                 model.fileState === "complete" ? (model.fileName.endsWith(".js")
-                                                    ? "right-click → install game" : "click to open")
+                                                    ? "click to install this game" : "click to open")
                                                 : model.fileState === "downloading"
                                                     ? "downloading " + Math.round(model.fileProgress * 100) + "%"
                                                     : "click to download")

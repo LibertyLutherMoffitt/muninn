@@ -650,7 +650,7 @@ fun GameScreen(session: String) {
                                 val s = Json.obj(json)
                                 post {
                                     over = s["over"] == true
-                                    status = (s["text"] as? String ?: "") + if (!over) { if (s["myTurn"] == true) "  ·  your move" else "  ·  waiting" } else ""
+                                    status = (s["text"] as? String ?: "") + if (!over) { if (s["spectator"] == true) "  ·  👀 watching" else if (s["myTurn"] == true) "  ·  your move" else "  ·  waiting" } else ""
                                 }
                             }
                         }, "Android")

@@ -288,6 +288,13 @@ ApplicationWindow {
     }
 
     FileDialog {
+        id: gameDialog
+        title: "Install a Muninn game"
+        nameFilters: ["Muninn games (*.js)", "All files (*)"]
+        onAccepted: bridge.importGame(selectedFile.toString())
+    }
+
+    FileDialog {
         id: fileDialog
         title: "Send a file"
         fileMode: FileDialog.OpenFiles
@@ -449,6 +456,7 @@ ApplicationWindow {
             if (!cmdPalette.visible) cmdPalette.open("")
         }
         function onFilePickRequested() { fileDialog.open() }
+        function onGameImportRequested() { gameDialog.open() }
         function onEmojiPickerRequested(mode) { emojiPicker.open(mode, "") }
         function onImageViewRequested(url) { imageViewer.open(url) }
         function onGameOpenRequested(sid) { gameView.open(sid) }

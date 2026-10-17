@@ -475,3 +475,24 @@ def test_readme_example_game_is_valid(tmp_path):
         timeout=120,
     )
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_group_members_can_watch_a_two_player_game(lab):
+    from muninn.gamehost import GameRegistry
+    from muninn.mesh import group_conv
+    from muninn.sim.lab import wait_until
+
+    a, b, c = (lab.node(n, p) for n, p in (("a", (0, 0)), ("b", (1, 0)), ("c", (0, 1))))
+    wait_until(lambda: len(a.mesh.connected()) == 2, 30)
+    gid = a.mesh.create_group("lounge", [b.node_id, c.node_id])
+    wait_until(lambda: gid in b.mesh.groups and gid in c.mesh.groups, 20)
+    ga, gb, gc = GameRegistry(a), GameRegistry(b), GameRegistry(c)
+    sid = ga.invite(group_conv(gid), "tictactoe")
+    wait_until(lambda: gb.session_info(sid).get("invitedMe"), 15)
+    gb.act(sid, "join", {})
+    wait_until(lambda: gc.session_info(sid).get("started"), 15)
+    ga.act(sid, "move", 4)
+    wait_until(lambda: len(gc.session_info(sid)["moves"]) == 1, 15)  # c sees the moves
+    info = gc.session_info(sid)
+    assert info["spectator"] and not info["invitedMe"] and not info["amPlayer"]
+    assert info["players"] == [a.node_id, b.node_id]
