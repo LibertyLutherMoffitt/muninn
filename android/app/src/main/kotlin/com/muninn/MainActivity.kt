@@ -90,6 +90,20 @@ class MainActivity : ComponentActivity() {
             Runtime.stop()
             startRadio()
         }
+        // test hooks (debug builds only): adb shell am start … --es backup_import /data/…/b.zip --es backup_pw x
+        if (BuildConfig.DEBUG) {
+            val pw = i.getStringExtra("backup_pw")
+            i.getStringExtra("backup_export")?.let { path ->
+                Thread { runCatching { Backup.export(this, android.net.Uri.fromFile(java.io.File(path)), pw) }
+                    .onSuccess { android.util.Log.i("Backup", "exported $it to $path") }
+                    .onFailure { android.util.Log.e("Backup", "export failed", it) } }.start()
+            }
+            i.getStringExtra("backup_import")?.let { path ->
+                Thread { runCatching { Backup.import(this, android.net.Uri.fromFile(java.io.File(path)), pw) }
+                    .onSuccess { android.util.Log.i("Backup", "imported $it as ${Runtime.node?.nodeId}") }
+                    .onFailure { android.util.Log.e("Backup", "import failed", it) } }.start()
+            }
+        }
         i.getStringExtra("conv")?.let { Nav.reset(Screen.Chat(it)) }
         i.getStringExtra("game")?.let { Nav.go(Screen.Game(it)) }
     }

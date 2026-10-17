@@ -490,6 +490,20 @@ class Node:
         out.append(("ok", "Version", __version__ + " — make sure friends run the same"))
         return out
 
+    def export_backup(self, path: str, password: str | None = None) -> dict:
+        from muninn import backup
+
+        return backup.export(self.storage, path, password)
+
+    def import_backup(self, path: str, password: str | None = None) -> dict:
+        """Merge a backup; {"added": {...}, "identity": bool} — restart if the
+        identity was restored."""
+        from muninn import backup
+
+        res = backup.import_(self.storage, path, password)
+        self.mesh.reload()
+        return res
+
     def _peer_addrs(self) -> list[str]:
         return sorted({a for _, a, _ in self.storage.load_transports()})
 

@@ -79,6 +79,8 @@ HELP = """\
 /sticker [name]            list or send a bundled/saved sticker GIF
 /members                   who's in this group and who's in range
 /mute  /unmute             silence the terminal bell for this chat
+/export [file] [pw=…]      back up your chats (pw= also saves your identity)
+/import <file> [pw=…]      add chats from a backup (pw= restores identity on a fresh install)
 /photos [compressed|original]  shrink photos before sending (default)
 /privacy [receipts|typing] [on|off]   send read receipts / typing indicators
 /doctor                    check everything before a flight
@@ -432,6 +434,38 @@ class ChatUI:
                     self.out(f"  {'blocked' if cmd == 'block' else 'forgot'} {name}")
                     if self.conv == "dm:" + nid:
                         self.conv = ""
+        elif cmd in ("export", "import"):
+            pw = next((a[3:] for a in args if a.startswith("pw=")), None)
+            rest = [a for a in args if not a.startswith("pw=")]
+            if cmd == "export":
+                path = (
+                    os.path.expanduser(rest[0])
+                    if rest
+                    else os.path.expanduser(
+                        f"~/muninn-backup-{time.strftime('%Y%m%d-%H%M')}.zip"
+                    )
+                )
+                counts = self.node.export_backup(path, pw)
+                self.out(
+                    f"  saved {counts['messages']} messages, {counts['files']} files to {path}"
+                    + (" (with your identity, password-protected)" if pw else "")
+                )
+            elif rest:
+                try:
+                    res = self.node.import_backup(os.path.expanduser(rest[0]), pw)
+                except (OSError, ValueError, KeyError) as e:
+                    self.out(f"! import: {e}")
+                    return True
+                a = res["added"]
+                self.out(
+                    f"  added {a.get('messages', 0)} messages, {a.get('peers', 0)} people, {a.get('groups', 0)} rooms"
+                )
+                if res["identity"]:
+                    self.out(
+                        "  identity restored — restart Muninn to continue as that person"
+                    )
+            else:
+                self.out("! usage: /import <backup.zip> [pw=password]")
         elif cmd == "photos":
             from muninn import media
 

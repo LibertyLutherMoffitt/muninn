@@ -325,6 +325,49 @@ class Storage:
             for r in rows
         ]
 
+    # --- backup (backup.py) ------------------------------------------------------
+
+    def export_rows(self, table: str, cols: list[str]) -> list[dict]:
+        sel = ", ".join('"left"' if c == "left" else c for c in cols)
+        return [dict(zip(cols, r)) for r in self._q(f"SELECT {sel} FROM {table}")]
+
+    def import_rows(self, table: str, cols: list[str], rows: list[dict]) -> int:
+        """INSERT OR IGNORE (existing rows win). Returns rows added."""
+        if not rows:
+            return 0
+        names = ", ".join('"left"' if c == "left" else c for c in cols)
+        sql = f"INSERT OR IGNORE INTO {table} ({names}) VALUES ({', '.join('?' * len(cols))})"
+        added = 0
+        with self._lock:
+            if self._closed:
+                return 0
+            c = self._conn
+            c.execute("BEGIN")
+            try:
+                for r in rows:
+                    added += c.execute(sql, tuple(r.get(k) for k in cols)).rowcount
+                c.execute("COMMIT")
+            except Exception:
+                c.execute("ROLLBACK")
+                raise
+        return added
+
+    def is_fresh(self) -> bool:
+        """No chats and nobody known yet (safe to take over an identity)."""
+        return not self._q("SELECT 1 FROM messages LIMIT 1") and not self._q(
+            "SELECT 1 FROM peers LIMIT 1"
+        )
+
+    def replace_identity(
+        self, privkey: bytes, node_id: str, name: str, name_ts: int
+    ) -> None:
+        self._x("DELETE FROM identity")
+        self._x(
+            "INSERT INTO identity (id, privkey, node_id, display_name, name_ts, created_at) "
+            "VALUES (0, ?, ?, ?, ?, ?)",
+            (privkey, node_id, name, name_ts, int(time.time())),
+        )
+
     # --- forgetting -------------------------------------------------------------
 
     def delete_conversation(self, conv: str) -> list[str]:

@@ -96,6 +96,50 @@ fun scoreLine(g: com.muninn.core.GameHost.Score?): String {
     return parts.joinToString(" · ")
 }
 
+// ---------------------------------------------------------------- backup
+
+@Composable
+fun BackupCard() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var password by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch(Dispatchers.IO) {
+            runCatching { Backup.export(ctx, uri, password.ifEmpty { null }) }
+                .onSuccess { (m, f) -> Runtime.toast("Saved $m messages and $f files" + if (password.isNotEmpty()) " (with your identity)" else "") }
+                .onFailure { Runtime.toast("Backup failed: ${it.message}") }
+            busy = false
+        }
+    }
+    val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch(Dispatchers.IO) {
+            runCatching { Backup.import(ctx, uri, password.ifEmpty { null }) }
+                .onSuccess { r -> Runtime.toast("Added ${r.messages} messages, ${r.people} people, ${r.rooms} rooms" +
+                    if (r.identity) " — you are now ${Runtime.node?.mesh?.name}" else "") }
+                .onFailure { Runtime.toast("Import failed: ${it.message}") }
+            busy = false
+        }
+    }
+    Text("Backup", style = MaterialTheme.typography.titleSmall)
+    Text("Save your chats and files to a file, or bring them back (also from the desktop app). With a password the " +
+        "backup also carries your identity, so a new phone can continue as you.",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    OutlinedTextField(password, { password = it }, singleLine = true, label = { Text("Password (optional)") },
+        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedButton(enabled = !busy, onClick = {
+            save.launch("muninn-backup-" + java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date()) + ".zip")
+        }) { Text("Back up") }
+        OutlinedButton(enabled = !busy, onClick = { open.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) }) { Text("Restore…") }
+        if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+    }
+}
+
 // ---------------------------------------------------------------- before the flight
 
 /** Pre-flight check (mirrors node.doctor on desktop): everything that keeps
@@ -576,6 +620,8 @@ fun SettingsScreen() {
                 }
                 Switch(checked = fullPhotos, onCheckedChange = { fullPhotos = it; p.edit().putBoolean("photo_original", it).apply() })
             }
+            HorizontalDivider()
+            BackupCard()
             HorizontalDivider()
             Text("Privacy", style = MaterialTheme.typography.titleSmall)
             val mesh = Runtime.node?.mesh

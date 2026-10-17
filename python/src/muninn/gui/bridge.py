@@ -922,6 +922,8 @@ class ChatBridge(QObject):
         "zoom",
         "photos",
         "theme",
+        "export",
+        "import",
         "sharegame",
         "find",
         "background",
@@ -1267,6 +1269,38 @@ class ChatBridge(QObject):
                     "usage: :zoom [percent]  (or Ctrl +/-/0)"
                 )
             self.setUiScale(pct / 100 if pct > 3 else pct)
+        elif head in ("export", "import"):
+            pw = next((a[3:] for a in args if a.startswith("pw=")), None)
+            rest = [a for a in args if not a.startswith("pw=")]
+            try:
+                if head == "export":
+                    path = (
+                        os.path.expanduser(rest[0])
+                        if rest
+                        else os.path.expanduser(
+                            f"~/muninn-backup-{time.strftime('%Y%m%d-%H%M')}.zip"
+                        )
+                    )
+                    counts = self.node.export_backup(path, pw)
+                    self.notify.emit(
+                        f"saved {counts['messages']} messages, {counts['files']} files → {path}"
+                    )
+                elif rest:
+                    res = self.node.import_backup(os.path.expanduser(rest[0]), pw)
+                    a = res["added"]
+                    self._peers.refresh()
+                    self.notify.emit(
+                        f"added {a.get('messages', 0)} messages, {a.get('peers', 0)} people, {a.get('groups', 0)} rooms"
+                        + (
+                            " — identity restored, restart Muninn"
+                            if res["identity"]
+                            else ""
+                        )
+                    )
+                else:
+                    self.errorOccurred.emit("usage: :import <backup.zip> [pw=password]")
+            except (OSError, ValueError, KeyError) as e:
+                self.errorOccurred.emit(f"{head}: {e}")
         elif head == "theme":
             choice = (
                 args[0] if args and args[0] in ("dark", "light", "system") else None

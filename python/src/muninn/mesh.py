@@ -295,6 +295,12 @@ class Mesh:
             if f.state == "downloading":
                 self.downloads[f.file_id] = Download(f)
 
+    def reload(self) -> None:
+        """Pick up rows added to storage behind our back (backup import)."""
+        with self.lock:
+            self._load()
+        self._emit("peers")
+
     def start(self) -> None:
         for target in (self._event_loop, self._maintenance_loop, self._serve_loop):
             t = threading.Thread(target=target, daemon=True, name=target.__name__)
